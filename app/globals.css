@@ -1971,6 +1971,10 @@ select:focus-visible {
     padding: 2px 12px 6px;
     overflow-x: auto;
     scrollbar-width: none;
+    touch-action: pan-x pan-y;
+    overscroll-behavior-x: contain;
+    overscroll-behavior-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .wall-filter::-webkit-scrollbar { display: none; }
@@ -2069,4 +2073,14 @@ select:focus-visible {
   .billing-card { gap: 13px; padding: 17px; border-radius: 18px; }
   .billing-amount strong { font-size: 1.55rem; }
   .pill { padding: 5px 8px; font-size: 0.7rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
 }
