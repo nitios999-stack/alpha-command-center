@@ -39,6 +39,7 @@ export type LineGroup = {
   id: string;
   siteId: string | null;
   groupName: string;
+  nameResolved: boolean;
   pictureUrl: string | null;
   lastSeenAt: string | null;
   source: "manual" | "webhook";
@@ -65,8 +66,6 @@ export type TemplateImportRow = {
   deadline: string;
   verificationPolicy?: "standard" | "reviewed" | "manual";
   lineGroupId?: string;
-  lineGroupName?: string;
-  linePictureUrl?: string;
 };
 
 export type TemplateSummary = {
@@ -167,13 +166,17 @@ function toOperationalSite(row: D1Row): OperationalSite {
 }
 
 function toLineGroup(row: D1Row): LineGroup {
+  const id = String(row.id);
+  const groupName = String(row.group_name);
+  const source = String(row.source ?? "manual") === "webhook" ? "webhook" : "manual";
   return {
-    id: String(row.id),
+    id,
     siteId: value(row, "site_id"),
-    groupName: String(row.group_name),
+    groupName,
+    nameResolved: source === "webhook" && !isPlaceholderLineGroupName(groupName, id),
     pictureUrl: value(row, "picture_url"),
     lastSeenAt: value(row, "last_seen_at"),
-    source: String(row.source ?? "manual") === "webhook" ? "webhook" : "manual",
+    source,
   };
 }
 
@@ -207,6 +210,11 @@ function pictureUrl(value?: string) {
   } catch {
     throw new Error("ลิงก์โลโก้ LINE ต้องเป็น https:// เท่านั้น");
   }
+}
+
+function isPlaceholderLineGroupName(groupName: string, groupId: string) {
+  const suffix = groupId.slice(-6);
+  return groupName === `LINE group ${suffix}` || groupName === `กลุ่ม LINE ${suffix}`;
 }
 
 export function bangkokNow() {
@@ -481,27 +489,31 @@ export async function addOperationalSite(input: { siteName: string; customerName
   await addAudit("operational_site", id, "created", input.actor, "เพิ่มจุดสำหรับตั้งอัตรา " + siteName);
 }
 
-export async function mapLineGroup(input: { siteId: string; groupId: string; groupName: string; pictureUrl?: string; actor: string }) {
+export async function mapLineGroup(input: { siteId: string; groupId: string; actor: string }) {
   await ensureDatabase();
   const siteId = input.siteId.trim();
   const groupId = input.groupId.trim();
-  const groupName = input.groupName.trim();
-  if (!siteId || !groupId || !groupName || groupId.length > 255 || groupName.length > 255) throw new Error("กรุณาระบุรหัสกลุ่มและชื่อกลุ่ม LINE ให้ครบ");
+  if (!siteId || !groupId || groupId.length > 255) throw new Error("กรุณาเลือกกลุ่ม LINE จากทะเบียนที่ระบบรับจาก LINE แล้ว");
   const db = database();
   const site = await db.prepare("SELECT site_name FROM operational_sites WHERE id = ? AND active = 1").bind(siteId).first<D1Row>();
   if (!site) throw new Error("ไม่พบจุดที่ต้องการผูกกลุ่ม LINE");
+  const registry = await db.prepare("SELECT group_name, picture_url, source FROM line_group_registry WHERE id = ?").bind(groupId).first<D1Row>();
+  const groupName = String(registry?.group_name ?? "").trim();
+  const source = String(registry?.source ?? "");
+  if (!registry || !groupName || source !== "webhook" || isPlaceholderLineGroupName(groupName, groupId)) {
+    throw new Error("กลุ่มนี้ยังไม่มีชื่อจริงจาก LINE กรุณารอ webhook หรือกดรีเฟรชทะเบียนกลุ่มก่อน");
+  }
   const existingMapping = await db.prepare("SELECT site_id, group_name FROM line_groups WHERE id = ?").bind(groupId).first<D1Row>();
   if (existingMapping && String(existingMapping.site_id) !== siteId) {
     throw new Error(`กลุ่ม LINE ${String(existingMapping.group_name ?? groupId)} ถูกผูกกับจุดอื่นแล้ว กรุณายกเลิกการผูกเดิมก่อน`);
   }
   const now = bangkokNow().iso;
-  const safePictureUrl = pictureUrl(input.pictureUrl);
+  const safePictureUrl = pictureUrl(value(registry, "picture_url") ?? undefined);
   await db.batch([
     db.prepare("DELETE FROM line_groups WHERE site_id = ? AND id != ?").bind(siteId, groupId),
     db.prepare("INSERT INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET site_id = excluded.site_id, group_name = excluded.group_name, picture_url = excluded.picture_url, updated_at = excluded.updated_at")
       .bind(groupId, siteId, groupName, safePictureUrl, now),
-    db.prepare("INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at) VALUES (?, ?, ?, NULL, 'manual', ?) ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), updated_at = excluded.updated_at")
-      .bind(groupId, groupName, safePictureUrl, now),
+    db.prepare("UPDATE line_group_registry SET updated_at = ? WHERE id = ?").bind(now, groupId),
   ]);
   await addAudit("line_group", groupId, "mapped", input.actor, `ผูกกลุ่ม LINE ${groupName} กับ ${String(site.site_name)}`);
 }
@@ -552,7 +564,7 @@ export async function updateLineGroupProfile(input: { groupId: string; groupName
   const avatar = pictureUrl(input.pictureUrl);
   if (!groupName && !avatar) return;
   const now = bangkokNow().iso;
-  await database().prepare("UPDATE line_group_registry SET group_name = COALESCE(?, group_name), picture_url = COALESCE(?, picture_url), updated_at = ? WHERE id = ?")
+  await database().prepare("UPDATE line_group_registry SET group_name = COALESCE(?, group_name), picture_url = COALESCE(?, picture_url), source = 'webhook', updated_at = ? WHERE id = ?")
     .bind(groupName || null, avatar, now, groupId).run();
 }
 
@@ -628,6 +640,8 @@ export async function importShiftTemplates(rows: TemplateImportRow[], actor: str
   const uniqueRows = new Map<string, TemplateImportRow>();
   const lineGroupBySite = new Map<string, { id: string; name: string; pictureUrl: string }>();
   const siteByLineGroup = new Map<string, string>();
+  const registryResult = await db.prepare("SELECT id, group_name, picture_url, source FROM line_group_registry").all<D1Row>();
+  const registryById = new Map((registryResult.results ?? []).map((row) => [String(row.id), row]));
 
   rows.forEach((raw, index) => {
     const siteName = raw.siteName?.trim() ?? "";
@@ -638,20 +652,22 @@ export async function importShiftTemplates(rows: TemplateImportRow[], actor: str
     const wave = raw.wave === "evening" ? "evening" : "morning";
     const verificationPolicy = raw.verificationPolicy === "manual" || raw.verificationPolicy === "reviewed" ? raw.verificationPolicy : "standard";
     const lineGroupId = raw.lineGroupId?.trim() ?? "";
-    const lineGroupName = raw.lineGroupName?.trim() ?? "";
-    const linePictureUrl = pictureUrl(raw.linePictureUrl) ?? "";
     if (!siteName || !customerName || !postName || !slotLabel || !/^\d{2}:\d{2}$/.test(deadline)) {
       throw new Error(`แถวที่ ${index + 2} มีข้อมูลไม่ครบหรือเวลาไม่ถูกต้อง`);
     }
-    if ((lineGroupName || linePictureUrl) && !lineGroupId) throw new Error(`แถวที่ ${index + 2} ระบุชื่อหรือโลโก้ LINE แต่ไม่มี line_group_id`);
-    if (lineGroupId && !lineGroupName) throw new Error(`แถวที่ ${index + 2} มี line_group_id แต่ไม่มี line_group_name`);
     const siteId = siteIdentifier(siteName);
     if (lineGroupId) {
+      const registry = registryById.get(lineGroupId);
+      const lineGroupName = String(registry?.group_name ?? "").trim();
+      const source = String(registry?.source ?? "");
+      if (!registry || !lineGroupName || source !== "webhook" || isPlaceholderLineGroupName(lineGroupName, lineGroupId)) {
+        throw new Error(`แถวที่ ${index + 2} ยังไม่พบชื่อจริงของกลุ่ม LINE ในทะเบียน webhook`);
+      }
       const alreadyMapped = lineGroupBySite.get(siteId);
       if (alreadyMapped && alreadyMapped.id !== lineGroupId) throw new Error(`จุด ${siteName} ผูกกับ LINE มากกว่า 1 กลุ่มในไฟล์เดียวกัน`);
       const linkedSite = siteByLineGroup.get(lineGroupId);
       if (linkedSite && linkedSite !== siteId) throw new Error(`กลุ่ม LINE ${lineGroupName} ถูกผูกซ้ำมากกว่า 1 จุด`);
-      lineGroupBySite.set(siteId, { id: lineGroupId, name: lineGroupName, pictureUrl: linePictureUrl });
+      lineGroupBySite.set(siteId, { id: lineGroupId, name: lineGroupName, pictureUrl: value(registry, "picture_url") ?? "" });
       siteByLineGroup.set(lineGroupId, siteId);
     }
     uniqueRows.set(templateIdentifier(siteId, wave, postName, slotLabel), {
@@ -664,8 +680,6 @@ export async function importShiftTemplates(rows: TemplateImportRow[], actor: str
       deadline,
       verificationPolicy,
       lineGroupId,
-      lineGroupName,
-      linePictureUrl,
     });
   });
 
@@ -687,8 +701,7 @@ export async function importShiftTemplates(rows: TemplateImportRow[], actor: str
     db.prepare("DELETE FROM line_groups WHERE site_id = ? AND id != ?").bind(siteId, group.id),
     db.prepare("INSERT INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET site_id = excluded.site_id, group_name = excluded.group_name, picture_url = excluded.picture_url, updated_at = excluded.updated_at")
       .bind(group.id, siteId, group.name, group.pictureUrl || null, now),
-    db.prepare("INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at) VALUES (?, ?, ?, NULL, 'manual', ?) ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), updated_at = excluded.updated_at")
-      .bind(group.id, group.name, group.pictureUrl || null, now),
+    db.prepare("UPDATE line_group_registry SET updated_at = ? WHERE id = ?").bind(now, group.id),
   ]);
   for (let offset = 0; offset < lineOperations.length; offset += 80) {
     await db.batch(lineOperations.slice(offset, offset + 80));

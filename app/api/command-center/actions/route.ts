@@ -23,8 +23,6 @@ type ActionPayload = {
   verificationPolicy?: "standard" | "reviewed" | "manual";
   rows?: TemplateImportRow[];
   groupId?: string;
-  groupName?: string;
-  pictureUrl?: string;
 };
 
 export async function POST(request: Request) {
@@ -67,8 +65,6 @@ export async function POST(request: Request) {
       await mapLineGroup({
         siteId: payload.siteId ?? "",
         groupId: payload.groupId ?? "",
-        groupName: payload.groupName ?? "",
-        pictureUrl: payload.pictureUrl,
         actor,
       });
     } else if (payload.type === "line_unmap") {

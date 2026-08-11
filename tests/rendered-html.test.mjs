@@ -81,9 +81,13 @@ test("keeps the command center database and product surface in source", async ()
   assert.match(commands, /sendLineConnectionTest/);
   assert.match(commands, /saveLineWebhookEvent/);
   assert.match(commands, /syncLineGroupsFromGateway/);
+  assert.match(commands, /nameResolved/);
   assert.match(page, /site-wall/);
   assert.match(page, /csvToTemplates/);
   assert.match(page, /lineGroupId/);
+  assert.match(page, /lineGroupLabel/);
+  assert.doesNotMatch(page, /lineMapGroupName|lineMapPictureUrl/);
+  assert.doesNotMatch(page, /line_group_name|line_picture_url/);
   assert.match(page, /LINE OA/);
   assert.match(page, /LINE Callback เชื่อมเข้าระบบโดยตรง/);
   assert.match(styles, /tile-line/);

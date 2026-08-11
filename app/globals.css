@@ -298,6 +298,31 @@ button:disabled {
   border-radius: 10px;
 }
 
+.modal-select {
+  min-height: 45px;
+  padding: 10px 12px;
+  color: var(--ink);
+  background: #fbfdfb;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.modal-select:focus-visible {
+  outline: 3px solid rgba(10, 91, 70, 0.18);
+  border-color: var(--forest);
+}
+
+.modal-help {
+  margin: -4px 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.modal-help.warning-text {
+  color: #8a5b00;
+}
+
 .modal-card input:focus-visible {
   outline: 3px solid rgba(10, 91, 70, 0.18);
   border-color: var(--forest);
