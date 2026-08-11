@@ -58,6 +58,8 @@ type LineIntegrationStatus = {
   gatewayConfigured: boolean;
   webhookPath: string;
   lastWebhookAt: string | null;
+  webhookAgeMinutes: number | null;
+  webhookStatus: "healthy" | "stale" | "never";
   receivedGroups: number;
   mappedGroups: number;
 };
@@ -272,23 +274,50 @@ export default function Home() {
   const [statusFilter, setStatusFilter] = useState<SiteStatus | "all">("all");
   const [templateRows, setTemplateRows] = useState<TemplateRow[]>([]);
   const [templateFileName, setTemplateFileName] = useState("");
+  const [lastLoadedAt, setLastLoadedAt] = useState<number | null>(null);
+  const [networkState, setNetworkState] = useState<"online" | "offline" | "error" | "auth">("online");
 
-  const loadDashboard = useCallback(async () => {
-    setLoading(true);
+  const loadDashboard = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
+    if (!silent) setLoading(true);
     try {
       const response = await fetch("/api/command-center", { cache: "no-store" });
-      const payload = (await response.json()) as DashboardData & { error?: string };
+      let payload: DashboardData & { error?: string };
+      try {
+        payload = (await response.json()) as DashboardData & { error?: string };
+      } catch {
+        throw new Error("ระบบตอบกลับไม่ครบ กรุณาลองใหม่");
+      }
+      if (response.status === 401) {
+        setNetworkState("auth");
+        setMessage("กรุณาเข้าสู่ระบบก่อนใช้งานศูนย์สั่งการ");
+        return;
+      }
       if (!response.ok) throw new Error(payload.error ?? "ไม่สามารถโหลดข้อมูลได้");
       setData(payload);
+      setLastLoadedAt(Date.now());
+      setNetworkState("online");
     } catch (error) {
+      setNetworkState(navigator.onLine === false ? "offline" : "error");
       setMessage(error instanceof Error ? error.message : "ไม่สามารถโหลดข้อมูลได้");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     queueMicrotask(() => { void loadDashboard(); });
+    const refreshTimer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void loadDashboard({ silent: true });
+    }, 30_000);
+    const markOnline = () => setNetworkState("online");
+    const markOffline = () => setNetworkState("offline");
+    window.addEventListener("online", markOnline);
+    window.addEventListener("offline", markOffline);
+    return () => {
+      window.clearInterval(refreshTimer);
+      window.removeEventListener("online", markOnline);
+      window.removeEventListener("offline", markOffline);
+    };
   }, [loadDashboard]);
 
   const visibleSlots = useMemo(
@@ -477,9 +506,12 @@ export default function Home() {
             <h1>Command Center</h1>
           </div>
         </div>
-        <div className="live-indicator">
+        <div className={"live-indicator " + networkState}>
           <span className="pulse" />
-          <span>อัปเดตจากระบบ {data?.now.time ?? "..."}</span>
+          <span>
+            {networkState === "offline" ? "ออฟไลน์ — ข้อมูลอาจไม่ล่าสุด" : networkState === "error" ? "เชื่อมต่อระบบไม่ได้" : networkState === "auth" ? "รอการเข้าสู่ระบบ" : `ข้อมูลล่าสุด ${data?.now.time ?? "..."}`}
+            {lastLoadedAt && networkState === "online" ? ` · ${new Intl.DateTimeFormat("th-TH", { hour: "2-digit", minute: "2-digit" }).format(lastLoadedAt)}` : ""}
+          </span>
         </div>
         <button className="mobile-refresh" onClick={() => void loadDashboard()} disabled={loading} aria-label="รีเฟรชข้อมูล">↻</button>
       </header>
@@ -524,6 +556,14 @@ export default function Home() {
             <article className="metric red"><span>ต้องจัดการ</span><strong>{stats.red}</strong><small>จุด</small></article>
             <article className="metric neutral"><span>ยืนยันกำลังแล้ว</span><strong>{stats.confirmed}</strong><small>ช่องกำลัง</small></article>
           </section>
+
+          {!loading && visibleSlots.length === 0 && (data?.templates[wave] ?? 0) > 0 && (
+            <div className="notice warning" role="status">
+              <span>!</span>
+              <div><strong>ยังไม่ได้สร้างแผง{wave === "morning" ? "ผลัดเช้า" : "ผลัดเย็น"}ของวันนี้</strong><small>ระบบยังไม่เปลี่ยนสถานะใด ๆ จนกว่าจะกดสร้างแผงวันนี้</small></div>
+              <button className="small-primary" onClick={generateToday} disabled={busyId === "generate-today"}>สร้างแผงวันนี้</button>
+            </div>
+          )}
 
           <section className="section-heading">
             <div>
@@ -753,9 +793,9 @@ export default function Home() {
               <h2>ทะเบียนกลุ่ม และการควบคุมการเชื่อมต่อ</h2>
               <p>กลุ่มที่ส่ง webhook ที่ตรวจสอบลายเซ็นแล้วจะเข้าทะเบียนอัตโนมัติ จากนั้นผู้จัดการเลือกผูกกลุ่มกับจุดได้เอง ระบบไม่เก็บข้อความในกลุ่ม และไม่ส่งสถานะกำลังภายในออกไป</p>
             </div>
-            <div className={data?.lineIntegration.lastWebhookAt ? "line-ready" : "line-not-ready"}>
-              <strong>{data?.lineIntegration.lastWebhookAt ? "รับ LINE webhook แล้ว" : data?.lineIntegration.configured ? "รอ webhook จากกลุ่ม" : "กำลังเชื่อมต่อ LINE OA"}</strong>
-              <span>Webhook: {data?.lineIntegration.webhookPath ?? "/api/line/webhook"}</span>
+            <div className={data?.lineIntegration.webhookStatus === "healthy" ? "line-ready" : data?.lineIntegration.webhookStatus === "stale" ? "line-stale" : "line-not-ready"}>
+              <strong>{data?.lineIntegration.webhookStatus === "healthy" ? "รับ LINE webhook แล้ว" : data?.lineIntegration.webhookStatus === "stale" ? "Webhook เงียบเกิน 24 ชั่วโมง" : data?.lineIntegration.configured ? "รอ webhook จากกลุ่ม" : "กำลังเชื่อมต่อ LINE OA"}</strong>
+              <span>Webhook: {data?.lineIntegration.webhookPath ?? "/api/line/webhook"}{data?.lineIntegration.webhookAgeMinutes !== null && data?.lineIntegration.webhookAgeMinutes !== undefined ? ` · ล่าสุด ${data.lineIntegration.webhookAgeMinutes} นาทีที่แล้ว` : ""}</span>
             </div>
           </div>
 

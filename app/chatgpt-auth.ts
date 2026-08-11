@@ -39,6 +39,26 @@ export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
   };
 }
 
+/**
+ * API routes must fail closed when the Sites identity headers are absent.  The
+ * webhook endpoint intentionally does not use this helper because LINE must
+ * be able to call it without a ChatGPT session.
+ */
+export function apiAuthRequiredResponse() {
+  return Response.json(
+    {
+      error: "ต้องเข้าสู่ระบบก่อนใช้งานศูนย์สั่งการ",
+      code: "AUTH_REQUIRED",
+    },
+    {
+      status: 401,
+      headers: {
+        "Cache-Control": "no-store",
+      },
+    },
+  );
+}
+
 export async function requireChatGPTUser(
   returnTo: string,
 ): Promise<ChatGPTUser> {

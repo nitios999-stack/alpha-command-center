@@ -134,6 +134,13 @@ button:disabled {
   box-shadow: 0 0 0 5px rgba(33, 164, 110, 0.13);
 }
 
+.live-indicator.offline .pulse,
+.live-indicator.error .pulse,
+.live-indicator.auth .pulse {
+  background: var(--red);
+  box-shadow: 0 0 0 5px rgba(185, 55, 50, 0.13);
+}
+
 .hero {
   justify-content: space-between;
   gap: 28px;
@@ -231,6 +238,23 @@ button:disabled {
   color: inherit;
   background: transparent;
   font-size: 1.2rem;
+}
+
+.notice.warning {
+  align-items: center;
+  color: #725813;
+  background: #fff8e5;
+  border-color: #f0d58b;
+}
+
+.notice.warning > div {
+  display: grid;
+  flex: 1;
+  gap: 3px;
+}
+
+.notice.warning small {
+  color: #806d42;
 }
 
 .metrics {
@@ -1380,6 +1404,7 @@ button:disabled {
 .line-control-hero p:not(.eyebrow) { max-width: 720px; margin: 12px 0 0; color: #d3eee2; line-height: 1.65; }
 
 .line-ready,
+.line-stale,
 .line-not-ready {
   display: grid;
   flex: 0 0 210px;
@@ -1390,8 +1415,10 @@ button:disabled {
 }
 
 .line-ready { background: rgba(35, 164, 110, 0.24); }
+.line-stale { background: rgba(240, 190, 60, 0.22); }
 .line-not-ready { background: rgba(185, 55, 50, 0.22); }
 .line-ready span,
+.line-stale span,
 .line-not-ready span { color: #d3eee2; font-size: 0.75rem; overflow-wrap: anywhere; }
 
 .line-kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
@@ -1487,7 +1514,7 @@ button:disabled {
   }
 
   .line-control-hero { align-items: flex-start; flex-direction: column; padding: 23px; }
-  .line-ready, .line-not-ready { width: 100%; }
+  .line-ready, .line-stale, .line-not-ready { width: 100%; }
   .line-kpis { grid-template-columns: 1fr; }
   .line-table-head { display: none; }
   .line-group-row { grid-template-columns: 1fr; gap: 10px; padding: 16px; }
@@ -2033,6 +2060,7 @@ select:focus-visible {
   .setup-hero > div:first-child > p:last-child,
   .subcopy { font-size: 0.86rem; line-height: 1.68; }
   .line-ready,
+  .line-stale,
   .line-not-ready { padding: 13px; border-radius: 14px; }
   .line-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
   .line-kpis article { min-height: 100px; padding: 12px 10px; border-radius: 15px; }

@@ -55,7 +55,10 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
   const secret = config.LINE_CHANNEL_SECRET;
   const accessToken = config.LINE_CHANNEL_ACCESS_TOKEN;
   const signature = request.headers.get("x-line-signature") ?? "";
+  const contentLength = Number(request.headers.get("content-length") ?? 0);
+  if (contentLength > 1_000_000) return Response.json({ error: "Webhook payload too large" }, { status: 413 });
   const rawBody = await request.text();
+  if (rawBody.length > 1_000_000) return Response.json({ error: "Webhook payload too large" }, { status: 413 });
   if (!secret || !accessToken) return Response.json({ error: "LINE integration is not configured" }, { status: 503 });
   if (!(await validSignature(rawBody, signature, secret))) return Response.json({ error: "Invalid LINE signature" }, { status: 401 });
 

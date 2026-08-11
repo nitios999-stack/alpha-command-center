@@ -49,6 +49,8 @@ export type LineIntegrationStatus = {
   gatewayConfigured: boolean;
   webhookPath: string;
   lastWebhookAt: string | null;
+  webhookAgeMinutes: number | null;
+  webhookStatus: "healthy" | "stale" | "never";
   receivedGroups: number;
   mappedGroups: number;
 };
@@ -105,7 +107,16 @@ function numberValue(row: D1Row, key: string) {
   return Number(row[key] ?? 0);
 }
 
-function toCoverageSlot(row: D1Row): CoverageSlot {
+function toCoverageSlot(row: D1Row, nowTime?: string): CoverageSlot {
+  const rawState = String(row.state) as CoverageState;
+  const lateMinutes = Math.max(
+    numberValue(row, "late_minutes"),
+    nowTime && rawState !== "confirmed" ? calculateLateMinutesAt(String(row.deadline), nowTime) : 0,
+  );
+  // A person assigned to a slot but still waiting after the hard deadline is
+  // operationally missing. This is calculated at read time so the wall turns
+  // red without a background job or a destructive status rewrite.
+  const state: CoverageState = rawState === "waiting" && lateMinutes > 0 ? "missing" : rawState;
   return {
     id: String(row.id),
     operationalDate: String(row.operational_date),
@@ -117,12 +128,12 @@ function toCoverageSlot(row: D1Row): CoverageSlot {
     slotLabel: String(row.slot_label),
     assignedGuard: value(row, "assigned_guard"),
     assignmentType: String(row.assignment_type),
-    state: String(row.state) as CoverageState,
+    state,
     verificationPolicy: String(row.verification_policy) as CoverageSlot["verificationPolicy"],
     deadline: String(row.deadline),
     reportedAt: value(row, "reported_at"),
     source: value(row, "source"),
-    lateMinutes: numberValue(row, "late_minutes"),
+    lateMinutes,
     updatedAt: String(row.updated_at),
   };
 }
@@ -171,6 +182,7 @@ type LineEnvironment = {
   LINE_CHANNEL_SECRET?: string;
   LINE_GATEWAY_URL?: string;
   LINE_GATEWAY_SYNC_TOKEN?: string;
+  COMMAND_CENTER_ENABLE_DEMO_SEED?: string;
 };
 
 function lineEnvironment() {
@@ -216,8 +228,8 @@ export function bangkokNow() {
   };
 }
 
-function nowMinute() {
-  const bits = bangkokNow().time.split(":");
+function minuteFromTime(time: string) {
+  const bits = time.split(":");
   return Number(bits[0]) * 60 + Number(bits[1]);
 }
 
@@ -227,7 +239,16 @@ function deadlineMinute(deadline: string) {
 }
 
 export function calculateLateMinutes(deadline: string) {
-  return Math.max(0, nowMinute() - deadlineMinute(deadline));
+  return Math.max(0, minuteFromTime(bangkokNow().time) - deadlineMinute(deadline));
+}
+
+function calculateLateMinutesAt(deadline: string, time: string) {
+  const late = Math.max(0, minuteFromTime(time) - deadlineMinute(deadline));
+  return Number.isFinite(late) ? late : 0;
+}
+
+function demoSeedEnabled() {
+  return lineEnvironment().COMMAND_CENTER_ENABLE_DEMO_SEED?.trim().toLowerCase() === "true";
 }
 
 export async function ensureDatabase() {
@@ -259,13 +280,14 @@ export async function ensureDatabase() {
   const seedSetting = await db.prepare("SELECT value FROM system_settings WHERE key = 'demo_seeded'").first<{ value: string }>();
   if (!seedSetting) {
     const count = await db.prepare("SELECT COUNT(*) AS count FROM coverage_slots").first<{ count: number }>();
-    if ((count?.count ?? 0) === 0) await seedDemoData();
-    await db.prepare("INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('demo_seeded', '1', ?)").bind(bangkokNow().iso).run();
+    if (demoSeedEnabled() && (count?.count ?? 0) === 0) await seedDemoData();
+    await db.prepare("INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('demo_seeded', ?, ?)")
+      .bind(demoSeedEnabled() ? "1" : "disabled", bangkokNow().iso).run();
   }
   await syncSiteRegistryFromSlots();
   const templateCount = await db.prepare("SELECT COUNT(*) AS count FROM shift_templates").first<{ count: number }>();
   if ((templateCount?.count ?? 0) === 0) await syncTemplatesFromCoverageSlots();
-  await seedDemoLineGroups();
+  if (demoSeedEnabled()) await seedDemoLineGroups();
   await syncLineRegistryFromMappings();
 }
 
@@ -328,7 +350,8 @@ async function seedDemoData() {
 export async function getDashboard() {
   await ensureDatabase();
   const db = database();
-  const today = bangkokNow().date;
+  const current = bangkokNow();
+  const today = current.date;
   const slotResult = await db.prepare("SELECT * FROM coverage_slots WHERE operational_date = ? ORDER BY wave, site_name, post_name, slot_label").bind(today).all<D1Row>();
   const siteResult = await db.prepare("SELECT * FROM operational_sites WHERE active = 1 ORDER BY site_name").all<D1Row>();
   const lineGroupResult = await db.prepare("SELECT r.id, m.site_id, r.group_name, r.picture_url, r.last_seen_at, r.source FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id ORDER BY CASE WHEN m.site_id IS NULL THEN 0 ELSE 1 END, r.group_name").all<D1Row>();
@@ -336,6 +359,11 @@ export async function getDashboard() {
   const demoCount = await db.prepare("SELECT COUNT(*) AS count FROM operational_sites WHERE id IN ('site-green', 'site-late', 'site-waiting', 'site-missing')").first<{ count: number }>();
   const billingResult = await db.prepare("SELECT * FROM billing_cases ORDER BY due_at ASC, updated_at DESC LIMIT 30").all<D1Row>();
   const lineCounts = await db.prepare("SELECT COUNT(*) AS received_groups, COUNT(m.id) AS mapped_groups, MAX(r.last_seen_at) AS last_webhook_at FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id").first<{ received_groups: number; mapped_groups: number; last_webhook_at: string | null }>();
+  const lastWebhookAt = lineCounts?.last_webhook_at ?? null;
+  const parsedWebhookTime = lastWebhookAt ? Date.parse(lastWebhookAt) : Number.NaN;
+  const webhookAgeMinutes = Number.isFinite(parsedWebhookTime)
+    ? Math.max(0, Math.floor((Date.parse(current.iso) - parsedWebhookTime) / 60_000))
+    : null;
   const templates: TemplateSummary = { total: 0, morning: 0, evening: 0 };
   (templateResult.results ?? []).forEach((row) => {
     const wave = String(row.wave);
@@ -345,15 +373,17 @@ export async function getDashboard() {
   });
   return {
     today,
-    now: bangkokNow(),
-    slots: (slotResult.results ?? []).map(toCoverageSlot),
+    now: current,
+    slots: (slotResult.results ?? []).map((row) => toCoverageSlot(row, current.time)),
     sites: (siteResult.results ?? []).map(toOperationalSite),
     lineGroups: (lineGroupResult.results ?? []).map(toLineGroup),
     lineIntegration: {
       configured: Boolean(lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN && lineEnvironment().LINE_CHANNEL_SECRET),
       gatewayConfigured: Boolean(lineEnvironment().LINE_GATEWAY_URL && lineEnvironment().LINE_GATEWAY_SYNC_TOKEN),
       webhookPath: "/api/line/webhook",
-      lastWebhookAt: lineCounts?.last_webhook_at ?? null,
+      lastWebhookAt,
+      webhookAgeMinutes,
+      webhookStatus: webhookAgeMinutes === null ? "never" : webhookAgeMinutes <= 24 * 60 ? "healthy" : "stale",
       receivedGroups: Number(lineCounts?.received_groups ?? 0),
       mappedGroups: Number(lineCounts?.mapped_groups ?? 0),
     } satisfies LineIntegrationStatus,
@@ -421,6 +451,9 @@ export async function addCoverageSlot(input: {
   actor: string;
 }) {
   await ensureDatabase();
+  if (!/^\d{2}:\d{2}$/.test(input.deadline) || Number(input.deadline.slice(0, 2)) > 23 || Number(input.deadline.slice(3, 5)) > 59) {
+    throw new Error("เวลาห้ามสายต้องเป็นรูปแบบ HH:MM");
+  }
   const now = bangkokNow();
   const id = "slot-" + crypto.randomUUID();
   const assignedGuard = input.assignedGuard.trim();
@@ -453,10 +486,14 @@ export async function mapLineGroup(input: { siteId: string; groupId: string; gro
   const siteId = input.siteId.trim();
   const groupId = input.groupId.trim();
   const groupName = input.groupName.trim();
-  if (!siteId || !groupId || !groupName) throw new Error("กรุณาระบุรหัสกลุ่มและชื่อกลุ่ม LINE ให้ครบ");
+  if (!siteId || !groupId || !groupName || groupId.length > 255 || groupName.length > 255) throw new Error("กรุณาระบุรหัสกลุ่มและชื่อกลุ่ม LINE ให้ครบ");
   const db = database();
   const site = await db.prepare("SELECT site_name FROM operational_sites WHERE id = ? AND active = 1").bind(siteId).first<D1Row>();
   if (!site) throw new Error("ไม่พบจุดที่ต้องการผูกกลุ่ม LINE");
+  const existingMapping = await db.prepare("SELECT site_id, group_name FROM line_groups WHERE id = ?").bind(groupId).first<D1Row>();
+  if (existingMapping && String(existingMapping.site_id) !== siteId) {
+    throw new Error(`กลุ่ม LINE ${String(existingMapping.group_name ?? groupId)} ถูกผูกกับจุดอื่นแล้ว กรุณายกเลิกการผูกเดิมก่อน`);
+  }
   const now = bangkokNow().iso;
   const safePictureUrl = pictureUrl(input.pictureUrl);
   await db.batch([
@@ -491,9 +528,9 @@ export async function saveLineWebhookEvent(input: {
   const db = database();
   const now = bangkokNow().iso;
   const groupId = input.groupId.trim();
-  if (!groupId) return { saved: false, duplicate: false };
+  if (!groupId || groupId.length > 255) return { saved: false, duplicate: false };
   const eventId = input.eventId.trim();
-  if (!eventId) return { saved: false, duplicate: false };
+  if (!eventId || eventId.length > 255) return { saved: false, duplicate: false };
   const prior = await db.prepare("SELECT id FROM line_webhook_events WHERE id = ?").bind(eventId).first<D1Row>();
   if (prior) return { saved: false, duplicate: true };
   const groupName = input.groupName?.trim() || `กลุ่ม LINE ${groupId.slice(-6)}`;
@@ -700,6 +737,10 @@ export async function removeDemoData(actor: string) {
 
 export async function addBillingCase(input: { customerName: string; amountBaht: number; dueAt: string; nextAction: string; ownerName: string }) {
   await ensureDatabase();
+  if (!Number.isFinite(input.amountBaht) || input.amountBaht <= 0 || input.amountBaht > 1_000_000_000) {
+    throw new Error("ยอดวางบิลไม่ถูกต้อง");
+  }
+  if (!input.dueAt || Number.isNaN(Date.parse(input.dueAt))) throw new Error("วันที่ครบกำหนดไม่ถูกต้อง");
   const now = bangkokNow().iso;
   const id = "bill-" + crypto.randomUUID();
   const amountSatang = Math.round(input.amountBaht * 100);

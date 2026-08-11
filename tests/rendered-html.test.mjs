@@ -44,7 +44,7 @@ test("server-renders the ALPHA Command Center shell", async () => {
 });
 
 test("keeps the command center database and product surface in source", async () => {
-  const [schema, commands, page, styles, layout, packageJson, webhook, lineIntake, worker, migrations] = await Promise.all([
+  const [schema, commands, page, styles, layout, packageJson, webhook, lineIntake, worker, auth, health, dashboardRoute, actionsRoute, migrations] = await Promise.all([
     readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
     readFile(new URL("../db/command-center.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
@@ -54,6 +54,10 @@ test("keeps the command center database and product surface in source", async ()
     readFile(new URL("../app/api/line/webhook/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/line-webhook.ts", import.meta.url), "utf8"),
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/chatgpt-auth.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/health/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/command-center/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/command-center/actions/route.ts", import.meta.url), "utf8"),
     readdir(new URL("../drizzle/", import.meta.url)),
   ]);
 
@@ -89,7 +93,13 @@ test("keeps the command center database and product surface in source", async ()
   assert.match(lineIntake, /x-line-signature/);
   assert.match(lineIntake, /crypto\.subtle/);
   assert.match(worker, /ctx\.waitUntil/);
+  assert.match(worker, /X-Content-Type-Options/);
   assert.doesNotMatch(lineIntake, /message\.text|event\.message/);
+  assert.match(lineIntake, /payload too large/);
+  assert.match(auth, /AUTH_REQUIRED/);
+  assert.match(dashboardRoute, /apiAuthRequiredResponse/);
+  assert.match(actionsRoute, /application\/json/);
+  assert.match(health, /ensureDatabase/);
   assert.match(page, /สีเขียว = ครบทุกช่องกำลัง/);
   assert.match(layout, /ALPHA Command Center/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);

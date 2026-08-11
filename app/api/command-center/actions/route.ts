@@ -1,4 +1,4 @@
-import { getChatGPTUser } from "../../../chatgpt-auth";
+import { apiAuthRequiredResponse, getChatGPTUser } from "../../../chatgpt-auth";
 import { addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, generateTodayFromTemplates, importShiftTemplates, mapLineGroup, markLeave, removeDemoData, replaceSlot, sendLineConnectionTest, syncLineGroupsFromGateway, unmapLineGroup, type TemplateImportRow } from "../../../../db/command-center";
 
 export const runtime = "edge";
@@ -28,8 +28,22 @@ type ActionPayload = {
 };
 
 export async function POST(request: Request) {
+  if (!(await getChatGPTUser())) return apiAuthRequiredResponse();
   try {
-    const payload = (await request.json()) as ActionPayload;
+    const contentType = request.headers.get("content-type") ?? "";
+    if (!contentType.toLowerCase().includes("application/json")) {
+      return Response.json({ error: "คำขอต้องเป็น JSON" }, { status: 415 });
+    }
+    const contentLength = Number(request.headers.get("content-length") ?? 0);
+    if (contentLength > 512_000) {
+      return Response.json({ error: "ข้อมูลคำขอใหญ่เกินกำหนด" }, { status: 413 });
+    }
+    let payload: ActionPayload;
+    try {
+      payload = (await request.json()) as ActionPayload;
+    } catch {
+      return Response.json({ error: "รูปแบบ JSON ไม่ถูกต้อง" }, { status: 400 });
+    }
     const user = await getChatGPTUser();
     const actor = user?.displayName ?? "ผู้ดูแลระบบ";
 
@@ -90,7 +104,7 @@ export async function POST(request: Request) {
       const customerName = payload.customerName?.trim() ?? "";
       const nextAction = payload.nextAction?.trim() ?? "";
       const ownerName = payload.ownerName?.trim() ?? actor;
-      if (!customerName || !nextAction || !payload.dueAt || !payload.amountBaht || payload.amountBaht <= 0) {
+      if (!customerName || !nextAction || !payload.dueAt || !Number.isFinite(payload.amountBaht) || payload.amountBaht <= 0) {
         return Response.json({ error: "กรอกข้อมูลวางบิลให้ครบและระบุยอดมากกว่า 0" }, { status: 400 });
       }
       await addBillingCase({
