@@ -468,7 +468,7 @@ export default function Home() {
   };
 
   return (
-    <main className={"shell " + (tab === "ops" ? "ops-shell" : tab === "setup" ? "setup-shell" : tab === "line" ? "line-shell" : "billing-shell")}>
+    <main className={"shell app-shell " + (tab === "ops" ? "ops-shell" : tab === "setup" ? "setup-shell" : tab === "line" ? "line-shell" : "billing-shell")}>
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">A</span>
@@ -481,6 +481,7 @@ export default function Home() {
           <span className="pulse" />
           <span>อัปเดตจากระบบ {data?.now.time ?? "..."}</span>
         </div>
+        <button className="mobile-refresh" onClick={() => void loadDashboard()} disabled={loading} aria-label="รีเฟรชข้อมูล">↻</button>
       </header>
 
       {tab === "billing" && <section className="hero">
@@ -501,11 +502,11 @@ export default function Home() {
       </section>}
 
       <nav className="tabs" aria-label="เมนูหลัก">
-        <button className={tab === "ops" ? "active" : ""} onClick={() => setTab("ops")}>กำลังวันนี้</button>
-        <button className={tab === "setup" ? "active" : ""} onClick={() => setTab("setup")}>ตั้งค่าอัตรา</button>
-        <button className={tab === "line" ? "active" : ""} onClick={() => setTab("line")}>LINE OA</button>
-        <button className={tab === "billing" ? "active" : ""} onClick={() => setTab("billing")}>วางบิล</button>
-        <button className="quiet" onClick={() => void loadDashboard()} disabled={loading}>รีเฟรช</button>
+        <button data-icon="▦" className={tab === "ops" ? "active" : ""} onClick={() => setTab("ops")} aria-current={tab === "ops" ? "page" : undefined}>กำลังวันนี้</button>
+        <button data-icon="⌁" className={tab === "setup" ? "active" : ""} onClick={() => setTab("setup")} aria-current={tab === "setup" ? "page" : undefined}>ตั้งค่าอัตรา</button>
+        <button data-icon="●" className={tab === "line" ? "active" : ""} onClick={() => setTab("line")} aria-current={tab === "line" ? "page" : undefined}>LINE OA</button>
+        <button data-icon="฿" className={tab === "billing" ? "active" : ""} onClick={() => setTab("billing")} aria-current={tab === "billing" ? "page" : undefined}>วางบิล</button>
+        <button className="quiet refresh-control" onClick={() => void loadDashboard()} disabled={loading}>↻ รีเฟรช</button>
       </nav>
 
       {message && (
