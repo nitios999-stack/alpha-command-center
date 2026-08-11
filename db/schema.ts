@@ -22,6 +22,17 @@ export const coverageSlots = sqliteTable("coverage_slots", {
   index("idx_coverage_today").on(table.operationalDate, table.wave, table.siteId),
 ]);
 
+export const operationalSites = sqliteTable("operational_sites", {
+  id: text("id").primaryKey(),
+  siteName: text("site_name").notNull(),
+  customerName: text("customer_name").notNull(),
+  active: integer("active").notNull().default(1),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  index("idx_operational_sites_active").on(table.active, table.siteName),
+]);
+
 export const billingCases = sqliteTable("billing_cases", {
   id: text("id").primaryKey(),
   customerName: text("customer_name").notNull(),

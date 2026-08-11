@@ -28,6 +28,13 @@ export type CoverageSlot = {
   updatedAt: string;
 };
 
+export type OperationalSite = {
+  id: string;
+  siteName: string;
+  customerName: string;
+  active: number;
+};
+
 export type BillingCase = {
   id: string;
   customerName: string;
@@ -101,6 +108,19 @@ function toBillingCase(row: D1Row): BillingCase {
   };
 }
 
+function toOperationalSite(row: D1Row): OperationalSite {
+  return {
+    id: String(row.id),
+    siteName: String(row.site_name),
+    customerName: String(row.customer_name),
+    active: numberValue(row, "active"),
+  };
+}
+
+function siteIdentifier(siteName: string) {
+  return "site-" + siteName.trim().toLowerCase().replace(/[^a-z0-9ก-๙]+/g, "-").replace(/(^-|-$)/g, "");
+}
+
 export function bangkokNow() {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Bangkok",
@@ -137,16 +157,25 @@ export function calculateLateMinutes(deadline: string) {
 export async function ensureDatabase() {
   const db = database();
   await db.batch([
+    db.prepare("CREATE TABLE IF NOT EXISTS operational_sites (id TEXT PRIMARY KEY, site_name TEXT NOT NULL, customer_name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS coverage_slots (id TEXT PRIMARY KEY, operational_date TEXT NOT NULL, wave TEXT NOT NULL, site_id TEXT NOT NULL, site_name TEXT NOT NULL, customer_name TEXT NOT NULL, post_name TEXT NOT NULL, slot_label TEXT NOT NULL, assigned_guard TEXT, assignment_type TEXT NOT NULL DEFAULT 'regular', state TEXT NOT NULL, verification_policy TEXT NOT NULL DEFAULT 'standard', deadline TEXT NOT NULL, reported_at TEXT, source TEXT, late_minutes INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS billing_cases (id TEXT PRIMARY KEY, customer_name TEXT NOT NULL, service_period TEXT NOT NULL, amount_satang INTEGER NOT NULL, due_at TEXT NOT NULL, document_state TEXT NOT NULL DEFAULT 'incomplete', submission_state TEXT NOT NULL DEFAULT 'unscheduled', payment_state TEXT NOT NULL DEFAULT 'unpaid', next_action TEXT NOT NULL, owner_name TEXT NOT NULL, appointment_at TEXT, location TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, action TEXT NOT NULL, actor TEXT NOT NULL, summary TEXT NOT NULL, created_at TEXT NOT NULL)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_coverage_today ON coverage_slots(operational_date, wave, site_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_billing_due ON billing_cases(due_at, payment_state)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id, created_at)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_operational_sites_active ON operational_sites(active, site_name)"),
   ]);
 
   const count = await db.prepare("SELECT COUNT(*) AS count FROM coverage_slots").first<{ count: number }>();
   if ((count?.count ?? 0) === 0) await seedDemoData();
+  await syncSiteRegistryFromSlots();
+}
+
+async function syncSiteRegistryFromSlots() {
+  const now = bangkokNow().iso;
+  await database().prepare("INSERT OR IGNORE INTO operational_sites (id, site_name, customer_name, active, created_at, updated_at) SELECT site_id, MAX(site_name), MAX(customer_name), 1, ?, ? FROM coverage_slots GROUP BY site_id")
+    .bind(now, now).run();
 }
 
 async function seedDemoData() {
@@ -178,11 +207,13 @@ export async function getDashboard() {
   const db = database();
   const today = bangkokNow().date;
   const slotResult = await db.prepare("SELECT * FROM coverage_slots WHERE operational_date = ? ORDER BY wave, site_name, post_name, slot_label").bind(today).all<D1Row>();
+  const siteResult = await db.prepare("SELECT * FROM operational_sites WHERE active = 1 ORDER BY site_name").all<D1Row>();
   const billingResult = await db.prepare("SELECT * FROM billing_cases ORDER BY due_at ASC, updated_at DESC LIMIT 30").all<D1Row>();
   return {
     today,
     now: bangkokNow(),
     slots: (slotResult.results ?? []).map(toCoverageSlot),
+    sites: (siteResult.results ?? []).map(toOperationalSite),
     billingCases: (billingResult.results ?? []).map(toBillingCase),
   };
 }
@@ -237,11 +268,27 @@ export async function addCoverageSlot(input: {
   const id = "slot-" + crypto.randomUUID();
   const assignedGuard = input.assignedGuard.trim();
   const state: CoverageState = assignedGuard ? "waiting" : "unassigned";
-  const siteId = "site-" + input.siteName.trim().toLowerCase().replace(/[^a-z0-9ก-๙]+/g, "-").replace(/(^-|-$)/g, "");
-  await database().prepare("INSERT INTO coverage_slots (id, operational_date, wave, site_id, site_name, customer_name, post_name, slot_label, assigned_guard, assignment_type, state, verification_policy, deadline, reported_at, source, late_minutes, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, ?)")
-    .bind(id, now.date, input.wave, siteId, input.siteName.trim(), input.customerName.trim(), input.postName.trim(), input.slotLabel.trim(), assignedGuard || null, assignedGuard ? "regular" : "rotating", state, input.verificationPolicy, input.deadline, now.iso)
-    .run();
+  const siteId = siteIdentifier(input.siteName);
+  const db = database();
+  await db.batch([
+    db.prepare("INSERT OR IGNORE INTO operational_sites (id, site_name, customer_name, active, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?)")
+      .bind(siteId, input.siteName.trim(), input.customerName.trim(), now.iso, now.iso),
+    db.prepare("INSERT INTO coverage_slots (id, operational_date, wave, site_id, site_name, customer_name, post_name, slot_label, assigned_guard, assignment_type, state, verification_policy, deadline, reported_at, source, late_minutes, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, ?)")
+      .bind(id, now.date, input.wave, siteId, input.siteName.trim(), input.customerName.trim(), input.postName.trim(), input.slotLabel.trim(), assignedGuard || null, assignedGuard ? "regular" : "rotating", state, input.verificationPolicy, input.deadline, now.iso),
+  ]);
   await addAudit("coverage_slot", id, "created", input.actor, "เพิ่มช่องกำลัง " + input.siteName.trim() + " / " + input.slotLabel.trim());
+}
+
+export async function addOperationalSite(input: { siteName: string; customerName: string; actor: string }) {
+  await ensureDatabase();
+  const siteName = input.siteName.trim();
+  const customerName = input.customerName.trim();
+  if (!siteName || !customerName) throw new Error("กรุณาระบุชื่อจุดและลูกค้า");
+  const now = bangkokNow().iso;
+  const id = siteIdentifier(siteName);
+  await database().prepare("INSERT OR IGNORE INTO operational_sites (id, site_name, customer_name, active, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?)")
+    .bind(id, siteName, customerName, now, now).run();
+  await addAudit("operational_site", id, "created", input.actor, "เพิ่มจุดสำหรับตั้งอัตรา " + siteName);
 }
 
 export async function addBillingCase(input: { customerName: string; amountBaht: number; dueAt: string; nextAction: string; ownerName: string }) {

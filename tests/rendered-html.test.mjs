@@ -44,10 +44,11 @@ test("server-renders the ALPHA Command Center shell", async () => {
 });
 
 test("keeps the command center database and product surface in source", async () => {
-  const [schema, commands, page, layout, packageJson, migrations] = await Promise.all([
+  const [schema, commands, page, styles, layout, packageJson, migrations] = await Promise.all([
     readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
     readFile(new URL("../db/command-center.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readdir(new URL("../drizzle/", import.meta.url)),
@@ -55,10 +56,14 @@ test("keeps the command center database and product surface in source", async ()
 
   assert.match(schema, /coverage_slots/);
   assert.match(schema, /billing_cases/);
+  assert.match(schema, /operational_sites/);
   assert.match(schema, /idx_coverage_today/);
   assert.match(commands, /confirmSlot/);
   assert.match(commands, /replaceSlot/);
   assert.match(commands, /addBillingCase/);
+  assert.match(commands, /addOperationalSite/);
+  assert.match(page, /site-wall/);
+  assert.match(styles, /--wall-columns/);
   assert.match(page, /สีเขียว = ครบทุกช่องกำลัง/);
   assert.match(layout, /ALPHA Command Center/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);

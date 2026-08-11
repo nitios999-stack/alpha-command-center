@@ -647,10 +647,396 @@ button:disabled {
   border-radius: 16px;
 }
 
+/* The operations view is a monitor wall: every assigned site is visible at once. */
+.ops-shell {
+  width: min(100% - 24px, 1920px);
+  min-height: 100dvh;
+  padding: 12px 0;
+}
+
+.ops-shell .topbar {
+  min-height: 42px;
+  margin-bottom: 7px;
+}
+
+.ops-shell .brand-mark {
+  width: 36px;
+  height: 36px;
+  border-radius: 11px 11px 11px 2px;
+}
+
+.ops-shell .brand h1 {
+  font-size: 1rem;
+}
+
+.ops-shell .eyebrow {
+  margin-bottom: 2px;
+  font-size: 0.64rem;
+}
+
+.ops-shell .tabs {
+  margin: 0 0 8px;
+  padding: 4px;
+  border-radius: 11px;
+}
+
+.ops-shell .tabs button {
+  padding: 7px 10px;
+  font-size: 0.8rem;
+}
+
+.ops-shell .notice {
+  margin: 0 0 8px;
+  padding: 8px 11px;
+  font-size: 0.85rem;
+}
+
+.ops-shell .wall-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ops-shell .metric {
+  display: flex;
+  align-items: baseline;
+  min-height: 58px;
+  gap: 6px;
+  padding: 10px 13px;
+  border-radius: 13px;
+}
+
+.ops-shell .metric strong {
+  order: -1;
+  font-size: 1.7rem;
+}
+
+.ops-shell .metric span,
+.ops-shell .metric small {
+  font-size: 0.76rem;
+}
+
+.ops-shell .metric small {
+  margin-left: -3px;
+}
+
+.ops-shell .section-heading {
+  align-items: center;
+  margin: 10px 0 4px;
+}
+
+.ops-shell .section-heading h3 {
+  font-size: 1.1rem;
+}
+
+.ops-shell .heading-actions {
+  gap: 6px;
+}
+
+.ops-shell .rule-note {
+  padding: 6px 8px;
+  font-size: 0.7rem;
+}
+
+.small-secondary {
+  min-height: 32px;
+  padding: 7px 9px;
+  color: var(--forest);
+  font-size: 0.76rem;
+  font-weight: 800;
+  border: 1px solid #b9d5c8;
+  background: #f4faf6;
+  border-radius: 9px;
+}
+
+.ops-shell .wave-switch {
+  margin: 0;
+}
+
+.ops-shell .wave-switch button {
+  padding: 6px 10px;
+}
+
+.wall-filter {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 6px 0 8px;
+}
+
+.wall-filter button {
+  min-height: 29px;
+  padding: 5px 8px;
+  color: #596663;
+  font-size: 0.72rem;
+  font-weight: 800;
+  border: 1px solid #d5dfda;
+  background: rgba(255, 255, 255, 0.78);
+  border-radius: 8px;
+}
+
+.wall-filter button.active {
+  color: white;
+  border-color: var(--forest);
+  background: var(--forest);
+}
+
+.wall-filter button.red.active { border-color: var(--red); background: var(--red); }
+.wall-filter button.yellow.active { color: #563800; border-color: #d79500; background: #ffd76f; }
+.wall-filter button.gray.active { border-color: #61716d; background: #61716d; }
+
+.wall-filter span {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.site-wall {
+  display: grid;
+  grid-template-columns: repeat(var(--wall-columns), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--wall-rows), minmax(0, 1fr));
+  gap: 7px;
+  height: calc(100dvh - 278px);
+  min-height: 330px;
+}
+
+.site-tile {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 3px;
+  padding: 8px 9px;
+  color: var(--ink);
+  text-align: left;
+  border: 1px solid #d7dfdc;
+  border-top: 5px solid #7d8986;
+  background: var(--surface);
+  border-radius: 10px;
+  box-shadow: 0 3px 8px rgba(17, 44, 35, 0.06);
+  transition: transform 140ms ease, box-shadow 140ms ease;
+}
+
+.site-tile:hover,
+.site-tile:focus-visible {
+  z-index: 1;
+  outline: 3px solid rgba(10, 91, 70, 0.24);
+  outline-offset: 1px;
+  transform: translateY(-1px);
+  box-shadow: 0 9px 18px rgba(17, 44, 35, 0.14);
+}
+
+.site-tile.green { border-color: #aad9bf; border-top-color: var(--forest); background: #f3fbf6; }
+.site-tile.yellow { border-color: #f0d084; border-top-color: #d79500; background: #fffaf0; }
+.site-tile.red { border-color: #edb2ae; border-top-color: var(--red); background: #fff6f5; }
+.site-tile.gray { border-color: #d5ddda; border-top-color: #7d8986; background: #f6f8f7; }
+
+.tile-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+}
+
+.tile-status-tag {
+  max-width: calc(100% - 34px);
+  overflow: hidden;
+  color: var(--muted);
+  font-size: clamp(0.58rem, 0.75vw, 0.7rem);
+  font-weight: 800;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.site-tile.red .tile-status-tag { color: #9e2925; }
+.site-tile.yellow .tile-status-tag { color: #8a5b00; }
+.site-tile.green .tile-status-tag { color: var(--forest); }
+
+.tile-topline strong {
+  flex: 0 0 auto;
+  font-size: clamp(0.78rem, 1vw, 1rem);
+  letter-spacing: -0.05em;
+}
+
+.tile-name {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: clamp(0.7rem, 1vw, 0.91rem);
+  font-weight: 800;
+  line-height: 1.25;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.tile-summary {
+  display: block;
+  overflow: hidden;
+  padding: 3px 5px;
+  color: #53615d;
+  font-size: clamp(0.58rem, 0.75vw, 0.7rem);
+  font-weight: 700;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.72);
+  border-radius: 5px;
+}
+
+.site-tile.red .tile-summary { color: #9e2925; background: #ffe6e3; }
+.site-tile.yellow .tile-summary { color: #8a5b00; background: #fff0bd; }
+.site-tile.green .tile-summary { color: var(--forest); background: #daf1e2; }
+
+.ops-shell .legacy-detail {
+  display: none;
+}
+
+.site-drawer {
+  position: fixed;
+  z-index: 20;
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  width: min(430px, calc(100vw - 24px));
+  flex-direction: column;
+  overflow: hidden;
+  background: white;
+  border: 1px solid #cfdad5;
+  border-radius: 18px;
+  box-shadow: -18px 20px 48px rgba(17, 44, 35, 0.2);
+}
+
+.drawer-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 19px 20px 15px;
+  border-bottom: 1px solid var(--line);
+}
+
+.drawer-header h3 {
+  margin: 7px 0 4px;
+  font-size: 1.25rem;
+}
+
+.drawer-header p,
+.drawer-slot p,
+.drawer-slot small {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.drawer-status {
+  display: inline-block;
+  padding: 5px 7px;
+  color: #5a6662;
+  font-size: 0.72rem;
+  font-weight: 800;
+  background: #eff2f1;
+  border-radius: 6px;
+}
+
+.drawer-status.green { color: var(--forest); background: #dff3e9; }
+.drawer-status.yellow { color: #8a5b00; background: #ffefbc; }
+.drawer-status.red { color: #a72f2a; background: var(--red-soft); }
+
+.drawer-close {
+  width: 32px;
+  height: 32px;
+  color: #52605b;
+  font-size: 1.4rem;
+  line-height: 1;
+  border: 0;
+  background: #eef2ef;
+  border-radius: 50%;
+}
+
+.drawer-slots {
+  overflow: auto;
+}
+
+.drawer-slot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 15px 20px;
+  border-bottom: 1px solid #edf1ef;
+}
+
+.drawer-slot strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 0.9rem;
+}
+
+.drawer-slot small {
+  display: block;
+  margin-top: 3px;
+}
+
+.drawer-actions {
+  display: flex;
+  align-items: start;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+@media (max-height: 760px) and (min-width: 761px) {
+  .ops-shell { padding-top: 8px; padding-bottom: 8px; }
+  .ops-shell .topbar { min-height: 36px; margin-bottom: 4px; }
+  .ops-shell .tabs { margin-bottom: 5px; }
+  .ops-shell .metric { min-height: 49px; padding: 7px 10px; }
+  .ops-shell .section-heading { margin-top: 6px; }
+  .site-wall { height: calc(100dvh - 238px); min-height: 250px; }
+  .site-tile { padding: 6px 7px; border-top-width: 4px; }
+}
+
 @media (max-width: 760px) {
   .shell {
     width: min(100% - 22px, 680px);
     padding-top: 16px;
+  }
+
+  .ops-shell {
+    min-height: auto;
+  }
+
+  .ops-shell .wall-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ops-shell .metric {
+    min-height: 52px;
+    padding: 8px 10px;
+  }
+
+  .ops-shell .section-heading {
+    align-items: flex-start;
+  }
+
+  .ops-shell .heading-actions,
+  .wall-filter {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .wall-filter span {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .site-wall {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: none;
+    height: auto;
+    min-height: 0;
+  }
+
+  .site-tile {
+    min-height: 92px;
   }
 
   .topbar,

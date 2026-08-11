@@ -1,10 +1,10 @@
 import { getChatGPTUser } from "../../../chatgpt-auth";
-import { addBillingCase, addCoverageSlot, confirmSlot, markLeave, replaceSlot } from "../../../../db/command-center";
+import { addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, markLeave, replaceSlot } from "../../../../db/command-center";
 
 export const runtime = "edge";
 
 type ActionPayload = {
-  type?: "confirm" | "replace" | "leave" | "slot" | "billing";
+  type?: "confirm" | "replace" | "leave" | "site" | "slot" | "billing";
   slotId?: string;
   source?: string;
   guardName?: string;
@@ -34,6 +34,13 @@ export async function POST(request: Request) {
       await replaceSlot(payload.slotId, payload.guardName || "", actor);
     } else if (payload.type === "leave" && payload.slotId) {
       await markLeave(payload.slotId, actor);
+    } else if (payload.type === "site") {
+      const siteName = payload.siteName?.trim() ?? "";
+      const customerName = payload.customerName?.trim() ?? "";
+      if (!siteName || !customerName) {
+        return Response.json({ error: "กรอกชื่อจุดและลูกค้าให้ครบ" }, { status: 400 });
+      }
+      await addOperationalSite({ siteName, customerName, actor });
     } else if (payload.type === "slot") {
       const siteName = payload.siteName?.trim() ?? "";
       const customerName = payload.customerName?.trim() ?? "";

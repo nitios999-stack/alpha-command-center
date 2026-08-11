@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { CSSProperties, FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
 type SlotState = "confirmed" | "self_reported" | "waiting" | "replacement_required" | "unassigned" | "missing";
 
@@ -37,10 +37,18 @@ type BillingCase = {
   location: string | null;
 };
 
+type OperationalSite = {
+  id: string;
+  siteName: string;
+  customerName: string;
+  active: number;
+};
+
 type DashboardData = {
   today: string;
   now: { time: string };
   slots: CoverageSlot[];
+  sites: OperationalSite[];
   billingCases: BillingCase[];
 };
 
@@ -79,20 +87,24 @@ function deriveSiteStatus(slots: CoverageSlot[]): SiteStatus {
   return "yellow";
 }
 
-function groupSites(slots: CoverageSlot[]) {
+function groupSites(slots: CoverageSlot[], registry: OperationalSite[]) {
   const groups = new Map<string, CoverageSlot[]>();
   slots.forEach((slot) => {
     const existing = groups.get(slot.siteId) ?? [];
     existing.push(slot);
     groups.set(slot.siteId, existing);
   });
-  return Array.from(groups.entries())
-    .map(([id, grouped]) => {
+  const registryById = new Map(registry.map((site) => [site.id, site]));
+  const siteIds = new Set([...registry.map((site) => site.id), ...groups.keys()]);
+  return Array.from(siteIds)
+    .map((id) => {
+      const grouped = groups.get(id) ?? [];
+      const registered = registryById.get(id);
       const status = deriveSiteStatus(grouped);
       return {
         id,
-        name: grouped[0].siteName,
-        customerName: grouped[0].customerName,
+        name: grouped[0]?.siteName ?? registered?.siteName ?? "ไม่ระบุจุด",
+        customerName: grouped[0]?.customerName ?? registered?.customerName ?? "ไม่ระบุลูกค้า",
         status,
         slots: grouped,
         confirmed: grouped.filter((slot) => slot.state === "confirmed").length,
@@ -103,6 +115,19 @@ function groupSites(slots: CoverageSlot[]) {
       const priority: Record<SiteStatus, number> = { red: 0, yellow: 1, gray: 2, green: 3 };
       return priority[a.status] - priority[b.status] || a.name.localeCompare(b.name, "th");
     });
+}
+
+function siteStatusSummary(site: SiteCard) {
+  if (site.status === "green") {
+    return site.lateCount > 0 ? `ครบ • สาย ${site.lateCount}` : "ครบกำลัง";
+  }
+  if (site.status === "yellow") {
+    return `รอยืนยัน ${site.slots.filter((slot) => slot.state !== "confirmed").length}`;
+  }
+  if (site.status === "red") {
+    return `ขาด/ต้องจัด ${site.slots.filter((slot) => ["missing", "unassigned", "replacement_required"].includes(slot.state)).length}`;
+  }
+  return "ยังไม่มีอัตรา";
 }
 
 function formatBaht(satang: number) {
@@ -132,6 +157,8 @@ export default function Home() {
   const [message, setMessage] = useState<string | null>(null);
   const [showBillingForm, setShowBillingForm] = useState(false);
   const [showSlotForm, setShowSlotForm] = useState(false);
+  const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<SiteStatus | "all">("all");
 
   const loadDashboard = useCallback(async () => {
     setLoading(true);
@@ -155,7 +182,7 @@ export default function Home() {
     () => (data?.slots ?? []).filter((slot) => slot.wave === wave),
     [data?.slots, wave],
   );
-  const sites = useMemo(() => groupSites(visibleSlots), [visibleSlots]);
+  const sites = useMemo(() => groupSites(visibleSlots, data?.sites ?? []), [visibleSlots, data?.sites]);
   const stats = useMemo(() => {
     return sites.reduce(
       (all, site) => {
@@ -166,6 +193,19 @@ export default function Home() {
       { green: 0, yellow: 0, red: 0, gray: 0, confirmed: 0 },
     );
   }, [sites]);
+  const visibleSites = useMemo(
+    () => statusFilter === "all" ? sites : sites.filter((site) => site.status === statusFilter),
+    [sites, statusFilter],
+  );
+  const selectedSite = useMemo(
+    () => sites.find((site) => site.id === selectedSiteId) ?? null,
+    [sites, selectedSiteId],
+  );
+  const wallLayout = useMemo(() => {
+    const total = Math.max(visibleSites.length, 1);
+    const columns = total > 64 ? 10 : total > 35 ? 8 : total > 20 ? 6 : total > 10 ? 5 : Math.min(4, total);
+    return { columns, rows: Math.ceil(total / columns) };
+  }, [visibleSites.length]);
 
   const runAction = async (payload: Record<string, unknown>, id: string, success: string) => {
     setBusyId(id);
@@ -191,6 +231,14 @@ export default function Home() {
     const name = window.prompt("ระบุชื่อ รปภ. สแปร์ที่รับจุดนี้", "นายสมพงษ์ (สแปร์)");
     if (!name) return;
     void runAction({ type: "replace", slotId: slot.id, guardName: name }, slot.id, "มอบหมายสแปร์แล้ว ระบบกำลังรอรายงานเข้าเวร");
+  };
+
+  const addSiteWithoutRoster = () => {
+    const siteName = window.prompt("ชื่อจุดที่ต้องการแสดงเป็นสีเทา (ยังไม่ตั้งอัตราผลัดนี้)");
+    if (!siteName) return;
+    const customerName = window.prompt("ชื่อลูกค้าหรือหน่วยงานของจุดนี้");
+    if (!customerName) return;
+    void runAction({ type: "site", siteName, customerName }, "site-" + siteName, "เพิ่มจุดสีเทาแล้ว — ตั้งอัตรากำลังได้เมื่อพร้อม");
   };
 
   const submitBilling = (event: FormEvent<HTMLFormElement>) => {
@@ -231,7 +279,7 @@ export default function Home() {
   };
 
   return (
-    <main className="shell">
+    <main className={"shell " + (tab === "ops" ? "ops-shell" : "billing-shell")}>
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">A</span>
@@ -246,7 +294,7 @@ export default function Home() {
         </div>
       </header>
 
-      <section className="hero">
+      {tab === "billing" && <section className="hero">
         <div>
           <p className="eyebrow">ศูนย์สั่งการประจำวัน</p>
           <h2>{tab === "ops" ? "เช็กกำลังประจำจุด" : "วางบิลและติดตามรับชำระ"}</h2>
@@ -261,7 +309,7 @@ export default function Home() {
           <strong>{data?.today ?? "กำลังโหลด"}</strong>
           <small>เวลาไทย (Asia/Bangkok)</small>
         </div>
-      </section>
+      </section>}
 
       <nav className="tabs" aria-label="เมนูหลัก">
         <button className={tab === "ops" ? "active" : ""} onClick={() => setTab("ops")}>กำลังวันนี้</button>
@@ -278,7 +326,7 @@ export default function Home() {
 
       {tab === "ops" ? (
         <>
-          <section className="metrics" aria-label="สรุปกำลัง">
+          <section className="metrics wall-metrics" aria-label="สรุปกำลัง">
             <article className="metric green"><span>ครบยืนยันแล้ว</span><strong>{stats.green}</strong><small>จุด</small></article>
             <article className="metric yellow"><span>รอตรวจ</span><strong>{stats.yellow}</strong><small>จุด</small></article>
             <article className="metric red"><span>ต้องจัดการ</span><strong>{stats.red}</strong><small>จุด</small></article>
@@ -292,6 +340,7 @@ export default function Home() {
             </div>
             <div className="heading-actions">
               <span className="rule-note">สีเขียว = ครบทุกช่องกำลัง</span>
+              <button className="small-secondary" onClick={addSiteWithoutRoster}>+ เพิ่มจุดเทา</button>
               <button className="small-primary" onClick={() => setShowSlotForm((show) => !show)}>
                 {showSlotForm ? "ปิด" : "+ เพิ่มช่องกำลัง"}
               </button>
@@ -301,6 +350,15 @@ export default function Home() {
           <div className="wave-switch" role="group" aria-label="เลือกผลัด">
             <button className={wave === "morning" ? "active" : ""} onClick={() => setWave("morning")}>ผลัดเช้า</button>
             <button className={wave === "evening" ? "active" : ""} onClick={() => setWave("evening")}>ผลัดเย็น</button>
+          </div>
+
+          <div className="wall-filter" role="group" aria-label="กรองสถานะจุด">
+            <button className={statusFilter === "all" ? "active" : ""} onClick={() => setStatusFilter("all")}>ทุกจุด {sites.length}</button>
+            <button className={statusFilter === "red" ? "active red" : "red"} onClick={() => setStatusFilter("red")}>แดง {stats.red}</button>
+            <button className={statusFilter === "yellow" ? "active yellow" : "yellow"} onClick={() => setStatusFilter("yellow")}>เหลือง {stats.yellow}</button>
+            <button className={statusFilter === "green" ? "active green" : "green"} onClick={() => setStatusFilter("green")}>เขียว {stats.green}</button>
+            <button className={statusFilter === "gray" ? "active gray" : "gray"} onClick={() => setStatusFilter("gray")}>เทา {stats.gray}</button>
+            <span>กดกรอบใดก็ได้เพื่อดูและจัดการเฉพาะจุด</span>
           </div>
 
           {showSlotForm && (
@@ -316,7 +374,33 @@ export default function Home() {
             </form>
           )}
 
-          <section className="site-grid" aria-live="polite">
+          <section
+            className="site-wall"
+            aria-label="แผงสถานะทุกจุด"
+            aria-live="polite"
+            style={{ "--wall-columns": wallLayout.columns, "--wall-rows": wallLayout.rows } as CSSProperties}
+          >
+            {loading && <p className="loading-card">กำลังโหลดแผงควบคุม…</p>}
+            {!loading && visibleSites.length === 0 && <p className="loading-card">ไม่พบจุดตามสถานะที่เลือก</p>}
+            {!loading && visibleSites.map((site) => (
+              <button
+                className={"site-tile " + site.status}
+                key={site.id}
+                type="button"
+                onClick={() => setSelectedSiteId(site.id)}
+                aria-label={`ดูรายละเอียด ${site.name}: ${statusText[site.status]}`}
+              >
+                <span className="tile-topline">
+                  <span className="tile-status-tag">{statusText[site.status]}</span>
+                  <strong>{site.confirmed}/{site.slots.length}</strong>
+                </span>
+                <span className="tile-name">{site.name}</span>
+                <span className="tile-summary">{siteStatusSummary(site)}</span>
+              </button>
+            ))}
+          </section>
+
+          <section className="site-grid legacy-detail" aria-live="polite">
             {loading && <p className="loading-card">กำลังโหลดข้อมูลศูนย์สั่งการ…</p>}
             {!loading && sites.length === 0 && <p className="loading-card">ยังไม่มีจุดในผลัดนี้ กด “เพิ่มช่องกำลัง” เพื่อเริ่มจัดกำลังจริง</p>}
             {!loading && sites.map((site) => (
@@ -370,6 +454,39 @@ export default function Home() {
               </article>
             ))}
           </section>
+
+          {selectedSite && (
+            <aside className="site-drawer" aria-label={`รายละเอียด ${selectedSite.name}`}>
+              <div className="drawer-header">
+                <div>
+                  <span className={"drawer-status " + selectedSite.status}>{statusText[selectedSite.status]}</span>
+                  <h3>{selectedSite.name}</h3>
+                  <p>{selectedSite.customerName} · ยืนยัน {selectedSite.confirmed}/{selectedSite.slots.length}</p>
+                </div>
+                <button type="button" className="drawer-close" onClick={() => setSelectedSiteId(null)} aria-label="ปิดรายละเอียด">×</button>
+              </div>
+              <div className="drawer-slots">
+                {selectedSite.slots.map((slot) => (
+                  <article className="drawer-slot" key={slot.id}>
+                    <div>
+                      <strong>{slot.postName} · {slot.slotLabel}</strong>
+                      <p>{slot.assignedGuard ?? "ยังไม่มีผู้รับผิดชอบ"}{slot.assignmentType === "spare" ? " · สแปร์" : ""}</p>
+                      <small className={slot.lateMinutes > 0 ? "late-text" : ""}>{slotText[slot.state]} · กำหนด {slot.deadline}{slot.lateMinutes > 0 ? ` · สาย ${slot.lateMinutes} นาที` : ""}</small>
+                    </div>
+                    <div className="drawer-actions">
+                      {slot.state !== "confirmed" && (
+                        <button className="action-confirm" disabled={busyId === slot.id} onClick={() => void runAction({ type: "confirm", slotId: slot.id, source: "ผู้จัดการตรวจจากรายงาน" }, slot.id, "ยืนยันกำลังแล้ว")}>ยืนยัน</button>
+                      )}
+                      <button className="action-text" disabled={busyId === slot.id} onClick={() => replaceGuard(slot)}>สแปร์</button>
+                      {slot.assignedGuard && slot.state !== "confirmed" && (
+                        <button className="action-text danger" disabled={busyId === slot.id} onClick={() => void runAction({ type: "leave", slotId: slot.id }, slot.id, "บันทึกลา/หยุดแล้ว กรุณาเลือกสแปร์")}>ลา/หยุด</button>
+                      )}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </aside>
+          )}
         </>
       ) : (
         <>
