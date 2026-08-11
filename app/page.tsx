@@ -51,6 +51,8 @@ type LineGroup = {
   nameResolved: boolean;
   pictureUrl: string | null;
   lastSeenAt: string | null;
+  lastEventType: string | null;
+  eventCount: number;
   source: "manual" | "webhook";
 };
 
@@ -190,6 +192,27 @@ function siteStatusSummary(site: SiteCard) {
 function lineGroupLabel(group: LineGroup | null | undefined) {
   if (!group) return "ยังไม่ผูก LINE";
   return group.nameResolved ? group.groupName : "กำลังรอชื่อจริงจาก LINE";
+}
+
+type LineSignalStatus = "green" | "yellow" | "red" | "gray";
+
+function lineSignalStatus(group: LineGroup, nowTime: string): LineSignalStatus {
+  if (!group.lastSeenAt) return "gray";
+  const seenAt = Date.parse(group.lastSeenAt);
+  if (!Number.isFinite(seenAt)) return "gray";
+  const ageMinutes = Math.max(0, Math.floor((Date.now() - seenAt) / 60_000));
+  if (ageMinutes <= 30) return "green";
+  if (ageMinutes <= 120) return "yellow";
+  const parts = nowTime.split(":").map(Number);
+  const minute = (parts[0] ?? 0) * 60 + (parts[1] ?? 0);
+  return (minute >= 330 && minute <= 500) || (minute >= 1020 && minute <= 1200) ? "red" : "gray";
+}
+
+function lineSignalLabel(status: LineSignalStatus) {
+  if (status === "green") return "มีสัญญาณล่าสุด";
+  if (status === "yellow") return "สัญญาณช้าลง";
+  if (status === "red") return "เงียบในช่วงเวร";
+  return "ยังไม่มีข้อมูล";
 }
 
 function parseCsv(text: string) {
@@ -354,6 +377,25 @@ export default function Home() {
       { green: 0, yellow: 0, red: 0, gray: 0, confirmed: 0 },
     );
   }, [sites]);
+  const operationalSiteById = useMemo(() => new Map((data?.sites ?? []).map((site) => [site.id, site])), [data?.sites]);
+  const lineOverviewGroups = useMemo(
+    () => [...(data?.lineGroups ?? [])].sort((left, right) => {
+      const statusRank: Record<LineSignalStatus, number> = { red: 0, yellow: 1, gray: 2, green: 3 };
+      const leftStatus = lineSignalStatus(left, data?.now.time ?? "00:00");
+      const rightStatus = lineSignalStatus(right, data?.now.time ?? "00:00");
+      return statusRank[leftStatus] - statusRank[rightStatus]
+        || (left.lastSeenAt ? -Date.parse(left.lastSeenAt) : Number.POSITIVE_INFINITY)
+        || left.groupName.localeCompare(right.groupName, "th");
+    }),
+    [data?.lineGroups, data?.now.time],
+  );
+  const lineOverviewStats = useMemo(() => lineOverviewGroups.reduce(
+    (all, group) => {
+      all[lineSignalStatus(group, data?.now.time ?? "00:00")] += 1;
+      return all;
+    },
+    { green: 0, yellow: 0, red: 0, gray: 0 } as Record<LineSignalStatus, number>,
+  ), [data?.now.time, lineOverviewGroups]);
   const visibleSites = useMemo(
     () => statusFilter === "all" ? sites : sites.filter((site) => site.status === statusFilter),
     [sites, statusFilter],
@@ -695,6 +737,41 @@ export default function Home() {
             <button className={statusFilter === "gray" ? "active gray" : "gray"} onClick={() => setStatusFilter("gray")}>เทา {stats.gray}</button>
             <span>กดกรอบใดก็ได้เพื่อดูและจัดการเฉพาะจุด</span>
           </div>
+
+          <section className="line-overview" aria-label="ภาพรวมสัญญาณ LINE OA">
+            <div className="line-overview-head">
+              <div>
+                <p className="eyebrow">LIVE LINE OVERVIEW</p>
+                <h3>ภาพรวมกลุ่ม LINE OA</h3>
+                <p>ฐานข้อมูลจาก LINE webhook/gateway อัปเดตอัตโนมัติทุก 30 วินาที · ไม่ต้องเปิด OA ไล่ดูทีละกลุ่ม</p>
+              </div>
+              <div className="line-overview-counts" aria-label="สรุปสัญญาณ LINE">
+                <span className="green"><b>{lineOverviewStats.green}</b> ล่าสุด</span>
+                <span className="yellow"><b>{lineOverviewStats.yellow}</b> ช้าลง</span>
+                <span className="red"><b>{lineOverviewStats.red}</b> เงียบ</span>
+                <span className="gray"><b>{lineOverviewStats.gray}</b> ยังไม่มี</span>
+              </div>
+            </div>
+            <p className="line-overview-note">สีนี้บอกความเคลื่อนไหวของ LINE เท่านั้น ไม่ใช้แทนการยืนยันเข้าเวร ผู้จัดการกดเช็คเข้าเวรในจุดด้านล่างเมื่อเห็นรายงานแล้ว</p>
+            <div className="line-overview-grid">
+              {lineOverviewGroups.map((group) => {
+                const signal = lineSignalStatus(group, data?.now.time ?? "00:00");
+                const site = group.siteId ? operationalSiteById.get(group.siteId) : null;
+                return (
+                  <button className={`line-overview-card ${signal}`} key={group.id} type="button" onClick={() => group.siteId ? setSelectedSiteId(group.siteId) : setTab("line")}>
+                    <span className="line-overview-card-top">
+                      {group.pictureUrl ? <img src={group.pictureUrl} alt="" /> : <b>LINE</b>}
+                      <span className="line-overview-name">{group.nameResolved ? group.groupName : "รอชื่อจริงจาก LINE"}</span>
+                      <i aria-hidden="true" />
+                    </span>
+                    <span className="line-overview-site">{site ? site.siteName : "ยังไม่ผูกจุด"}</span>
+                    <span className="line-overview-meta"><b>{lineSignalLabel(signal)}</b><span>{displayTime(group.lastSeenAt)} · {group.eventCount} เหตุการณ์</span></span>
+                  </button>
+                );
+              })}
+              {!lineOverviewGroups.length && <p className="line-overview-empty">ยังไม่มีข้อมูลกลุ่มจาก LINE OA</p>}
+            </div>
+          </section>
 
           {showSlotForm && (
             <form className="slot-form" onSubmit={submitSlot}>

@@ -42,6 +42,8 @@ export type LineGroup = {
   nameResolved: boolean;
   pictureUrl: string | null;
   lastSeenAt: string | null;
+  lastEventType: string | null;
+  eventCount: number;
   source: "manual" | "webhook";
 };
 
@@ -176,6 +178,8 @@ function toLineGroup(row: D1Row): LineGroup {
     nameResolved: source === "webhook" && !isPlaceholderLineGroupName(groupName, id),
     pictureUrl: value(row, "picture_url"),
     lastSeenAt: value(row, "last_seen_at"),
+    lastEventType: value(row, "last_event_type"),
+    eventCount: numberValue(row, "event_count"),
     source,
   };
 }
@@ -362,7 +366,7 @@ export async function getDashboard() {
   const today = current.date;
   const slotResult = await db.prepare("SELECT * FROM coverage_slots WHERE operational_date = ? ORDER BY wave, site_name, post_name, slot_label").bind(today).all<D1Row>();
   const siteResult = await db.prepare("SELECT * FROM operational_sites WHERE active = 1 ORDER BY site_name").all<D1Row>();
-  const lineGroupResult = await db.prepare("SELECT r.id, m.site_id, r.group_name, r.picture_url, r.last_seen_at, r.source FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id ORDER BY CASE WHEN m.site_id IS NULL THEN 0 ELSE 1 END, r.group_name").all<D1Row>();
+  const lineGroupResult = await db.prepare("SELECT r.id, m.site_id, r.group_name, r.picture_url, r.last_seen_at, r.source, (SELECT e.event_type FROM line_webhook_events e WHERE e.group_id = r.id ORDER BY e.received_at DESC LIMIT 1) AS last_event_type, (SELECT COUNT(*) FROM line_webhook_events e WHERE e.group_id = r.id) AS event_count FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id ORDER BY CASE WHEN m.site_id IS NULL THEN 0 ELSE 1 END, r.group_name").all<D1Row>();
   const templateResult = await db.prepare("SELECT wave, COUNT(*) AS count FROM shift_templates WHERE active = 1 GROUP BY wave").all<D1Row>();
   const demoCount = await db.prepare("SELECT COUNT(*) AS count FROM operational_sites WHERE id IN ('site-green', 'site-late', 'site-waiting', 'site-missing')").first<{ count: number }>();
   const billingResult = await db.prepare("SELECT * FROM billing_cases ORDER BY due_at ASC, updated_at DESC LIMIT 30").all<D1Row>();

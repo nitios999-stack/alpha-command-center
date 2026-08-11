@@ -85,6 +85,7 @@ test("keeps the command center database and product surface in source", async ()
   assert.match(commands, /deleteLineGroup/);
   assert.match(commands, /deleteOperationalSite/);
   assert.match(commands, /updateOperationalSite/);
+  assert.match(commands, /last_event_type/);
   assert.match(page, /site-wall/);
   assert.match(page, /csvToTemplates/);
   assert.match(page, /lineGroupId/);
@@ -92,6 +93,8 @@ test("keeps the command center database and product surface in source", async ()
   assert.match(page, /line-gateway-sync/);
   assert.match(page, /เช็คก่อน/);
   assert.match(page, /ลบจุด/);
+  assert.match(page, /line-overview/);
+  assert.match(page, /lineSignalStatus/);
   assert.doesNotMatch(page, /lineMapGroupName|lineMapPictureUrl/);
   assert.doesNotMatch(page, /line_group_name|line_picture_url/);
   assert.match(page, /LINE OA/);
