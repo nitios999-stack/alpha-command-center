@@ -1,0 +1,752 @@
+@import "tailwindcss";
+
+:root {
+  --ink: #172023;
+  --muted: #687477;
+  --surface: #ffffff;
+  --canvas: #f4f6f4;
+  --line: #dfe6e2;
+  --forest: #0a5b46;
+  --forest-dark: #073a2e;
+  --mint: #dff3e9;
+  --amber: #ffefbc;
+  --amber-ink: #8a5b00;
+  --red: #b93732;
+  --red-soft: #ffe5e2;
+  --shadow: 0 14px 36px rgba(17, 44, 35, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at 85% 5%, rgba(175, 223, 200, 0.52), transparent 26rem),
+    linear-gradient(180deg, #edf4f0 0, var(--canvas) 17rem);
+  font-family: Arial, "Noto Sans Thai", Tahoma, sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.shell {
+  width: min(1180px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 28px 0 64px;
+}
+
+.topbar,
+.hero,
+.site-card-head,
+.slot-row,
+.billing-card,
+.billing-top,
+.section-heading,
+.tabs,
+.notice {
+  display: flex;
+  align-items: center;
+}
+
+.topbar {
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 26px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-mark {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  color: white;
+  font-size: 1.15rem;
+  font-weight: 800;
+  background: var(--forest);
+  border-radius: 13px 13px 13px 2px;
+  box-shadow: 0 8px 18px rgba(10, 91, 70, 0.25);
+}
+
+.brand h1,
+.hero h2,
+.section-heading h3,
+.billing-top h3,
+.site-card h4,
+.billing-card h4 {
+  margin: 0;
+}
+
+.brand h1 {
+  font-size: 1.05rem;
+  letter-spacing: -0.02em;
+}
+
+.eyebrow {
+  margin: 0 0 5px;
+  color: var(--forest);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.live-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.83rem;
+}
+
+.pulse,
+.status-dot {
+  display: inline-block;
+  flex: 0 0 auto;
+  border-radius: 99px;
+}
+
+.pulse {
+  width: 9px;
+  height: 9px;
+  background: #21a46e;
+  box-shadow: 0 0 0 5px rgba(33, 164, 110, 0.13);
+}
+
+.hero {
+  justify-content: space-between;
+  gap: 28px;
+  padding: clamp(28px, 6vw, 54px);
+  color: white;
+  background: linear-gradient(125deg, #073e31, #0d7458);
+  border-radius: 28px;
+  box-shadow: 0 18px 42px rgba(8, 71, 55, 0.25);
+}
+
+.hero .eyebrow {
+  color: #a7e0c6;
+}
+
+.hero h2 {
+  max-width: 580px;
+  font-size: clamp(1.9rem, 4vw, 3.2rem);
+  letter-spacing: -0.055em;
+}
+
+.subcopy {
+  max-width: 590px;
+  margin: 14px 0 0;
+  color: #d3eee2;
+  line-height: 1.65;
+}
+
+.hero-date {
+  display: grid;
+  min-width: 175px;
+  gap: 4px;
+  padding: 18px 20px;
+  color: #e7f8ef;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 18px;
+}
+
+.hero-date span,
+.hero-date small {
+  color: #b4dfcb;
+  font-size: 0.76rem;
+}
+
+.hero-date strong {
+  font-size: 1.12rem;
+}
+
+.tabs {
+  gap: 7px;
+  margin: 24px 0;
+  padding: 6px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(223, 230, 226, 0.9);
+  border-radius: 15px;
+}
+
+.tabs button {
+  border: 0;
+  padding: 10px 14px;
+  color: var(--muted);
+  font-weight: 700;
+  background: transparent;
+  border-radius: 10px;
+}
+
+.tabs button.active {
+  color: white;
+  background: var(--forest);
+  box-shadow: 0 5px 12px rgba(10, 91, 70, 0.18);
+}
+
+.tabs button.quiet {
+  margin-left: auto;
+  color: var(--forest);
+}
+
+.notice {
+  justify-content: space-between;
+  gap: 12px;
+  margin: -8px 0 20px;
+  padding: 12px 14px;
+  color: var(--forest-dark);
+  background: var(--mint);
+  border: 1px solid #bee8d2;
+  border-radius: 12px;
+}
+
+.notice span {
+  color: #17a467;
+}
+
+.notice button {
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font-size: 1.2rem;
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+}
+
+.metric {
+  display: grid;
+  gap: 3px;
+  min-height: 128px;
+  padding: 19px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: 0 8px 18px rgba(15, 52, 41, 0.035);
+}
+
+.metric span,
+.metric small {
+  color: var(--muted);
+  font-size: 0.83rem;
+}
+
+.metric strong {
+  align-self: end;
+  font-size: 2.35rem;
+  letter-spacing: -0.065em;
+}
+
+.metric.green strong { color: var(--forest); }
+.metric.yellow strong { color: var(--amber-ink); }
+.metric.red strong { color: var(--red); }
+
+.section-heading,
+.billing-top {
+  justify-content: space-between;
+  gap: 16px;
+  margin: 34px 0 16px;
+}
+
+.section-heading h3,
+.billing-top h3 {
+  font-size: 1.4rem;
+  letter-spacing: -0.035em;
+}
+
+.heading-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.rule-note {
+  padding: 8px 11px;
+  color: var(--forest);
+  font-size: 0.8rem;
+  font-weight: 700;
+  background: #e4f4ec;
+  border-radius: 999px;
+}
+
+.small-primary {
+  min-height: 34px;
+  padding: 8px 10px;
+  color: white;
+  font-size: 0.78rem;
+  font-weight: 800;
+  border: 1px solid var(--forest);
+  background: var(--forest);
+  border-radius: 9px;
+}
+
+.wave-switch {
+  display: flex;
+  width: fit-content;
+  gap: 4px;
+  margin: -4px 0 15px;
+  padding: 4px;
+  background: #e8eeeb;
+  border-radius: 10px;
+}
+
+.wave-switch button {
+  padding: 7px 11px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 800;
+  border: 0;
+  background: transparent;
+  border-radius: 7px;
+}
+
+.wave-switch button.active {
+  color: var(--forest-dark);
+  background: var(--surface);
+  box-shadow: 0 2px 7px rgba(17, 44, 35, 0.1);
+}
+
+.site-grid,
+.billing-list {
+  display: grid;
+  gap: 16px;
+}
+
+.site-card,
+.billing-card,
+.billing-form {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  box-shadow: var(--shadow);
+}
+
+.site-card {
+  overflow: hidden;
+  border-left: 6px solid var(--line);
+}
+
+.site-card.green { border-left-color: var(--forest); }
+.site-card.yellow { border-left-color: #e4a916; }
+.site-card.red { border-left-color: var(--red); }
+
+.site-card-head {
+  justify-content: space-between;
+  gap: 14px;
+  padding: 20px 22px 17px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+}
+
+.status-dot.green { background: var(--forest); }
+.status-dot.yellow { background: #e4a916; }
+.status-dot.red { background: var(--red); }
+.status-dot.gray { background: #8b9592; }
+
+.status-label {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.site-card h4 {
+  margin-top: 7px;
+  font-size: 1.17rem;
+}
+
+.site-card-head p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.coverage-count {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+}
+
+.coverage-count strong {
+  font-size: 1.55rem;
+  letter-spacing: -0.06em;
+}
+
+.coverage-count span {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.late-badge {
+  width: fit-content;
+  margin: -2px 22px 15px;
+  padding: 6px 9px;
+  color: #8f3d00;
+  font-size: 0.78rem;
+  font-weight: 700;
+  background: #fff0d9;
+  border-radius: 8px;
+}
+
+.slot-list {
+  border-top: 1px solid var(--line);
+}
+
+.slot-row {
+  gap: 14px;
+  padding: 14px 22px;
+  border-bottom: 1px solid #edf1ef;
+}
+
+.slot-row:last-child {
+  border-bottom: 0;
+}
+
+.slot-person {
+  display: flex;
+  flex: 1 1 320px;
+  align-items: center;
+  gap: 11px;
+}
+
+.slot-icon {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  color: #7d8986;
+  font-size: 0.83rem;
+  font-weight: 900;
+  background: #eff3f1;
+  border-radius: 50%;
+}
+
+.slot-icon.confirmed {
+  color: white;
+  background: var(--forest);
+}
+
+.slot-icon.missing,
+.slot-icon.replacement_required,
+.slot-icon.unassigned {
+  color: white;
+  background: var(--red);
+}
+
+.slot-person strong {
+  font-size: 0.9rem;
+}
+
+.slot-person p,
+.slot-meta span,
+.slot-meta small {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 0.79rem;
+}
+
+.slot-meta {
+  display: grid;
+  min-width: 92px;
+}
+
+.slot-meta span {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.late-text {
+  color: var(--red) !important;
+  font-weight: 700;
+}
+
+.slot-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.slot-actions button,
+.primary-button {
+  min-height: 34px;
+  border-radius: 9px;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.action-confirm,
+.primary-button {
+  padding: 8px 11px;
+  color: white;
+  border: 1px solid var(--forest);
+  background: var(--forest);
+}
+
+.action-text {
+  padding: 8px 7px;
+  color: var(--forest);
+  border: 0;
+  background: transparent;
+}
+
+.action-text.danger {
+  color: var(--red);
+}
+
+.billing-top {
+  margin-top: 8px;
+}
+
+.primary-button {
+  padding: 10px 14px;
+  box-shadow: 0 8px 16px rgba(10, 91, 70, 0.15);
+}
+
+.billing-form,
+.slot-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 20px;
+}
+
+.billing-form label,
+.slot-form label {
+  display: grid;
+  gap: 7px;
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.billing-form input,
+.slot-form input,
+.slot-form select {
+  width: 100%;
+  padding: 10px 11px;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  outline: none;
+  background: #fbfcfb;
+  border-radius: 9px;
+}
+
+.billing-form input:focus,
+.slot-form input:focus,
+.slot-form select:focus {
+  border-color: var(--forest);
+  box-shadow: 0 0 0 3px rgba(10, 91, 70, 0.11);
+}
+
+.billing-form .primary-button,
+.slot-form .primary-button {
+  align-self: end;
+}
+
+.billing-card {
+  display: grid;
+  grid-template-columns: 1.4fr auto;
+  gap: 16px;
+  padding: 21px;
+}
+
+.billing-card h4 {
+  font-size: 1.15rem;
+}
+
+.next-action {
+  margin: 7px 0 0;
+  color: var(--muted);
+}
+
+.billing-amount {
+  display: grid;
+  align-content: start;
+  justify-items: end;
+  gap: 4px;
+}
+
+.billing-amount strong {
+  font-size: 1.22rem;
+  letter-spacing: -0.03em;
+}
+
+.billing-amount span,
+.billing-card footer {
+  color: var(--muted);
+  font-size: 0.77rem;
+}
+
+.billing-states {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.pill {
+  padding: 6px 9px;
+  color: #5e6563;
+  font-size: 0.76rem;
+  font-weight: 700;
+  background: #eef1ef;
+  border-radius: 999px;
+}
+
+.pill.good {
+  color: var(--forest);
+  background: #e1f3e8;
+}
+
+.billing-card footer {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  gap: 10px 22px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.loading-card {
+  padding: 28px;
+  color: var(--muted);
+  text-align: center;
+  background: var(--surface);
+  border: 1px dashed #cbd6d1;
+  border-radius: 16px;
+}
+
+@media (max-width: 760px) {
+  .shell {
+    width: min(100% - 22px, 680px);
+    padding-top: 16px;
+  }
+
+  .topbar,
+  .hero,
+  .section-heading,
+  .billing-top {
+    align-items: flex-start;
+  }
+
+  .topbar {
+    margin-bottom: 16px;
+  }
+
+  .live-indicator {
+    display: none;
+  }
+
+  .hero {
+    flex-direction: column;
+    padding: 28px 23px;
+    border-radius: 22px;
+  }
+
+  .hero-date {
+    width: 100%;
+  }
+
+  .metrics {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .metric {
+    min-height: 106px;
+    padding: 15px;
+  }
+
+  .metric strong {
+    font-size: 2rem;
+  }
+
+  .rule-note {
+    display: none;
+  }
+
+  .heading-actions {
+    justify-content: flex-start;
+  }
+
+  .slot-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    padding: 14px 16px;
+  }
+
+  .slot-person {
+    min-width: 0;
+  }
+
+  .slot-meta {
+    justify-items: end;
+  }
+
+  .slot-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+    margin-top: 3px;
+  }
+
+  .site-card-head {
+    padding: 17px 16px 14px;
+  }
+
+  .late-badge {
+    margin-left: 16px;
+  }
+
+  .billing-form,
+  .slot-form,
+  .billing-card {
+    grid-template-columns: 1fr;
+  }
+
+  .billing-amount {
+    justify-items: start;
+  }
+
+  .billing-states,
+  .billing-card footer {
+    grid-column: 1;
+  }
+
+  .tabs {
+    overflow-x: auto;
+  }
+
+  .tabs button {
+    white-space: nowrap;
+  }
+}
