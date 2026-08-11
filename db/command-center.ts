@@ -58,6 +58,14 @@ export type LineIntegrationStatus = {
   mappedGroups: number;
 };
 
+export type LineReminderSettings = {
+  targetGroupId: string | null;
+  autoEnabled: boolean;
+  lastSentAt: string | null;
+  lastSentCount: number;
+  lastTargetName: string | null;
+};
+
 export type TemplateImportRow = {
   siteName: string;
   customerName: string;
@@ -106,6 +114,33 @@ function value(row: D1Row, key: string) {
 
 function numberValue(row: D1Row, key: string) {
   return Number(row[key] ?? 0);
+}
+
+const LINE_REMINDER_SETTING_KEYS = [
+  "line_reminder_target_group_id",
+  "line_reminder_auto_enabled",
+  "line_reminder_last_sent_at",
+  "line_reminder_last_sent_count",
+  "line_reminder_last_target_name",
+] as const;
+
+async function getLineReminderSettings(): Promise<LineReminderSettings> {
+  const result = await database().prepare("SELECT key, value FROM system_settings WHERE key IN (?, ?, ?, ?, ?)")
+    .bind(...LINE_REMINDER_SETTING_KEYS).all<D1Row>();
+  const settings = new Map((result.results ?? []).map((row) => [String(row.key), String(row.value)]));
+  return {
+    targetGroupId: settings.get("line_reminder_target_group_id") || null,
+    autoEnabled: settings.get("line_reminder_auto_enabled") === "1",
+    lastSentAt: settings.get("line_reminder_last_sent_at") || null,
+    lastSentCount: Number(settings.get("line_reminder_last_sent_count") ?? 0),
+    lastTargetName: settings.get("line_reminder_last_target_name") || null,
+  };
+}
+
+async function setLineReminderSetting(key: typeof LINE_REMINDER_SETTING_KEYS[number], value: string) {
+  const now = bangkokNow().iso;
+  await database().prepare("INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+    .bind(key, value, now).run();
 }
 
 function toCoverageSlot(row: D1Row, nowTime?: string): CoverageSlot {
@@ -371,6 +406,7 @@ export async function getDashboard() {
   const demoCount = await db.prepare("SELECT COUNT(*) AS count FROM operational_sites WHERE id IN ('site-green', 'site-late', 'site-waiting', 'site-missing')").first<{ count: number }>();
   const billingResult = await db.prepare("SELECT * FROM billing_cases ORDER BY due_at ASC, updated_at DESC LIMIT 30").all<D1Row>();
   const lineCounts = await db.prepare("SELECT COUNT(*) AS received_groups, COUNT(m.id) AS mapped_groups, MAX(r.last_seen_at) AS last_webhook_at FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id").first<{ received_groups: number; mapped_groups: number; last_webhook_at: string | null }>();
+  const lineReminder = await getLineReminderSettings();
   const lastWebhookAt = lineCounts?.last_webhook_at ?? null;
   const parsedWebhookTime = lastWebhookAt ? Date.parse(lastWebhookAt) : Number.NaN;
   const webhookAgeMinutes = Number.isFinite(parsedWebhookTime)
@@ -399,6 +435,7 @@ export async function getDashboard() {
       receivedGroups: Number(lineCounts?.received_groups ?? 0),
       mappedGroups: Number(lineCounts?.mapped_groups ?? 0),
     } satisfies LineIntegrationStatus,
+    lineReminder,
     templates,
     demoDataPresent: Number(demoCount?.count ?? 0) > 0,
     billingCases: (billingResult.results ?? []).map(toBillingCase),
@@ -640,6 +677,89 @@ export async function sendLineConnectionTest(input: { groupId: string; actor: st
   });
   if (!response.ok) throw new Error("LINE OA ไม่รับการส่งข้อความทดสอบ โปรดตรวจว่าบอตอยู่ในกลุ่มและสิทธิ์ Channel ถูกต้อง");
   await addAudit("line_group", groupId, "connection_test_sent", input.actor, `ส่งข้อความทดสอบไปยัง ${String(group.group_name)} โดยไม่ส่งข้อมูลภายใน`);
+}
+
+export async function saveLineReminderSettings(input: { targetGroupId: string; autoEnabled: boolean; actor: string }) {
+  await ensureDatabase();
+  const targetGroupId = input.targetGroupId.trim();
+  if (targetGroupId) {
+    const group = await database().prepare("SELECT group_name FROM line_group_registry WHERE id = ?").bind(targetGroupId).first<D1Row>();
+    if (!group) throw new Error("ยังไม่พบกลุ่มหลักในทะเบียน LINE กรุณาให้กลุ่มส่ง webhook ก่อน");
+  }
+  await setLineReminderSetting("line_reminder_target_group_id", targetGroupId);
+  await setLineReminderSetting("line_reminder_auto_enabled", input.autoEnabled ? "1" : "0");
+  await addAudit("line_reminder", targetGroupId || "none", "settings_saved", input.actor, targetGroupId ? "ตั้งกลุ่มหลักสำหรับแจ้งเตือนรายงาน" : "ล้างกลุ่มหลักสำหรับแจ้งเตือนรายงาน");
+}
+
+type ReminderGroupRow = D1Row & {
+  id: string;
+  group_name: string;
+  last_seen_at: string | null;
+  site_name: string | null;
+  customer_name: string | null;
+};
+
+function reminderTimeAgeMinutes(value: string | null, nowMs: number) {
+  if (!value) return Number.POSITIVE_INFINITY;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, Math.floor((nowMs - timestamp) / 60_000)) : Number.POSITIVE_INFINITY;
+}
+
+export async function sendLineReportReminder(input: { targetGroupId: string; wave: "morning" | "evening"; actor: string; force?: boolean }) {
+  await ensureDatabase();
+  const targetGroupId = input.targetGroupId.trim();
+  const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
+  if (!targetGroupId) throw new Error("กรุณาเลือกกลุ่ม LINE หลักก่อนส่งเตือน");
+  if (!token) throw new Error("ยังไม่ได้ตั้งค่า Channel access token ในระบบที่ปลอดภัย");
+  const db = database();
+  const target = await db.prepare("SELECT group_name FROM line_group_registry WHERE id = ?").bind(targetGroupId).first<D1Row>();
+  if (!target) throw new Error("กลุ่มหลักนี้ไม่อยู่ในทะเบียน LINE แล้ว กรุณาซิงค์ทะเบียนใหม่");
+
+  const current = bangkokNow();
+  const reminderSettings = await getLineReminderSettings();
+  const previousSentAt = reminderSettings.lastSentAt ? Date.parse(reminderSettings.lastSentAt) : Number.NaN;
+  if (!input.force && Number.isFinite(previousSentAt) && Date.parse(current.iso) - previousSentAt < 10 * 60_000) {
+    return { skipped: true, message: "ระบบเพิ่งส่งแจ้งเตือนไปแล้วภายใน 10 นาที จึงข้ามรอบซ้ำ", silentCount: reminderSettings.lastSentCount };
+  }
+
+  const groups = await db.prepare("SELECT r.id, r.group_name, r.last_seen_at, s.site_name, s.customer_name FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id LEFT JOIN operational_sites s ON s.id = m.site_id WHERE r.id <> ? ORDER BY r.last_seen_at IS NOT NULL, r.last_seen_at ASC, r.group_name ASC")
+    .bind(targetGroupId).all<ReminderGroupRow>();
+  const silentGroups = (groups.results ?? []).filter((group) => reminderTimeAgeMinutes(group.last_seen_at, Date.parse(current.iso)) >= 30);
+  if (!silentGroups.length) {
+    return { skipped: true, message: "ตรวจแล้ว ยังไม่พบกลุ่มที่เงียบเกิน 30 นาที จึงยังไม่ส่งข้อความ", silentCount: 0 };
+  }
+
+  const waveLabel = input.wave === "evening" ? "ผลัดเย็น 17:00–20:00" : "ผลัดเช้า 05:30–08:20";
+  const previewGroups = silentGroups.slice(0, 24).map((group, index) => {
+    const site = group.site_name ? ` · ${group.site_name}` : " · ยังไม่ผูกจุด";
+    const age = group.last_seen_at ? `เงียบ ${reminderTimeAgeMinutes(group.last_seen_at, Date.parse(current.iso))} นาที` : "ยังไม่เคยส่ง";
+    return `${index + 1}. ${String(group.group_name).slice(0, 80)}${site} (${age})`;
+  });
+  const overflow = silentGroups.length > previewGroups.length ? `\n…และอีก ${silentGroups.length - previewGroups.length} กลุ่ม` : "";
+  const message = [
+    "🚨 แจ้งเตือนติดตามรายงาน ALPHA COP",
+    `${waveLabel} · ตรวจเวลา ${current.time}`,
+    `พบ ${silentGroups.length} กลุ่มที่ยังเงียบหรือไม่มีรายงานเกิน 30 นาที`,
+    "",
+    ...previewGroups,
+    overflow,
+    "",
+    "กรุณาติดตามจุดที่ขาดรายงานและให้ส่งรายงานเข้าระบบ",
+    "จาก ALPHA Command Center",
+  ].filter(Boolean).join("\n").slice(0, 4_900);
+  const response = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ to: targetGroupId, messages: [{ type: "text", text: message }] }),
+  });
+  if (!response.ok) throw new Error("LINE OA ไม่รับการส่งแจ้งเตือน โปรดตรวจว่าบอตอยู่ในกลุ่มหลักและมีสิทธิ์ส่งข้อความ");
+  await Promise.all([
+    setLineReminderSetting("line_reminder_last_sent_at", current.iso),
+    setLineReminderSetting("line_reminder_last_sent_count", String(silentGroups.length)),
+    setLineReminderSetting("line_reminder_last_target_name", String(target.group_name)),
+  ]);
+  await addAudit("line_reminder", targetGroupId, "report_reminder_sent", input.actor, `ส่งแจ้งเตือน ${silentGroups.length} กลุ่มเงียบไปยัง ${String(target.group_name)}`);
+  return { skipped: false, sentAt: current.iso, silentCount: silentGroups.length, targetGroupName: String(target.group_name), message: "ส่งแจ้งเตือนกลุ่มเงียบแล้ว" };
 }
 
 export async function syncLineGroupsFromGateway(actor?: string) {

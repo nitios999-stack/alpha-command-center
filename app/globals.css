@@ -2564,6 +2564,51 @@ select:focus-visible {
 .report-window small { color: #66716d; font-size: 0.72rem; }
 .report-window strong { color: #087457; font-size: 1.1rem; }
 
+.reminder-panel {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  background: linear-gradient(135deg, #fffefa, #f5faf7);
+  border: 1px solid #d9e8df;
+  border-radius: 18px;
+  box-shadow: 0 10px 24px rgba(10, 55, 40, 0.05);
+}
+
+.reminder-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.reminder-panel-head h3 { margin: 2px 0 4px; color: var(--forest-dark); font-size: 1.05rem; }
+.reminder-panel-head p:not(.eyebrow) { max-width: 650px; margin: 0; color: #61726a; font-size: 0.75rem; line-height: 1.5; }
+.reminder-target { display: flex; min-width: min(100%, 340px); align-items: flex-end; gap: 7px; }
+.reminder-target label,
+.reminder-wave { display: grid; gap: 4px; color: #65766e; font-size: 0.68rem; font-weight: 800; }
+.reminder-target select,
+.reminder-wave select { min-height: 39px; padding: 7px 10px; color: var(--ink); background: white; border: 1px solid #d3e2d9; border-radius: 10px; }
+.reminder-target label { flex: 1; }
+
+.reminder-plan {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 12px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid #e1ebe5;
+  border-radius: 13px;
+}
+
+.reminder-plan-copy { display: grid; min-width: 220px; gap: 2px; }
+.reminder-plan-copy strong { color: #164334; font-size: 0.9rem; }
+.reminder-plan-copy small { color: #718078; font-size: 0.65rem; }
+.reminder-toggle { display: inline-flex; align-items: center; gap: 6px; color: #52635c; font-size: 0.7rem; font-weight: 800; white-space: nowrap; }
+.reminder-toggle input { width: 16px; height: 16px; accent-color: #087457; }
+.reminder-plan > .small-primary { margin-left: auto; flex: 0 0 auto; }
+.reminder-foot { display: flex; justify-content: space-between; gap: 12px; color: #728078; font-size: 0.66rem; }
+.reminder-foot strong { color: #3d6555; }
+
 @media (max-width: 760px) {
   .attendance-intro,
   .report-hero { display: grid; gap: 11px; padding: 17px; border-radius: 18px; }
@@ -2593,4 +2638,14 @@ select:focus-visible {
   .report-toolbar-actions { justify-content: space-between; text-align: left; }
   .report-toolbar-actions .small-primary { min-height: 38px; padding: 7px 9px; }
   .line-overview-event { font-size: 0.59rem; }
+  .reminder-panel { padding: 13px; border-radius: 16px; }
+  .reminder-panel-head,
+  .reminder-plan { display: grid; align-items: stretch; gap: 10px; }
+  .reminder-target { display: grid; min-width: 0; align-items: stretch; }
+  .reminder-target .small-secondary { width: 100%; min-height: 40px; }
+  .reminder-plan-copy { min-width: 0; }
+  .reminder-wave select { width: 100%; }
+  .reminder-toggle { white-space: normal; }
+  .reminder-plan > .small-primary { width: 100%; margin-left: 0; }
+  .reminder-foot { display: grid; gap: 4px; }
 }

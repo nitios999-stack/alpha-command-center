@@ -1,6 +1,6 @@
 "use client";
 
-import { CSSProperties, FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { CSSProperties, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type SlotState = "confirmed" | "self_reported" | "waiting" | "replacement_required" | "unassigned" | "missing";
 
@@ -67,6 +67,14 @@ type LineIntegrationStatus = {
   mappedGroups: number;
 };
 
+type LineReminderSettings = {
+  targetGroupId: string | null;
+  autoEnabled: boolean;
+  lastSentAt: string | null;
+  lastSentCount: number;
+  lastTargetName: string | null;
+};
+
 type TemplateSummary = {
   total: number;
   morning: number;
@@ -92,6 +100,7 @@ type DashboardData = {
   sites: OperationalSite[];
   lineGroups: LineGroup[];
   lineIntegration: LineIntegrationStatus;
+  lineReminder: LineReminderSettings;
   templates: TemplateSummary;
   demoDataPresent: boolean;
   billingCases: BillingCase[];
@@ -333,6 +342,15 @@ function clientTime(value: number | null) {
   return new Intl.DateTimeFormat("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(value);
 }
 
+function reminderTimes(wave: "morning" | "evening") {
+  return wave === "morning" ? ["06:00", "06:30", "07:15"] : ["17:30", "18:00", "19:00"];
+}
+
+function nextReminderTime(wave: "morning" | "evening", nowTime: string) {
+  const times = reminderTimes(wave);
+  return times.find((time) => time >= nowTime) ?? times[0];
+}
+
 export default function Home() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [tab, setTab] = useState<"ops" | "billing" | "setup" | "line" | "reports">("ops");
@@ -350,6 +368,10 @@ export default function Home() {
   const [reportClockMs, setReportClockMs] = useState(0);
   const [reportFilter, setReportFilter] = useState<LineReportFilter>("all");
   const [reportSearch, setReportSearch] = useState("");
+  const [reminderTargetDraft, setReminderTargetDraft] = useState<string | null>(null);
+  const [reminderAutoDraft, setReminderAutoDraft] = useState<boolean | null>(null);
+  const [reminderWave, setReminderWave] = useState<"morning" | "evening">("morning");
+  const autoReminderKeyRef = useRef<string | null>(null);
   const [networkState, setNetworkState] = useState<"online" | "offline" | "error" | "auth">("online");
   const [replaceTarget, setReplaceTarget] = useState<CoverageSlot | null>(null);
   const [replaceName, setReplaceName] = useState("");
@@ -471,6 +493,14 @@ export default function Home() {
   const reportRefreshIn = lastLoadedAt && reportClockMs
     ? Math.max(0, 5 - Math.floor((reportClockMs - lastLoadedAt) / 1_000))
     : 5;
+  const suggestedReminderTarget = useMemo(
+    () => (data?.lineGroups ?? []).find((group) => /สนง\.?\s*สายตรวจ.*ALPHA\s*COP/i.test(group.groupName)) ?? null,
+    [data?.lineGroups],
+  );
+  const reminderTargetId = reminderTargetDraft ?? data?.lineReminder.targetGroupId ?? suggestedReminderTarget?.id ?? "";
+  const reminderAutoEnabled = reminderAutoDraft ?? data?.lineReminder.autoEnabled ?? false;
+  const reminderTargetGroup = (data?.lineGroups ?? []).find((group) => group.id === reminderTargetId) ?? null;
+  const reminderNextTime = nextReminderTime(reminderWave, lineNowTime);
   const visibleSites = useMemo(
     () => statusFilter === "all" ? sites : sites.filter((site) => site.status === statusFilter),
     [sites, statusFilter],
@@ -494,7 +524,7 @@ export default function Home() {
     return { columns, rows: Math.ceil(total / columns) };
   }, [visibleSites.length]);
 
-  const runAction = async (payload: Record<string, unknown>, id: string, success: string) => {
+  const runAction = useCallback(async (payload: Record<string, unknown>, id: string, success: string) => {
     setBusyId(id);
     setMessage(null);
     try {
@@ -503,7 +533,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const result = (await response.json()) as { error?: string; imported?: number; created?: number; existing?: number; total?: number };
+      const result = (await response.json()) as { error?: string; message?: string; skipped?: boolean; silentCount?: number; imported?: number; created?: number; existing?: number; total?: number };
       if (!response.ok) throw new Error(result.error ?? "ทำรายการไม่สำเร็จ");
       setMessage(success);
       await loadDashboard();
@@ -514,7 +544,49 @@ export default function Home() {
     } finally {
       setBusyId(null);
     }
-  };
+  }, [loadDashboard]);
+
+  const saveReminderSettings = useCallback(() => {
+    if (!reminderTargetId) {
+      setMessage("กรุณาเลือกกลุ่ม LINE หลักก่อน");
+      return;
+    }
+    void runAction(
+      { type: "line_reminder_settings", targetGroupId: reminderTargetId, autoEnabled: reminderAutoEnabled },
+      "line-reminder-settings",
+      "บันทึกกลุ่มหลักและแผนเตือนแล้ว",
+    );
+  }, [reminderAutoEnabled, reminderTargetId, runAction]);
+
+  const sendReminder = useCallback(async (force = true, automatic = false) => {
+    if (!reminderTargetId) {
+      setMessage("กรุณาเลือกกลุ่ม LINE หลักก่อนส่งเตือน");
+      return undefined;
+    }
+    if (force && !automatic && !window.confirm(`ส่งรายการกลุ่มเงียบไปที่ “${lineGroupLabel(reminderTargetGroup)}” ใช่หรือไม่?`)) return undefined;
+    const result = await runAction(
+      { type: "line_reminder_send", targetGroupId: reminderTargetId, wave: reminderWave, force },
+      automatic ? "line-reminder-auto" : "line-reminder-send",
+      automatic ? "ระบบส่งเตือนตามแผนแล้ว" : "ส่งเตือนกลุ่มเงียบไปยังกลุ่มหลักแล้ว",
+    );
+    if (result?.skipped && result.message) setMessage(result.message);
+    return result;
+  }, [reminderTargetGroup, reminderTargetId, reminderWave, runAction]);
+
+  useEffect(() => {
+    if (tab !== "reports" || !reminderAutoEnabled || !reminderTargetId || !data?.today) return;
+    const checkSchedule = () => {
+      const scheduledTime = reminderTimes(reminderWave).find((time) => time === lineNowTime);
+      if (!scheduledTime) return;
+      const key = `${data.today}-${reminderWave}-${scheduledTime}`;
+      if (autoReminderKeyRef.current === key) return;
+      autoReminderKeyRef.current = key;
+      void sendReminder(false, true);
+    };
+    checkSchedule();
+    const timer = window.setInterval(checkSchedule, 5_000);
+    return () => window.clearInterval(timer);
+  }, [data?.today, lineNowTime, reminderAutoEnabled, reminderTargetId, reminderWave, sendReminder, tab]);
 
   const replaceGuard = (slot: CoverageSlot) => {
     setReplaceTarget(slot);
@@ -990,6 +1062,43 @@ export default function Home() {
                 : data?.lineIntegration.webhookStatus === "stale" ? "Webhook เงียบเกิน 24 ชั่วโมง" : "กำลังรอสัญญาณจาก LINE"}</small>
             </div>
           </div>
+          <section className="reminder-panel" aria-label="ตั้งค่าการแจ้งเตือนกลุ่มหลัก">
+            <div className="reminder-panel-head">
+              <div>
+                <p className="eyebrow">LINE ALERT ROUTING</p>
+                <h3>แจ้งเตือนกลุ่มเงียบเข้ากลุ่มหลัก</h3>
+                <p>ระบบจะสรุปเฉพาะจุดที่เงียบ แล้วส่งข้อความติดตามไปยังกลุ่มสายตรวจที่เลือก โดยไม่ส่งข้อมูลกำลังภายในเกินจำเป็น</p>
+              </div>
+              <div className="reminder-target">
+                <label>กลุ่ม LINE หลัก
+                  <select value={reminderTargetId} onChange={(event) => setReminderTargetDraft(event.target.value)}>
+                    <option value="">เลือกกลุ่มหลัก…</option>
+                    {(data?.lineGroups ?? []).filter((group) => group.nameResolved).map((group) => <option key={group.id} value={group.id}>{group.groupName}</option>)}
+                  </select>
+                </label>
+                <button className="small-secondary" onClick={saveReminderSettings} disabled={!reminderTargetId || busyId === "line-reminder-settings"}>บันทึกปลายทาง</button>
+              </div>
+            </div>
+            <div className="reminder-plan">
+              <div className="reminder-plan-copy">
+                <span className="eyebrow">AI REMINDER PLAN</span>
+                <strong>{reminderWave === "morning" ? "ผลัดเช้า 05:30–08:20" : "ผลัดเย็น 17:00–20:00"}</strong>
+                <small>รอบแนะนำถัดไป {reminderNextTime} · รอบที่ระบบคำนวณจากช่วงผลัดและกลุ่มเงียบ</small>
+              </div>
+              <label className="reminder-wave">ผลัดที่จะเตือน
+                <select value={reminderWave} onChange={(event) => setReminderWave(event.target.value === "evening" ? "evening" : "morning")}>
+                  <option value="morning">เช้า 05:30–08:20</option>
+                  <option value="evening">เย็น 17:00–20:00</option>
+                </select>
+              </label>
+              <label className="reminder-toggle"><input type="checkbox" checked={reminderAutoEnabled} onChange={(event) => setReminderAutoDraft(event.target.checked)} /> เปิดเตือนตามแผนขณะเปิดศูนย์</label>
+              <button className="small-primary" onClick={() => void sendReminder(true)} disabled={!reminderTargetId || busyId === "line-reminder-send"}>{busyId === "line-reminder-send" ? "กำลังส่ง…" : "ส่งเตือนตอนนี้"}</button>
+            </div>
+            <div className="reminder-foot">
+              <span>ปลายทาง: <strong>{reminderTargetGroup ? lineGroupLabel(reminderTargetGroup) : "ยังไม่ได้เลือกกลุ่มหลัก"}</strong></span>
+              <span>{data?.lineReminder.lastSentAt ? `ส่งล่าสุด ${displayTime(data.lineReminder.lastSentAt)} · ${data.lineReminder.lastSentCount} กลุ่ม` : "ยังไม่เคยส่งแจ้งเตือนจากระบบ"}</span>
+            </div>
+          </section>
           <section className="report-quick-stats" aria-label="สรุปการส่งรายงาน">
             <button className={reportFilter === "all" && !reportSearch ? "active" : ""} onClick={() => { setReportFilter("all"); setReportSearch(""); }}>
               <span>กลุ่มทั้งหมด</span><strong>{lineOverviewGroups.length}</strong><small>แสดงทุกกลุ่ม</small>
