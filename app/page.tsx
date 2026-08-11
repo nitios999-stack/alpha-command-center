@@ -276,6 +276,13 @@ export default function Home() {
   const [templateFileName, setTemplateFileName] = useState("");
   const [lastLoadedAt, setLastLoadedAt] = useState<number | null>(null);
   const [networkState, setNetworkState] = useState<"online" | "offline" | "error" | "auth">("online");
+  const [replaceTarget, setReplaceTarget] = useState<CoverageSlot | null>(null);
+  const [replaceName, setReplaceName] = useState("");
+  const [lineMapTarget, setLineMapTarget] = useState<SiteCard | null>(null);
+  const [lineMapGroupId, setLineMapGroupId] = useState("");
+  const [lineMapGroupName, setLineMapGroupName] = useState("");
+  const [lineMapPictureUrl, setLineMapPictureUrl] = useState("");
+  const [showSiteForm, setShowSiteForm] = useState(false);
 
   const loadDashboard = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     if (!silent) setLoading(true);
@@ -372,12 +379,20 @@ export default function Home() {
   };
 
   const replaceGuard = (slot: CoverageSlot) => {
+    setReplaceTarget(slot);
+    setReplaceName(slot.assignedGuard ?? "");
+    return;
     const name = window.prompt("ระบุชื่อ รปภ. สแปร์ที่รับจุดนี้", "นายสมพงษ์ (สแปร์)");
     if (!name) return;
     void runAction({ type: "replace", slotId: slot.id, guardName: name }, slot.id, "มอบหมายสแปร์แล้ว ระบบกำลังรอรายงานเข้าเวร");
   };
 
   const mapLineGroup = (site: SiteCard) => {
+    setLineMapTarget(site);
+    setLineMapGroupId(site.lineGroup?.id ?? "");
+    setLineMapGroupName(site.lineGroup?.groupName ?? "");
+    setLineMapPictureUrl(site.lineGroup?.pictureUrl ?? "");
+    return;
     const groupId = window.prompt("รหัสกลุ่ม LINE (groupId)", site.lineGroup?.id ?? "");
     if (!groupId) return;
     const groupName = window.prompt("ชื่อที่ต้องการแสดงของกลุ่ม LINE", site.lineGroup?.groupName ?? "");
@@ -406,11 +421,66 @@ export default function Home() {
   };
 
   const addSiteWithoutRoster = () => {
+    setShowSiteForm(true);
+    return;
     const siteName = window.prompt("ชื่อจุดที่ต้องการแสดงเป็นสีเทา (ยังไม่ตั้งอัตราผลัดนี้)");
     if (!siteName) return;
     const customerName = window.prompt("ชื่อลูกค้าหรือหน่วยงานของจุดนี้");
     if (!customerName) return;
     void runAction({ type: "site", siteName, customerName }, "site-" + siteName, "เพิ่มจุดสีเทาแล้ว — ตั้งอัตรากำลังได้เมื่อพร้อม");
+  };
+
+  const submitReplacement = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!replaceTarget || !replaceName.trim()) return;
+    void runAction(
+      { type: "replace", slotId: replaceTarget.id, guardName: replaceName.trim() },
+      replaceTarget.id,
+      "มอบหมายสแปร์แล้ว ระบบกำลังรอรายงานเข้าเวร",
+    ).then((result) => {
+      if (result) {
+        setReplaceTarget(null);
+        setReplaceName("");
+      }
+    });
+  };
+
+  const submitLineMapping = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!lineMapTarget || !lineMapGroupId.trim() || !lineMapGroupName.trim()) return;
+    void runAction(
+      {
+        type: "line_group",
+        siteId: lineMapTarget.id,
+        groupId: lineMapGroupId.trim(),
+        groupName: lineMapGroupName.trim(),
+        pictureUrl: lineMapPictureUrl.trim(),
+      },
+      "line-" + lineMapTarget.id,
+      "ผูกกลุ่ม LINE กับจุดนี้แล้ว",
+    ).then((result) => {
+      if (result) {
+        setLineMapTarget(null);
+        setLineMapGroupId("");
+        setLineMapGroupName("");
+        setLineMapPictureUrl("");
+      }
+    });
+  };
+
+  const submitSite = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const siteName = String(form.get("siteName") ?? "").trim();
+    const customerName = String(form.get("customerName") ?? "").trim();
+    if (!siteName || !customerName) return;
+    void runAction(
+      { type: "site", siteName, customerName },
+      "site-" + siteName,
+      "เพิ่มจุดสีเทาแล้ว — ตั้งอัตรากำลังได้เมื่อพร้อม",
+    ).then((result) => {
+      if (result) setShowSiteForm(false);
+    });
   };
 
   const submitBilling = (event: FormEvent<HTMLFormElement>) => {
@@ -893,6 +963,39 @@ export default function Home() {
             <button className="primary-button" disabled={!data?.templates.total || busyId === "generate-today"} onClick={generateToday}>{busyId === "generate-today" ? "กำลังสร้าง…" : "สร้างแผงวันนี้"}</button>
           </section>
         </section>
+      )}
+
+      {replaceTarget && (
+        <div className="modal-backdrop" role="presentation">
+          <form className="modal-card" onSubmit={submitReplacement} role="dialog" aria-modal="true" aria-labelledby="replace-dialog-title">
+            <div className="modal-head"><div><p className="eyebrow">เปลี่ยนกำลัง</p><h3 id="replace-dialog-title">เลือก รปภ. สแปร์</h3><p>{replaceTarget.siteName} · {replaceTarget.postName} · {replaceTarget.slotLabel}</p></div><button type="button" className="drawer-close" onClick={() => setReplaceTarget(null)} aria-label="ปิด">×</button></div>
+            <label>ชื่อ รปภ. สแปร์<input value={replaceName} onChange={(event) => setReplaceName(event.target.value)} required placeholder="เช่น นายสมพงษ์ (สแปร์)" /></label>
+            <div className="modal-actions"><button type="button" className="small-secondary" onClick={() => setReplaceTarget(null)}>ยกเลิก</button><button className="small-primary" disabled={busyId === replaceTarget.id}>{busyId === replaceTarget.id ? "กำลังบันทึก…" : "มอบหมายสแปร์"}</button></div>
+          </form>
+        </div>
+      )}
+
+      {lineMapTarget && (
+        <div className="modal-backdrop" role="presentation">
+          <form className="modal-card" onSubmit={submitLineMapping} role="dialog" aria-modal="true" aria-labelledby="line-map-dialog-title">
+            <div className="modal-head"><div><p className="eyebrow">LINE OA</p><h3 id="line-map-dialog-title">ผูกกลุ่มกับจุด</h3><p>{lineMapTarget.name} · {lineMapTarget.customerName}</p></div><button type="button" className="drawer-close" onClick={() => setLineMapTarget(null)} aria-label="ปิด">×</button></div>
+            <label>Group ID<input value={lineMapGroupId} onChange={(event) => setLineMapGroupId(event.target.value)} required placeholder="Cxxxxxxxx…" /></label>
+            <label>ชื่อกลุ่มที่แสดง<input value={lineMapGroupName} onChange={(event) => setLineMapGroupName(event.target.value)} required placeholder="เช่น กลุ่ม รปภ. จุดนี้" /></label>
+            <label>ลิงก์โลโก้กลุ่ม (ถ้ามี)<input type="url" value={lineMapPictureUrl} onChange={(event) => setLineMapPictureUrl(event.target.value)} placeholder="https://…" /></label>
+            <div className="modal-actions"><button type="button" className="small-secondary" onClick={() => setLineMapTarget(null)}>ยกเลิก</button><button className="small-primary" disabled={busyId === "line-" + lineMapTarget.id}>{busyId === "line-" + lineMapTarget.id ? "กำลังบันทึก…" : "บันทึกการผูกกลุ่ม"}</button></div>
+          </form>
+        </div>
+      )}
+
+      {showSiteForm && (
+        <div className="modal-backdrop" role="presentation">
+          <form className="modal-card" onSubmit={submitSite} role="dialog" aria-modal="true" aria-labelledby="site-dialog-title">
+            <div className="modal-head"><div><p className="eyebrow">ทะเบียนจุด</p><h3 id="site-dialog-title">เพิ่มจุดสีเทา</h3><p>เพิ่มจุดไว้ก่อน แล้วค่อยตั้งอัตรากำลังภายหลัง</p></div><button type="button" className="drawer-close" onClick={() => setShowSiteForm(false)} aria-label="ปิด">×</button></div>
+            <label>ชื่อจุด<input name="siteName" required placeholder="เช่น จุดตรวจหน้าโรงงาน" /></label>
+            <label>ลูกค้าหรือหน่วยงาน<input name="customerName" required placeholder="ชื่อบริษัท/หน่วยงาน" /></label>
+            <div className="modal-actions"><button type="button" className="small-secondary" onClick={() => setShowSiteForm(false)}>ยกเลิก</button><button className="small-primary" disabled={busyId?.startsWith("site-") === true}>{busyId?.startsWith("site-") ? "กำลังบันทึก…" : "เพิ่มจุด"}</button></div>
+          </form>
+        </div>
       )}
     </main>
   );

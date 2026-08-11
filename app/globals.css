@@ -257,6 +257,77 @@ button:disabled {
   color: #806d42;
 }
 
+.modal-backdrop {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(10, 30, 24, 0.42);
+  backdrop-filter: blur(4px);
+}
+
+.modal-card {
+  display: grid;
+  width: min(100%, 520px);
+  gap: 14px;
+  max-height: min(92vh, 680px);
+  overflow: auto;
+  padding: 22px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  box-shadow: 0 24px 70px rgba(10, 44, 33, 0.22);
+}
+
+.modal-card label {
+  display: grid;
+  gap: 6px;
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.modal-card input {
+  min-height: 43px;
+  padding: 10px 12px;
+  color: var(--ink);
+  background: #fbfdfb;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.modal-card input:focus-visible {
+  outline: 3px solid rgba(10, 91, 70, 0.18);
+  border-color: var(--forest);
+}
+
+.modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.modal-head h3,
+.modal-head p:last-child {
+  margin: 0;
+}
+
+.modal-head p:last-child {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 0.83rem;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  padding-top: 4px;
+}
+
 .metrics {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
