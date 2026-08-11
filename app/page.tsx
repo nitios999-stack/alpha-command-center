@@ -299,7 +299,7 @@ function displayTime(value: string | null) {
 
 export default function Home() {
   const [data, setData] = useState<DashboardData | null>(null);
-  const [tab, setTab] = useState<"ops" | "billing" | "setup" | "line">("ops");
+  const [tab, setTab] = useState<"ops" | "billing" | "setup" | "line" | "reports">("ops");
   const [wave, setWave] = useState<"morning" | "evening">("morning");
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -639,7 +639,7 @@ export default function Home() {
   };
 
   return (
-    <main className={"shell app-shell " + (tab === "ops" ? "ops-shell" : tab === "setup" ? "setup-shell" : tab === "line" ? "line-shell" : "billing-shell")}>
+    <main className={"shell app-shell " + (tab === "ops" ? "ops-shell" : tab === "setup" ? "setup-shell" : tab === "line" ? "line-shell" : tab === "reports" ? "reports-shell" : "billing-shell")}>
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">A</span>
@@ -676,8 +676,9 @@ export default function Home() {
       </section>}
 
       <nav className="tabs" aria-label="เมนูหลัก">
-        <button data-icon="▦" className={tab === "ops" ? "active" : ""} onClick={() => setTab("ops")} aria-current={tab === "ops" ? "page" : undefined}>กำลังวันนี้</button>
+        <button data-icon="✓" className={tab === "ops" ? "active" : ""} onClick={() => setTab("ops")} aria-current={tab === "ops" ? "page" : undefined}>เข้าเวรวันนี้</button>
         <button data-icon="⌁" className={tab === "setup" ? "active" : ""} onClick={() => setTab("setup")} aria-current={tab === "setup" ? "page" : undefined}>ตั้งค่าอัตรา</button>
+        <button data-icon="≋" className={tab === "reports" ? "active" : ""} onClick={() => setTab("reports")} aria-current={tab === "reports" ? "page" : undefined}>ตรวจรายงาน</button>
         <button data-icon="●" className={tab === "line" ? "active" : ""} onClick={() => setTab("line")} aria-current={tab === "line" ? "page" : undefined}>LINE OA</button>
         <button data-icon="฿" className={tab === "billing" ? "active" : ""} onClick={() => setTab("billing")} aria-current={tab === "billing" ? "page" : undefined}>วางบิล</button>
         <button className="quiet refresh-control" onClick={() => void loadDashboard()} disabled={loading}>↻ รีเฟรช</button>
@@ -692,6 +693,18 @@ export default function Home() {
 
       {tab === "ops" ? (
         <>
+          <section className="attendance-intro" aria-label="เช็คเข้าเวรตามแผน">
+            <div>
+              <p className="eyebrow">SHIFT ATTENDANCE PLAN</p>
+              <h2>เช็คเข้าเวรตามแผน</h2>
+              <p>เลือกผลัด แล้วเช็คจากอัตรากำลังที่วางไว้ จุดที่เวลาเร็วกว่าจะเรียงขึ้นก่อน กด “ยืนยันเข้าแล้ว” เพื่อบันทึกเวลาเข้าเวรจริง</p>
+            </div>
+            <div className="attendance-window">
+              <span>วันนี้ {data?.today ?? "กำลังโหลด"}</span>
+              <strong>{wave === "morning" ? "เช้า 05:30–08:20" : "เย็น 17:00–20:00"}</strong>
+              <small>เวลาไทย · ตรวจตามแผนผลัดนี้</small>
+            </div>
+          </section>
           <section className="metrics wall-metrics" aria-label="สรุปกำลัง">
             <article className="metric neutral"><span>ทั้งหมด</span><strong>{sites.length}</strong><small>จุดในผลัดนี้</small></article>
             <article className="metric red"><span>ต้องจัดการ</span><strong>{stats.red}</strong><small>จุด</small></article>
@@ -738,40 +751,6 @@ export default function Home() {
             <span>กดกรอบใดก็ได้เพื่อดูและจัดการเฉพาะจุด</span>
           </div>
 
-          <section className="line-overview" aria-label="ภาพรวมสัญญาณ LINE OA">
-            <div className="line-overview-head">
-              <div>
-                <p className="eyebrow">LIVE LINE OVERVIEW</p>
-                <h3>ภาพรวมกลุ่ม LINE OA</h3>
-                <p>ฐานข้อมูลจาก LINE webhook/gateway อัปเดตอัตโนมัติทุก 30 วินาที · ไม่ต้องเปิด OA ไล่ดูทีละกลุ่ม</p>
-              </div>
-              <div className="line-overview-counts" aria-label="สรุปสัญญาณ LINE">
-                <span className="green"><b>{lineOverviewStats.green}</b> ล่าสุด</span>
-                <span className="yellow"><b>{lineOverviewStats.yellow}</b> ช้าลง</span>
-                <span className="red"><b>{lineOverviewStats.red}</b> เงียบ</span>
-                <span className="gray"><b>{lineOverviewStats.gray}</b> ยังไม่มี</span>
-              </div>
-            </div>
-            <p className="line-overview-note">สีนี้บอกความเคลื่อนไหวของ LINE เท่านั้น ไม่ใช้แทนการยืนยันเข้าเวร ผู้จัดการกดเช็คเข้าเวรในจุดด้านล่างเมื่อเห็นรายงานแล้ว</p>
-            <div className="line-overview-grid">
-              {lineOverviewGroups.map((group) => {
-                const signal = lineSignalStatus(group, data?.now.time ?? "00:00");
-                const site = group.siteId ? operationalSiteById.get(group.siteId) : null;
-                return (
-                  <button className={`line-overview-card ${signal}`} key={group.id} type="button" onClick={() => group.siteId ? setSelectedSiteId(group.siteId) : setTab("line")}>
-                    <span className="line-overview-card-top">
-                      {group.pictureUrl ? <img src={group.pictureUrl} alt="" /> : <b>LINE</b>}
-                      <span className="line-overview-name">{group.nameResolved ? group.groupName : "รอชื่อจริงจาก LINE"}</span>
-                      <i aria-hidden="true" />
-                    </span>
-                    <span className="line-overview-site">{site ? site.siteName : "ยังไม่ผูกจุด"}</span>
-                    <span className="line-overview-meta"><b>{lineSignalLabel(signal)}</b><span>{displayTime(group.lastSeenAt)} · {group.eventCount} เหตุการณ์</span></span>
-                  </button>
-                );
-              })}
-              {!lineOverviewGroups.length && <p className="line-overview-empty">ยังไม่มีข้อมูลกลุ่มจาก LINE OA</p>}
-            </div>
-          </section>
 
           {showSlotForm && (
             <form className="slot-form" onSubmit={submitSlot}>
@@ -920,6 +899,62 @@ export default function Home() {
             </aside>
           )}
         </>
+      ) : tab === "reports" ? (
+        <section className="report-control" aria-label="ตรวจการส่งรายงานจาก LINE">
+          <div className="report-hero">
+            <div>
+              <p className="eyebrow">REPORT CHECK</p>
+              <h2>ตรวจการส่งรายงานจาก LINE</h2>
+              <p>ดูว่าจุดไหนส่งรายงานเข้าระบบแล้ว จุดไหนเงียบ โดยไม่ต้องเปิด LINE OA ไล่ดูทีละกลุ่ม</p>
+            </div>
+            <div className="report-window">
+              <span>อัปเดตอัตโนมัติ</span>
+              <strong>ทุก 30 วินาที</strong>
+              <small>{data?.lineIntegration.webhookStatus === "healthy" ? "Webhook ทำงานปกติ" : "กำลังรอสัญญาณจาก LINE"}</small>
+            </div>
+          </div>
+          <section className="line-overview" aria-label="ภาพรวมสัญญาณ LINE OA">
+            <div className="line-overview-head">
+              <div>
+                <p className="eyebrow">LIVE LINE OVERVIEW</p>
+                <h3>ภาพรวมกลุ่ม LINE OA</h3>
+                <p>ฐานข้อมูลจาก LINE webhook/gateway อัปเดตอัตโนมัติทุก 30 วินาที · ไม่ต้องเปิด OA ไล่ดูทีละกลุ่ม</p>
+              </div>
+              <div className="line-overview-counts" aria-label="สรุปสัญญาณ LINE">
+                <span className="green"><b>{lineOverviewStats.green}</b> ล่าสุด</span>
+                <span className="yellow"><b>{lineOverviewStats.yellow}</b> ช้าลง</span>
+                <span className="red"><b>{lineOverviewStats.red}</b> เงียบ</span>
+                <span className="gray"><b>{lineOverviewStats.gray}</b> ยังไม่มี</span>
+              </div>
+            </div>
+            <p className="line-overview-note">สีนี้บอกความเคลื่อนไหวของ LINE เท่านั้น ไม่ใช้แทนการยืนยันเข้าเวร ผู้จัดการกดเช็คเข้าเวรในจุดด้านล่างเมื่อเห็นรายงานแล้ว</p>
+            <div className="line-overview-grid">
+              {lineOverviewGroups.map((group) => {
+                const signal = lineSignalStatus(group, data?.now.time ?? "00:00");
+                const site = group.siteId ? operationalSiteById.get(group.siteId) : null;
+                return (
+                  <button className={`line-overview-card ${signal}`} key={group.id} type="button" onClick={() => {
+                    if (group.siteId) {
+                      setSelectedSiteId(group.siteId);
+                      setTab("ops");
+                    } else {
+                      setTab("line");
+                    }
+                  }}>
+                    <span className="line-overview-card-top">
+                      {group.pictureUrl ? <img src={group.pictureUrl} alt="" /> : <b>LINE</b>}
+                      <span className="line-overview-name">{group.nameResolved ? group.groupName : "รอชื่อจริงจาก LINE"}</span>
+                      <i aria-hidden="true" />
+                    </span>
+                    <span className="line-overview-site">{site ? site.siteName : "ยังไม่ผูกจุด"}</span>
+                    <span className="line-overview-meta"><b>{lineSignalLabel(signal)}</b><span>{displayTime(group.lastSeenAt)} · {group.eventCount} เหตุการณ์</span></span>
+                  </button>
+                );
+              })}
+              {!lineOverviewGroups.length && <p className="line-overview-empty">ยังไม่มีข้อมูลกลุ่มจาก LINE OA</p>}
+            </div>
+          </section>
+        </section>
       ) : tab === "billing" ? (
         <>
           <section className="billing-top">
