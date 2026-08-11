@@ -57,12 +57,18 @@ test("keeps the command center database and product surface in source", async ()
   assert.match(schema, /coverage_slots/);
   assert.match(schema, /billing_cases/);
   assert.match(schema, /operational_sites/);
+  assert.match(schema, /shift_templates/);
+  assert.match(schema, /system_settings/);
   assert.match(schema, /idx_coverage_today/);
   assert.match(commands, /confirmSlot/);
   assert.match(commands, /replaceSlot/);
   assert.match(commands, /addBillingCase/);
   assert.match(commands, /addOperationalSite/);
+  assert.match(commands, /importShiftTemplates/);
+  assert.match(commands, /generateTodayFromTemplates/);
+  assert.match(commands, /removeDemoData/);
   assert.match(page, /site-wall/);
+  assert.match(page, /csvToTemplates/);
   assert.match(styles, /--wall-columns/);
   assert.match(page, /สีเขียว = ครบทุกช่องกำลัง/);
   assert.match(layout, /ALPHA Command Center/);

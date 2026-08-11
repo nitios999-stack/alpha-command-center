@@ -44,11 +44,30 @@ type OperationalSite = {
   active: number;
 };
 
+type TemplateSummary = {
+  total: number;
+  morning: number;
+  evening: number;
+};
+
+type TemplateRow = {
+  siteName: string;
+  customerName: string;
+  wave: "morning" | "evening";
+  postName: string;
+  slotLabel: string;
+  assignedGuard: string;
+  deadline: string;
+  verificationPolicy: "standard" | "reviewed" | "manual";
+};
+
 type DashboardData = {
   today: string;
   now: { time: string };
   slots: CoverageSlot[];
   sites: OperationalSite[];
+  templates: TemplateSummary;
+  demoDataPresent: boolean;
   billingCases: BillingCase[];
 };
 
@@ -130,6 +149,69 @@ function siteStatusSummary(site: SiteCard) {
   return "ยังไม่มีอัตรา";
 }
 
+function parseCsv(text: string) {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let quoted = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === '"') {
+      if (quoted && text[index + 1] === '"') {
+        cell += '"';
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (character === "," && !quoted) {
+      row.push(cell.trim());
+      cell = "";
+    } else if ((character === "\n" || character === "\r") && !quoted) {
+      if (character === "\r" && text[index + 1] === "\n") index += 1;
+      row.push(cell.trim());
+      if (row.some(Boolean)) rows.push(row);
+      row = [];
+      cell = "";
+    } else {
+      cell += character;
+    }
+  }
+  row.push(cell.trim());
+  if (row.some(Boolean)) rows.push(row);
+  return rows;
+}
+
+function csvToTemplates(text: string): TemplateRow[] {
+  const rows = parseCsv(text.replace(/^\uFEFF/, ""));
+  if (rows.length < 2) throw new Error("ไฟล์ต้องมีหัวตารางและอย่างน้อย 1 รายการ");
+  const headers = rows[0].map((header) => header.trim().toLowerCase());
+  const valueAt = (row: string[], names: string[]) => {
+    const column = names.map((name) => headers.indexOf(name)).find((position) => position >= 0) ?? -1;
+    return column >= 0 ? row[column]?.trim() ?? "" : "";
+  };
+  const templates = rows.slice(1).map((row, index) => {
+    const rawWave = valueAt(row, ["wave", "ผลัด"]).toLowerCase();
+    const rawPolicy = valueAt(row, ["verification_policy", "วิธียืนยัน"]).toLowerCase();
+    const item: TemplateRow = {
+      siteName: valueAt(row, ["site_name", "site", "ชื่อจุด"]),
+      customerName: valueAt(row, ["customer_name", "customer", "ลูกค้า"]),
+      wave: rawWave === "evening" || rawWave.includes("เย็น") ? "evening" : "morning",
+      postName: valueAt(row, ["post_name", "post", "จุดย่อย"]),
+      slotLabel: valueAt(row, ["slot_label", "slot", "ช่อง"]),
+      assignedGuard: valueAt(row, ["assigned_guard", "guard", "รปภ"]),
+      deadline: valueAt(row, ["deadline", "เวลา"]),
+      verificationPolicy: rawPolicy === "manual" || rawPolicy.includes("ผู้จัดการ") ? "manual" : rawPolicy === "reviewed" || rawPolicy.includes("หัวหน้า") ? "reviewed" : "standard",
+    };
+    if (!item.siteName || !item.customerName || !item.postName || !item.slotLabel || !/^\d{2}:\d{2}$/.test(item.deadline)) {
+      throw new Error(`แถวที่ ${index + 2} ไม่ครบ: ต้องมีชื่อจุด ลูกค้า จุดย่อย ช่อง และเวลา HH:MM`);
+    }
+    return item;
+  });
+  if (templates.length > 300) throw new Error("ไฟล์นี้มีเกิน 300 อัตรา กรุณาแบ่งนำเข้าเป็น 2 ครั้ง");
+  return templates;
+}
+
 function formatBaht(satang: number) {
   return new Intl.NumberFormat("th-TH", {
     style: "currency",
@@ -150,7 +232,7 @@ function displayTime(value: string | null) {
 
 export default function Home() {
   const [data, setData] = useState<DashboardData | null>(null);
-  const [tab, setTab] = useState<"ops" | "billing">("ops");
+  const [tab, setTab] = useState<"ops" | "billing" | "setup">("ops");
   const [wave, setWave] = useState<"morning" | "evening">("morning");
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -159,6 +241,8 @@ export default function Home() {
   const [showSlotForm, setShowSlotForm] = useState(false);
   const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<SiteStatus | "all">("all");
+  const [templateRows, setTemplateRows] = useState<TemplateRow[]>([]);
+  const [templateFileName, setTemplateFileName] = useState("");
 
   const loadDashboard = useCallback(async () => {
     setLoading(true);
@@ -216,12 +300,14 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const result = (await response.json()) as { error?: string };
+      const result = (await response.json()) as { error?: string; imported?: number; created?: number; existing?: number; total?: number };
       if (!response.ok) throw new Error(result.error ?? "ทำรายการไม่สำเร็จ");
       setMessage(success);
       await loadDashboard();
+      return result;
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "ทำรายการไม่สำเร็จ");
+      return undefined;
     } finally {
       setBusyId(null);
     }
@@ -278,8 +364,54 @@ export default function Home() {
     ).then(() => setShowSlotForm(false));
   };
 
+  const loadTemplateFile = async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      const rows = csvToTemplates(await file.text());
+      setTemplateRows(rows);
+      setTemplateFileName(file.name);
+      setMessage(`ตรวจพบ ${rows.length} อัตรา — ตรวจตัวอย่างด้านล่างแล้วกดยืนยันนำเข้า`);
+    } catch (error) {
+      setTemplateRows([]);
+      setTemplateFileName("");
+      setMessage(error instanceof Error ? error.message : "อ่านไฟล์ไม่สำเร็จ");
+    }
+  };
+
+  const importTemplates = () => {
+    if (!templateRows.length) return;
+    void runAction({ type: "template_import", rows: templateRows }, "template-import", "นำเข้าอัตราต้นแบบแล้ว").then((result) => {
+      if (result?.imported) {
+        setMessage(`นำเข้าและอัปเดตอัตราต้นแบบ ${result.imported} ช่องแล้ว — ข้อมูลการยืนยันหน้างานเดิมไม่ถูกแก้ไข`);
+        setTemplateRows([]);
+        setTemplateFileName("");
+      }
+    });
+  };
+
+  const generateToday = () => {
+    void runAction({ type: "generate_today" }, "generate-today", "สร้างแผงของวันนี้แล้ว").then((result) => {
+      if (result) setMessage(`สร้างเพิ่ม ${result.created ?? 0} ช่อง · เดิมมีแล้ว ${result.existing ?? 0} ช่อง — ไม่มีการทับผลยืนยันเดิม`);
+    });
+  };
+
+  const removeDemo = () => {
+    if (!window.confirm("ล้างเฉพาะจุดและวางบิลตัวอย่างทั้งหมดใช่หรือไม่? ข้อมูลจริงที่นำเข้าแล้วจะไม่ถูกลบ")) return;
+    void runAction({ type: "remove_demo" }, "remove-demo", "ล้างข้อมูลตัวอย่างแล้ว");
+  };
+
+  const downloadTemplate = () => {
+    const sample = "site_name,customer_name,wave,post_name,slot_label,assigned_guard,deadline,verification_policy\nหมู่บ้านตัวอย่าง,นิติบุคคลตัวอย่าง,morning,ป้อมหน้า,ช่อง 1,นายสมชาย,06:00,standard\nหมู่บ้านตัวอย่าง,นิติบุคคลตัวอย่าง,evening,ป้อมหน้า,ช่อง 1,นายสมชาย,18:00,standard";
+    const url = URL.createObjectURL(new Blob(["\uFEFF" + sample], { type: "text/csv;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "alpha-command-center-template.csv";
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
-    <main className={"shell " + (tab === "ops" ? "ops-shell" : "billing-shell")}>
+    <main className={"shell " + (tab === "ops" ? "ops-shell" : tab === "setup" ? "setup-shell" : "billing-shell")}>
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">A</span>
@@ -313,6 +445,7 @@ export default function Home() {
 
       <nav className="tabs" aria-label="เมนูหลัก">
         <button className={tab === "ops" ? "active" : ""} onClick={() => setTab("ops")}>กำลังวันนี้</button>
+        <button className={tab === "setup" ? "active" : ""} onClick={() => setTab("setup")}>ตั้งค่าอัตรา</button>
         <button className={tab === "billing" ? "active" : ""} onClick={() => setTab("billing")}>วางบิล</button>
         <button className="quiet" onClick={() => void loadDashboard()} disabled={loading}>รีเฟรช</button>
       </nav>
@@ -340,6 +473,9 @@ export default function Home() {
             </div>
             <div className="heading-actions">
               <span className="rule-note">สีเขียว = ครบทุกช่องกำลัง</span>
+              <button className="small-secondary" disabled={!data?.templates.total || busyId === "generate-today"} onClick={generateToday}>
+                {busyId === "generate-today" ? "กำลังสร้าง…" : `สร้างวันนี้จาก ${data?.templates.total ?? 0} อัตรา`}
+              </button>
               <button className="small-secondary" onClick={addSiteWithoutRoster}>+ เพิ่มจุดเทา</button>
               <button className="small-primary" onClick={() => setShowSlotForm((show) => !show)}>
                 {showSlotForm ? "ปิด" : "+ เพิ่มช่องกำลัง"}
@@ -488,7 +624,7 @@ export default function Home() {
             </aside>
           )}
         </>
-      ) : (
+      ) : tab === "billing" ? (
         <>
           <section className="billing-top">
             <div>
@@ -537,6 +673,57 @@ export default function Home() {
             ))}
           </section>
         </>
+      ) : (
+        <section className="setup-board" aria-label="ตั้งค่าอัตรากำลัง">
+          <div className="setup-hero">
+            <div>
+              <p className="eyebrow">เตรียมใช้จริง</p>
+              <h2>ตั้งอัตรา 80 จุดครั้งเดียว</h2>
+              <p>นำเข้าจุด, ผลัด, ตำแหน่ง และ รปภ. ประจำ แล้วกด “สร้างแผงวันนี้” ทุกเช้า ระบบจะเพิ่มเฉพาะช่องที่ยังไม่มี โดยไม่ทับผลเช็คอินหรือการจัดสแปร์ที่เกิดขึ้นแล้ว</p>
+            </div>
+            <div className="template-counts" aria-label="อัตราต้นแบบปัจจุบัน">
+              <strong>{data?.templates.total ?? 0}</strong>
+              <span>อัตราต้นแบบ</span>
+              <small>เช้า {data?.templates.morning ?? 0} · เย็น {data?.templates.evening ?? 0}</small>
+            </div>
+          </div>
+
+          {data?.demoDataPresent && (
+            <section className="demo-warning" aria-label="ข้อมูลตัวอย่าง">
+              <div><strong>ยังมีข้อมูลตัวอย่างอยู่ในผัง</strong><p>ก่อนนำเข้าข้อมูล 80 จุดจริง ให้ล้างเฉพาะตัวอย่างเพื่อไม่ให้แสดงปนกับหน้างาน</p></div>
+              <button className="danger-button" disabled={busyId === "remove-demo"} onClick={removeDemo}>{busyId === "remove-demo" ? "กำลังล้าง…" : "ล้างข้อมูลตัวอย่าง"}</button>
+            </section>
+          )}
+
+          <div className="setup-steps">
+            <article><span>1</span><div><strong>ดาวน์โหลดไฟล์ตัวอย่าง</strong><p>เปิดด้วย Excel แล้วใส่รายชื่อจุดและกำลังประจำ</p></div><button className="small-secondary" onClick={downloadTemplate}>ดาวน์โหลด CSV</button></article>
+            <article><span>2</span><div><strong>เลือกไฟล์ที่จัดทำแล้ว</strong><p>รองรับสูงสุด 300 อัตราต่อครั้ง เหมาะกับ 80 จุดและสองผลัด</p></div><label className="file-picker">เลือกไฟล์ CSV<input type="file" accept=".csv,text/csv" onChange={(event) => void loadTemplateFile(event.target.files?.[0])} /></label></article>
+            <article><span>3</span><div><strong>ตรวจและนำเข้า</strong><p>ระบบจะอัปเดตเฉพาะอัตราต้นแบบ ยังไม่เปลี่ยนสถานะหน้างาน</p></div><button className="primary-button" disabled={!templateRows.length || busyId === "template-import"} onClick={importTemplates}>{busyId === "template-import" ? "กำลังนำเข้า…" : `ยืนยัน ${templateRows.length} อัตรา`}</button></article>
+          </div>
+
+          {templateRows.length > 0 && (
+            <section className="import-preview" aria-label="ตัวอย่างข้อมูลที่รอนำเข้า">
+              <div>
+                <p className="eyebrow">ไฟล์ที่เลือก: {templateFileName}</p>
+                <h3>ตัวอย่าง {Math.min(templateRows.length, 5)} จาก {templateRows.length} อัตรา</h3>
+              </div>
+              <button className="action-text" onClick={() => { setTemplateRows([]); setTemplateFileName(""); }}>ล้างไฟล์</button>
+              <div className="preview-table">
+                <div className="preview-head"><span>จุด</span><span>ผลัด</span><span>ตำแหน่ง</span><span>รปภ. ประจำ</span><span>กำหนด</span></div>
+                {templateRows.slice(0, 5).map((row, index) => <div className="preview-row" key={`${row.siteName}-${row.wave}-${index}`}><span>{row.siteName}</span><span>{row.wave === "morning" ? "เช้า" : "เย็น"}</span><span>{row.postName} · {row.slotLabel}</span><span>{row.assignedGuard || "ยังไม่ระบุ"}</span><span>{row.deadline}</span></div>)}
+              </div>
+            </section>
+          )}
+
+          <section className="daily-generation">
+            <div>
+              <p className="eyebrow">ทุกวันก่อนรอบเช้า</p>
+              <h3>สร้างแผงของวันนี้</h3>
+              <p>คัดลอกอัตราต้นแบบเป็นช่องกำลังของวันปัจจุบันแบบปลอดภัย หากเคยสร้างแล้ว ระบบจะข้ามรายการเดิมให้เอง</p>
+            </div>
+            <button className="primary-button" disabled={!data?.templates.total || busyId === "generate-today"} onClick={generateToday}>{busyId === "generate-today" ? "กำลังสร้าง…" : "สร้างแผงวันนี้"}</button>
+          </section>
+        </section>
       )}
     </main>
   );

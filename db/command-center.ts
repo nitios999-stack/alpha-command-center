@@ -35,6 +35,23 @@ export type OperationalSite = {
   active: number;
 };
 
+export type TemplateImportRow = {
+  siteName: string;
+  customerName: string;
+  wave: "morning" | "evening";
+  postName: string;
+  slotLabel: string;
+  assignedGuard?: string;
+  deadline: string;
+  verificationPolicy?: "standard" | "reviewed" | "manual";
+};
+
+export type TemplateSummary = {
+  total: number;
+  morning: number;
+  evening: number;
+};
+
 export type BillingCase = {
   id: string;
   customerName: string;
@@ -121,6 +138,10 @@ function siteIdentifier(siteName: string) {
   return "site-" + siteName.trim().toLowerCase().replace(/[^a-z0-9ก-๙]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
+function templateIdentifier(siteId: string, wave: string, postName: string, slotLabel: string) {
+  return ["template", siteId, wave, postName.trim().toLowerCase(), slotLabel.trim().toLowerCase()].join("|");
+}
+
 export function bangkokNow() {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Bangkok",
@@ -157,7 +178,9 @@ export function calculateLateMinutes(deadline: string) {
 export async function ensureDatabase() {
   const db = database();
   await db.batch([
+    db.prepare("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS operational_sites (id TEXT PRIMARY KEY, site_name TEXT NOT NULL, customer_name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS shift_templates (id TEXT PRIMARY KEY, site_id TEXT NOT NULL, wave TEXT NOT NULL, post_name TEXT NOT NULL, slot_label TEXT NOT NULL, assigned_guard TEXT, deadline TEXT NOT NULL, verification_policy TEXT NOT NULL DEFAULT 'standard', active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS coverage_slots (id TEXT PRIMARY KEY, operational_date TEXT NOT NULL, wave TEXT NOT NULL, site_id TEXT NOT NULL, site_name TEXT NOT NULL, customer_name TEXT NOT NULL, post_name TEXT NOT NULL, slot_label TEXT NOT NULL, assigned_guard TEXT, assignment_type TEXT NOT NULL DEFAULT 'regular', state TEXT NOT NULL, verification_policy TEXT NOT NULL DEFAULT 'standard', deadline TEXT NOT NULL, reported_at TEXT, source TEXT, late_minutes INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS billing_cases (id TEXT PRIMARY KEY, customer_name TEXT NOT NULL, service_period TEXT NOT NULL, amount_satang INTEGER NOT NULL, due_at TEXT NOT NULL, document_state TEXT NOT NULL DEFAULT 'incomplete', submission_state TEXT NOT NULL DEFAULT 'unscheduled', payment_state TEXT NOT NULL DEFAULT 'unpaid', next_action TEXT NOT NULL, owner_name TEXT NOT NULL, appointment_at TEXT, location TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, action TEXT NOT NULL, actor TEXT NOT NULL, summary TEXT NOT NULL, created_at TEXT NOT NULL)"),
@@ -165,17 +188,31 @@ export async function ensureDatabase() {
     db.prepare("CREATE INDEX IF NOT EXISTS idx_billing_due ON billing_cases(due_at, payment_state)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id, created_at)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_operational_sites_active ON operational_sites(active, site_name)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_shift_templates_wave_active ON shift_templates(wave, active, site_id)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_shift_templates_site_slot ON shift_templates(site_id, wave, post_name, slot_label)"),
   ]);
 
-  const count = await db.prepare("SELECT COUNT(*) AS count FROM coverage_slots").first<{ count: number }>();
-  if ((count?.count ?? 0) === 0) await seedDemoData();
+  const seedSetting = await db.prepare("SELECT value FROM system_settings WHERE key = 'demo_seeded'").first<{ value: string }>();
+  if (!seedSetting) {
+    const count = await db.prepare("SELECT COUNT(*) AS count FROM coverage_slots").first<{ count: number }>();
+    if ((count?.count ?? 0) === 0) await seedDemoData();
+    await db.prepare("INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('demo_seeded', '1', ?)").bind(bangkokNow().iso).run();
+  }
   await syncSiteRegistryFromSlots();
+  const templateCount = await db.prepare("SELECT COUNT(*) AS count FROM shift_templates").first<{ count: number }>();
+  if ((templateCount?.count ?? 0) === 0) await syncTemplatesFromCoverageSlots();
 }
 
 async function syncSiteRegistryFromSlots() {
   const now = bangkokNow().iso;
   await database().prepare("INSERT OR IGNORE INTO operational_sites (id, site_name, customer_name, active, created_at, updated_at) SELECT site_id, MAX(site_name), MAX(customer_name), 1, ?, ? FROM coverage_slots GROUP BY site_id")
     .bind(now, now).run();
+}
+
+async function syncTemplatesFromCoverageSlots() {
+  const now = bangkokNow().iso;
+  await database().prepare("INSERT OR IGNORE INTO shift_templates (id, site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, active, updated_at) SELECT 'template|' || site_id || '|' || wave || '|' || lower(post_name) || '|' || lower(slot_label), site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, 1, ? FROM coverage_slots")
+    .bind(now).run();
 }
 
 async function seedDemoData() {
@@ -208,12 +245,23 @@ export async function getDashboard() {
   const today = bangkokNow().date;
   const slotResult = await db.prepare("SELECT * FROM coverage_slots WHERE operational_date = ? ORDER BY wave, site_name, post_name, slot_label").bind(today).all<D1Row>();
   const siteResult = await db.prepare("SELECT * FROM operational_sites WHERE active = 1 ORDER BY site_name").all<D1Row>();
+  const templateResult = await db.prepare("SELECT wave, COUNT(*) AS count FROM shift_templates WHERE active = 1 GROUP BY wave").all<D1Row>();
+  const demoCount = await db.prepare("SELECT COUNT(*) AS count FROM operational_sites WHERE id IN ('site-green', 'site-late', 'site-waiting', 'site-missing')").first<{ count: number }>();
   const billingResult = await db.prepare("SELECT * FROM billing_cases ORDER BY due_at ASC, updated_at DESC LIMIT 30").all<D1Row>();
+  const templates: TemplateSummary = { total: 0, morning: 0, evening: 0 };
+  (templateResult.results ?? []).forEach((row) => {
+    const wave = String(row.wave);
+    const count = numberValue(row, "count");
+    if (wave === "morning" || wave === "evening") templates[wave] = count;
+    templates.total += count;
+  });
   return {
     today,
     now: bangkokNow(),
     slots: (slotResult.results ?? []).map(toCoverageSlot),
     sites: (siteResult.results ?? []).map(toOperationalSite),
+    templates,
+    demoDataPresent: Number(demoCount?.count ?? 0) > 0,
     billingCases: (billingResult.results ?? []).map(toBillingCase),
   };
 }
@@ -289,6 +337,90 @@ export async function addOperationalSite(input: { siteName: string; customerName
   await database().prepare("INSERT OR IGNORE INTO operational_sites (id, site_name, customer_name, active, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?)")
     .bind(id, siteName, customerName, now, now).run();
   await addAudit("operational_site", id, "created", input.actor, "เพิ่มจุดสำหรับตั้งอัตรา " + siteName);
+}
+
+export async function importShiftTemplates(rows: TemplateImportRow[], actor: string) {
+  await ensureDatabase();
+  if (!rows.length) throw new Error("ไม่พบรายการอัตรากำลังในไฟล์");
+  if (rows.length > 300) throw new Error("นำเข้าได้ครั้งละไม่เกิน 300 อัตรา");
+
+  const now = bangkokNow().iso;
+  const db = database();
+  const uniqueRows = new Map<string, TemplateImportRow>();
+
+  rows.forEach((raw, index) => {
+    const siteName = raw.siteName?.trim() ?? "";
+    const customerName = raw.customerName?.trim() ?? "";
+    const postName = raw.postName?.trim() ?? "";
+    const slotLabel = raw.slotLabel?.trim() ?? "";
+    const deadline = raw.deadline?.trim() ?? "";
+    const wave = raw.wave === "evening" ? "evening" : "morning";
+    const verificationPolicy = raw.verificationPolicy === "manual" || raw.verificationPolicy === "reviewed" ? raw.verificationPolicy : "standard";
+    if (!siteName || !customerName || !postName || !slotLabel || !/^\d{2}:\d{2}$/.test(deadline)) {
+      throw new Error(`แถวที่ ${index + 2} มีข้อมูลไม่ครบหรือเวลาไม่ถูกต้อง`);
+    }
+    const siteId = siteIdentifier(siteName);
+    uniqueRows.set(templateIdentifier(siteId, wave, postName, slotLabel), {
+      siteName,
+      customerName,
+      wave,
+      postName,
+      slotLabel,
+      assignedGuard: raw.assignedGuard?.trim() ?? "",
+      deadline,
+      verificationPolicy,
+    });
+  });
+
+  const operations = Array.from(uniqueRows.entries()).flatMap(([templateId, row]) => {
+    const siteId = siteIdentifier(row.siteName);
+    return [
+      db.prepare("INSERT INTO operational_sites (id, site_name, customer_name, active, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET site_name = excluded.site_name, customer_name = excluded.customer_name, active = 1, updated_at = excluded.updated_at")
+        .bind(siteId, row.siteName, row.customerName, now, now),
+      db.prepare("INSERT INTO shift_templates (id, site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, active, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(id) DO UPDATE SET assigned_guard = excluded.assigned_guard, deadline = excluded.deadline, verification_policy = excluded.verification_policy, active = 1, updated_at = excluded.updated_at")
+        .bind(templateId, siteId, row.wave, row.postName, row.slotLabel, row.assignedGuard || null, row.deadline, row.verificationPolicy, now),
+    ];
+  });
+
+  await db.batch(operations);
+  await addAudit("shift_template", "bulk-import", "imported", actor, `นำเข้าอัตรากำลัง ${uniqueRows.size} ช่อง`);
+  return { imported: uniqueRows.size };
+}
+
+export async function generateTodayFromTemplates(actor: string) {
+  await ensureDatabase();
+  const db = database();
+  const today = bangkokNow();
+  const templates = await db.prepare("SELECT t.*, s.site_name, s.customer_name FROM shift_templates t INNER JOIN operational_sites s ON s.id = t.site_id WHERE t.active = 1 AND s.active = 1 ORDER BY t.wave, s.site_name, t.post_name, t.slot_label").all<D1Row>();
+  const total = templates.results?.length ?? 0;
+  if (!total) return { created: 0, existing: 0, total: 0 };
+
+  const before = await db.prepare("SELECT COUNT(*) AS count FROM coverage_slots WHERE operational_date = ?").bind(today.date).first<{ count: number }>();
+  const operations = (templates.results ?? []).map((template) => {
+    const assignedGuard = value(template, "assigned_guard");
+    const state: CoverageState = assignedGuard ? "waiting" : "unassigned";
+    const id = "slot|" + today.date + "|" + String(template.id);
+    return db.prepare("INSERT OR IGNORE INTO coverage_slots (id, operational_date, wave, site_id, site_name, customer_name, post_name, slot_label, assigned_guard, assignment_type, state, verification_policy, deadline, reported_at, source, late_minutes, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, ?)")
+      .bind(id, today.date, String(template.wave), String(template.site_id), String(template.site_name), String(template.customer_name), String(template.post_name), String(template.slot_label), assignedGuard, assignedGuard ? "regular" : "rotating", state, String(template.verification_policy), String(template.deadline), today.iso);
+  });
+  await db.batch(operations);
+  const after = await db.prepare("SELECT COUNT(*) AS count FROM coverage_slots WHERE operational_date = ?").bind(today.date).first<{ count: number }>();
+  const created = Math.max(0, Number(after?.count ?? 0) - Number(before?.count ?? 0));
+  await addAudit("coverage_slot", today.date, "generated_from_templates", actor, `สร้างแผงวันนี้จากอัตราต้นแบบ เพิ่ม ${created} จาก ${total} ช่อง`);
+  return { created, existing: total - created, total };
+}
+
+export async function removeDemoData(actor: string) {
+  await ensureDatabase();
+  const db = database();
+  const demoSites = "'site-green', 'site-late', 'site-waiting', 'site-missing'";
+  await db.batch([
+    db.prepare("DELETE FROM coverage_slots WHERE site_id IN (" + demoSites + ")"),
+    db.prepare("DELETE FROM shift_templates WHERE site_id IN (" + demoSites + ")"),
+    db.prepare("DELETE FROM operational_sites WHERE id IN (" + demoSites + ")"),
+    db.prepare("DELETE FROM billing_cases WHERE id IN ('bill-001', 'bill-002')"),
+  ]);
+  await addAudit("system", "demo-data", "removed", actor, "ล้างเฉพาะข้อมูลตัวอย่างของระบบ");
 }
 
 export async function addBillingCase(input: { customerName: string; amountBaht: number; dueAt: string; nextAction: string; ownerName: string }) {

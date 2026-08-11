@@ -22,6 +22,20 @@
       "when": 1786439731201,
       "tag": "0002_orange_pestilence",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1786440663745,
+      "tag": "0003_absent_triathlon",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1786440813956,
+      "tag": "0004_lean_krista_starr",
+      "breakpoints": true
     }
   ]
 }

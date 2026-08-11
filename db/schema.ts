@@ -33,6 +33,28 @@ export const operationalSites = sqliteTable("operational_sites", {
   index("idx_operational_sites_active").on(table.active, table.siteName),
 ]);
 
+export const shiftTemplates = sqliteTable("shift_templates", {
+  id: text("id").primaryKey(),
+  siteId: text("site_id").notNull(),
+  wave: text("wave").notNull(),
+  postName: text("post_name").notNull(),
+  slotLabel: text("slot_label").notNull(),
+  assignedGuard: text("assigned_guard"),
+  deadline: text("deadline").notNull(),
+  verificationPolicy: text("verification_policy").notNull().default("standard"),
+  active: integer("active").notNull().default(1),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  index("idx_shift_templates_wave_active").on(table.wave, table.active, table.siteId),
+  index("idx_shift_templates_site_slot").on(table.siteId, table.wave, table.postName, table.slotLabel),
+]);
+
+export const systemSettings = sqliteTable("system_settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 export const billingCases = sqliteTable("billing_cases", {
   id: text("id").primaryKey(),
   customerName: text("customer_name").notNull(),

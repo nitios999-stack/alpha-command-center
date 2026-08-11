@@ -1,10 +1,10 @@
 import { getChatGPTUser } from "../../../chatgpt-auth";
-import { addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, markLeave, replaceSlot } from "../../../../db/command-center";
+import { addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, generateTodayFromTemplates, importShiftTemplates, markLeave, removeDemoData, replaceSlot, type TemplateImportRow } from "../../../../db/command-center";
 
 export const runtime = "edge";
 
 type ActionPayload = {
-  type?: "confirm" | "replace" | "leave" | "site" | "slot" | "billing";
+  type?: "confirm" | "replace" | "leave" | "site" | "slot" | "billing" | "template_import" | "generate_today" | "remove_demo";
   slotId?: string;
   source?: string;
   guardName?: string;
@@ -20,6 +20,7 @@ type ActionPayload = {
   assignedGuard?: string;
   deadline?: string;
   verificationPolicy?: "standard" | "reviewed" | "manual";
+  rows?: TemplateImportRow[];
 };
 
 export async function POST(request: Request) {
@@ -28,6 +29,7 @@ export async function POST(request: Request) {
     const user = await getChatGPTUser();
     const actor = user?.displayName ?? "ผู้ดูแลระบบ";
 
+    let result: Record<string, unknown> = { ok: true };
     if (payload.type === "confirm" && payload.slotId) {
       await confirmSlot(payload.slotId, payload.source || "ผู้จัดการยืนยัน", actor);
     } else if (payload.type === "replace" && payload.slotId) {
@@ -41,6 +43,12 @@ export async function POST(request: Request) {
         return Response.json({ error: "กรอกชื่อจุดและลูกค้าให้ครบ" }, { status: 400 });
       }
       await addOperationalSite({ siteName, customerName, actor });
+    } else if (payload.type === "template_import") {
+      result = { ok: true, ...(await importShiftTemplates(payload.rows ?? [], actor)) };
+    } else if (payload.type === "generate_today") {
+      result = { ok: true, ...(await generateTodayFromTemplates(actor)) };
+    } else if (payload.type === "remove_demo") {
+      await removeDemoData(actor);
     } else if (payload.type === "slot") {
       const siteName = payload.siteName?.trim() ?? "";
       const customerName = payload.customerName?.trim() ?? "";
@@ -78,7 +86,7 @@ export async function POST(request: Request) {
       return Response.json({ error: "คำสั่งไม่ถูกต้อง" }, { status: 400 });
     }
 
-    return Response.json({ ok: true });
+    return Response.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "ทำรายการไม่สำเร็จ";
     return Response.json({ error: message }, { status: 500 });
