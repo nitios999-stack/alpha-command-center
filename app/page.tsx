@@ -195,6 +195,7 @@ function lineGroupLabel(group: LineGroup | null | undefined) {
 }
 
 type LineSignalStatus = "green" | "yellow" | "red" | "gray";
+type LineReportFilter = "all" | LineSignalStatus | "unmapped";
 
 function lineSignalStatus(group: LineGroup, nowTime: string): LineSignalStatus {
   if (!group.lastSeenAt) return "gray";
@@ -213,6 +214,22 @@ function lineSignalLabel(status: LineSignalStatus) {
   if (status === "yellow") return "สัญญาณช้าลง";
   if (status === "red") return "เงียบในช่วงเวร";
   return "ยังไม่มีข้อมูล";
+}
+
+function lineEventLabel(eventType: string | null) {
+  const labels: Record<string, string> = {
+    message: "ข้อความรายงาน",
+    postback: "กดปุ่ม/เมนู",
+    join: "บอทเข้ากลุ่ม",
+    leave: "บอทออกกลุ่ม",
+    memberJoined: "สมาชิกเข้ากลุ่ม",
+    memberLeft: "สมาชิกออกกลุ่ม",
+    follow: "เพิ่มเพื่อน OA",
+    unfollow: "บล็อก OA",
+    beacon: "Beacon",
+  };
+  if (!eventType) return "ไม่ระบุชนิดรายงาน";
+  return labels[eventType] ?? eventType;
 }
 
 function parseCsv(text: string) {
@@ -331,6 +348,8 @@ export default function Home() {
   const [templateFileName, setTemplateFileName] = useState("");
   const [lastLoadedAt, setLastLoadedAt] = useState<number | null>(null);
   const [reportClockMs, setReportClockMs] = useState(0);
+  const [reportFilter, setReportFilter] = useState<LineReportFilter>("all");
+  const [reportSearch, setReportSearch] = useState("");
   const [networkState, setNetworkState] = useState<"online" | "offline" | "error" | "auth">("online");
   const [replaceTarget, setReplaceTarget] = useState<CoverageSlot | null>(null);
   const [replaceName, setReplaceName] = useState("");
@@ -434,6 +453,24 @@ export default function Home() {
     { green: 0, yellow: 0, red: 0, gray: 0 } as Record<LineSignalStatus, number>,
   );
   const reportNowMs = reportClockMs || lastLoadedAt || 0;
+  const lineUnmappedCount = lineOverviewGroups.filter((group) => !group.siteId).length;
+  const lineNowTime = data?.now.time ?? "00:00";
+  const reportVisibleGroups = useMemo(() => {
+    const search = reportSearch.trim().toLocaleLowerCase("th");
+    return lineOverviewGroups.filter((group) => {
+      const signal = lineSignalStatus(group, lineNowTime);
+      const site = group.siteId ? operationalSiteById.get(group.siteId) : null;
+      const matchesFilter = reportFilter === "all"
+        || (reportFilter === "unmapped" ? !group.siteId : signal === reportFilter);
+      const matchesSearch = !search || [group.groupName, group.id, site?.siteName, site?.customerName]
+        .filter(Boolean)
+        .some((value) => String(value).toLocaleLowerCase("th").includes(search));
+      return matchesFilter && matchesSearch;
+    });
+  }, [lineNowTime, lineOverviewGroups, operationalSiteById, reportFilter, reportSearch]);
+  const reportRefreshIn = lastLoadedAt && reportClockMs
+    ? Math.max(0, 5 - Math.floor((reportClockMs - lastLoadedAt) / 1_000))
+    : 5;
   const visibleSites = useMemo(
     () => statusFilter === "all" ? sites : sites.filter((site) => site.status === statusFilter),
     [sites, statusFilter],
@@ -948,9 +985,41 @@ export default function Home() {
             <div className="report-window">
               <span>ดึงข้อมูลอัตโนมัติ</span>
               <strong>ทุก 5 วินาที</strong>
-              <small>{data?.lineIntegration.webhookStatus === "healthy" ? `Webhook ปกติ · ดึงล่าสุด ${clientTime(lastLoadedAt)}` : "กำลังรอสัญญาณจาก LINE"}</small>
+              <small>{data?.lineIntegration.webhookStatus === "healthy"
+                ? `Webhook ปกติ · รายงานล่าสุด ${displayTime(data.lineIntegration.lastWebhookAt)} · รอบถัดไป ~${reportRefreshIn} วิ`
+                : data?.lineIntegration.webhookStatus === "stale" ? "Webhook เงียบเกิน 24 ชั่วโมง" : "กำลังรอสัญญาณจาก LINE"}</small>
             </div>
           </div>
+          <section className="report-quick-stats" aria-label="สรุปการส่งรายงาน">
+            <button className={reportFilter === "all" && !reportSearch ? "active" : ""} onClick={() => { setReportFilter("all"); setReportSearch(""); }}>
+              <span>กลุ่มทั้งหมด</span><strong>{lineOverviewGroups.length}</strong><small>แสดงทุกกลุ่ม</small>
+            </button>
+            <button className={reportFilter === "green" ? "active green" : "green"} onClick={() => setReportFilter("green")}>
+              <span>ส่งล่าสุด</span><strong>{lineOverviewStats.green}</strong><small>สัญญาณไม่เกิน 30 นาที</small>
+            </button>
+            <button className={reportFilter === "yellow" ? "active yellow" : "yellow"} onClick={() => setReportFilter("yellow")}>
+              <span>ช้าลง</span><strong>{lineOverviewStats.yellow}</strong><small>ควรติดตาม</small>
+            </button>
+            <button className={reportFilter === "red" ? "active red" : "red"} onClick={() => setReportFilter("red")}>
+              <span>เงียบในช่วงเวร</span><strong>{lineOverviewStats.red}</strong><small>ควรตรวจทันที</small>
+            </button>
+            <button className={reportFilter === "gray" ? "active gray" : "gray"} onClick={() => setReportFilter("gray")}>
+              <span>ยังไม่มีข้อมูล</span><strong>{lineOverviewStats.gray}</strong><small>ยังไม่เคยรับรายงาน</small>
+            </button>
+            <button className={reportFilter === "unmapped" ? "active unmapped" : "unmapped"} onClick={() => setReportFilter("unmapped")}>
+              <span>ยังไม่ผูกจุด</span><strong>{lineUnmappedCount}</strong><small>จัดการใน LINE OA</small>
+            </button>
+          </section>
+          <section className="report-toolbar" aria-label="ค้นหาและกรองรายงาน">
+            <label className="report-search">
+              <span aria-hidden="true">⌕</span>
+              <input value={reportSearch} onChange={(event) => setReportSearch(event.target.value)} placeholder="ค้นหาชื่อกลุ่ม จุด หรือลูกค้า" />
+            </label>
+            <div className="report-toolbar-actions">
+              <span>แสดง {reportVisibleGroups.length} / {lineOverviewGroups.length} กลุ่ม · ดึงล่าสุด {clientTime(lastLoadedAt)}</span>
+              <button className="small-primary" onClick={() => void loadDashboard()} disabled={loading}>{loading ? "กำลังดึง…" : "ดึงข้อมูลตอนนี้"}</button>
+            </div>
+          </section>
           <section className="line-overview" aria-label="ภาพรวมสัญญาณ LINE OA">
             <div className="line-overview-head">
               <div>
@@ -965,9 +1034,9 @@ export default function Home() {
                 <span className="gray"><b>{lineOverviewStats.gray}</b> ยังไม่มี</span>
               </div>
             </div>
-            <p className="line-overview-note">สีนี้บอกความเคลื่อนไหวของ LINE เท่านั้น ไม่ใช้แทนการยืนยันเข้าเวร ผู้จัดการกดเช็คเข้าเวรในจุดด้านล่างเมื่อเห็นรายงานแล้ว</p>
+            <p className="line-overview-note">เรียงจากกลุ่มที่ส่งล่าสุดขึ้นก่อน · คลิกการ์ดเพื่อเปิดจุดที่ผูกไว้ · สีนี้บอกความเคลื่อนไหวของ LINE เท่านั้น ไม่ใช่การยืนยันเข้าเวร</p>
             <div className="line-overview-grid">
-              {lineOverviewGroups.map((group, index) => {
+              {reportVisibleGroups.map((group, index) => {
                 const signal = lineSignalStatus(group, data?.now.time ?? "00:00");
                 const site = group.siteId ? operationalSiteById.get(group.siteId) : null;
                 return (
@@ -985,12 +1054,13 @@ export default function Home() {
                       <em className="line-overview-rank">#{index + 1}</em>
                       <i aria-hidden="true" />
                     </span>
-                    <span className="line-overview-site">{site ? site.siteName : "ยังไม่ผูกจุด"}</span>
-                    <span className="line-overview-meta"><b>{lineSignalLabel(signal)}</b><span>{displayTime(group.lastSeenAt)} · {lineAgeLabel(group.lastSeenAt, reportNowMs)} · {group.eventCount} รายการ</span></span>
+                    <span className="line-overview-site">{site ? `${site.siteName} · ${site.customerName}` : "ยังไม่ผูกจุด · ไปที่ LINE OA เพื่อผูก"}</span>
+                    <span className="line-overview-event"><b>{lineEventLabel(group.lastEventType)}</b><span>{group.eventCount} รายการ</span></span>
+                    <span className="line-overview-meta"><b>{lineSignalLabel(signal)}</b><span>ส่ง {displayTime(group.lastSeenAt)} · {lineAgeLabel(group.lastSeenAt, reportNowMs)}</span></span>
                   </button>
                 );
               })}
-              {!lineOverviewGroups.length && <p className="line-overview-empty">ยังไม่มีข้อมูลกลุ่มจาก LINE OA</p>}
+              {!reportVisibleGroups.length && <p className="line-overview-empty">ไม่พบกลุ่มตามตัวกรองนี้ ลองล้างคำค้นหรือเลือก “กลุ่มทั้งหมด”</p>}
             </div>
           </section>
         </section>
