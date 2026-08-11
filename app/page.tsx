@@ -767,6 +767,11 @@ export default function Home() {
             <div><strong>การทดสอบจะส่งเพียงข้อความกลาง</strong><p>กด “ทดสอบ” เมื่อพร้อมเท่านั้น ข้อความไม่ระบุชื่อ รปภ. จุดที่ขาด สถานะลา หรือรายละเอียดการดำเนินงาน</p></div>
           </section>
 
+          <section className="line-callback-gate">
+            <strong>Webhook Gateway แยกต่างหาก</strong>
+            <p>Dashboard นี้ยังเป็น private ตามที่ควรเป็น จึงต้องใช้ public gateway เฉพาะรับ LINE webhook ก่อนใส่ Callback URL ใน LINE Developers — gateway จะตรวจลายเซ็นและส่งเฉพาะข้อมูลทะเบียนกลุ่มเข้าระบบ โดยไม่เปิดหน้า Command Center</p>
+          </section>
+
           <section className="line-groups-table">
             <div className="line-table-head"><span>กลุ่ม LINE</span><span>เชื่อมกับจุด</span><span>พบล่าสุด</span><span>จัดการ</span></div>
             {(data?.lineGroups ?? []).map((group) => (

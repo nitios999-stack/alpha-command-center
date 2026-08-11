@@ -1403,6 +1403,10 @@ button:disabled {
 .line-safety-note strong { color: #725813; }
 .line-safety-note p { margin: 4px 0 0; color: #796c48; font-size: 0.86rem; line-height: 1.5; }
 
+.line-callback-gate { padding: 16px 18px; color: #164334; background: #edf7f1; border: 1px solid #bde4cf; border-radius: 15px; }
+.line-callback-gate strong { display: block; color: var(--forest-dark); }
+.line-callback-gate p { margin: 5px 0 0; color: #4d675c; font-size: 0.86rem; line-height: 1.55; }
+
 .line-groups-table { overflow: hidden; background: white; border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); }
 .line-table-head,
 .line-group-row { display: grid; grid-template-columns: minmax(240px, 1.4fr) minmax(220px, 1.1fr) 115px 90px; gap: 16px; align-items: center; padding: 14px 18px; }
