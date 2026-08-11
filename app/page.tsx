@@ -381,10 +381,6 @@ export default function Home() {
   const replaceGuard = (slot: CoverageSlot) => {
     setReplaceTarget(slot);
     setReplaceName(slot.assignedGuard ?? "");
-    return;
-    const name = window.prompt("ระบุชื่อ รปภ. สแปร์ที่รับจุดนี้", "นายสมพงษ์ (สแปร์)");
-    if (!name) return;
-    void runAction({ type: "replace", slotId: slot.id, guardName: name }, slot.id, "มอบหมายสแปร์แล้ว ระบบกำลังรอรายงานเข้าเวร");
   };
 
   const mapLineGroup = (site: SiteCard) => {
@@ -392,13 +388,6 @@ export default function Home() {
     setLineMapGroupId(site.lineGroup?.id ?? "");
     setLineMapGroupName(site.lineGroup?.groupName ?? "");
     setLineMapPictureUrl(site.lineGroup?.pictureUrl ?? "");
-    return;
-    const groupId = window.prompt("รหัสกลุ่ม LINE (groupId)", site.lineGroup?.id ?? "");
-    if (!groupId) return;
-    const groupName = window.prompt("ชื่อที่ต้องการแสดงของกลุ่ม LINE", site.lineGroup?.groupName ?? "");
-    if (!groupName) return;
-    const pictureUrl = window.prompt("ลิงก์โลโก้กลุ่ม LINE (เว้นว่างได้)", site.lineGroup?.pictureUrl ?? "");
-    void runAction({ type: "line_group", siteId: site.id, groupId, groupName, pictureUrl }, "line-" + site.id, "ผูกกลุ่ม LINE กับจุดนี้แล้ว");
   };
 
   const linkRegistryGroup = (group: LineGroup, siteId: string) => {
@@ -422,12 +411,6 @@ export default function Home() {
 
   const addSiteWithoutRoster = () => {
     setShowSiteForm(true);
-    return;
-    const siteName = window.prompt("ชื่อจุดที่ต้องการแสดงเป็นสีเทา (ยังไม่ตั้งอัตราผลัดนี้)");
-    if (!siteName) return;
-    const customerName = window.prompt("ชื่อลูกค้าหรือหน่วยงานของจุดนี้");
-    if (!customerName) return;
-    void runAction({ type: "site", siteName, customerName }, "site-" + siteName, "เพิ่มจุดสีเทาแล้ว — ตั้งอัตรากำลังได้เมื่อพร้อม");
   };
 
   const submitReplacement = (event: FormEvent<HTMLFormElement>) => {
