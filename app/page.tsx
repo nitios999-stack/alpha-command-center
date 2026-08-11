@@ -46,9 +46,18 @@ type OperationalSite = {
 
 type LineGroup = {
   id: string;
-  siteId: string;
+  siteId: string | null;
   groupName: string;
   pictureUrl: string | null;
+  lastSeenAt: string | null;
+  source: "manual" | "webhook";
+};
+
+type LineIntegrationStatus = {
+  configured: boolean;
+  webhookPath: string;
+  receivedGroups: number;
+  mappedGroups: number;
 };
 
 type TemplateSummary = {
@@ -77,6 +86,7 @@ type DashboardData = {
   slots: CoverageSlot[];
   sites: OperationalSite[];
   lineGroups: LineGroup[];
+  lineIntegration: LineIntegrationStatus;
   templates: TemplateSummary;
   demoDataPresent: boolean;
   billingCases: BillingCase[];
@@ -126,7 +136,7 @@ function groupSites(slots: CoverageSlot[], registry: OperationalSite[], lineGrou
     groups.set(slot.siteId, existing);
   });
   const registryById = new Map(registry.map((site) => [site.id, site]));
-  const lineGroupBySite = new Map(lineGroups.map((group) => [group.siteId, group]));
+  const lineGroupBySite = new Map(lineGroups.filter((group): group is LineGroup & { siteId: string } => Boolean(group.siteId)).map((group) => [group.siteId, group]));
   const siteIds = new Set([...registry.map((site) => site.id), ...groups.keys()]);
   return Array.from(siteIds)
     .map((id) => {
@@ -249,7 +259,7 @@ function displayTime(value: string | null) {
 
 export default function Home() {
   const [data, setData] = useState<DashboardData | null>(null);
-  const [tab, setTab] = useState<"ops" | "billing" | "setup">("ops");
+  const [tab, setTab] = useState<"ops" | "billing" | "setup" | "line">("ops");
   const [wave, setWave] = useState<"morning" | "evening">("morning");
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -276,7 +286,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    void loadDashboard();
+    queueMicrotask(() => { void loadDashboard(); });
   }, [loadDashboard]);
 
   const visibleSlots = useMemo(
@@ -343,6 +353,25 @@ export default function Home() {
     if (!groupName) return;
     const pictureUrl = window.prompt("ลิงก์โลโก้กลุ่ม LINE (เว้นว่างได้)", site.lineGroup?.pictureUrl ?? "");
     void runAction({ type: "line_group", siteId: site.id, groupId, groupName, pictureUrl }, "line-" + site.id, "ผูกกลุ่ม LINE กับจุดนี้แล้ว");
+  };
+
+  const linkRegistryGroup = (group: LineGroup, siteId: string) => {
+    if (!siteId) return;
+    void runAction(
+      { type: "line_group", siteId, groupId: group.id, groupName: group.groupName, pictureUrl: group.pictureUrl ?? "" },
+      "line-map-" + group.id,
+      "ผูกกลุ่ม LINE กับจุดปฏิบัติงานแล้ว",
+    );
+  };
+
+  const unmapRegistryGroup = (group: LineGroup) => {
+    if (!window.confirm(`ยกเลิกการผูก “${group.groupName}” จากจุดนี้ใช่หรือไม่? กลุ่มจะยังอยู่ในทะเบียน LINE`)) return;
+    void runAction({ type: "line_unmap", groupId: group.id }, "line-unmap-" + group.id, "ยกเลิกการผูกจุดแล้ว");
+  };
+
+  const testLineGroup = (group: LineGroup) => {
+    if (!window.confirm(`ส่งข้อความทดสอบการเชื่อมต่อไปที่ “${group.groupName}” ใช่หรือไม่? ข้อความจะไม่ระบุสถานะกำลังหรือข้อมูลภายใน`)) return;
+    void runAction({ type: "line_connection_test", groupId: group.id }, "line-test-" + group.id, "ส่งข้อความทดสอบ LINE OA แล้ว");
   };
 
   const addSiteWithoutRoster = () => {
@@ -437,7 +466,7 @@ export default function Home() {
   };
 
   return (
-    <main className={"shell " + (tab === "ops" ? "ops-shell" : tab === "setup" ? "setup-shell" : "billing-shell")}>
+    <main className={"shell " + (tab === "ops" ? "ops-shell" : tab === "setup" ? "setup-shell" : tab === "line" ? "line-shell" : "billing-shell")}>
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">A</span>
@@ -472,6 +501,7 @@ export default function Home() {
       <nav className="tabs" aria-label="เมนูหลัก">
         <button className={tab === "ops" ? "active" : ""} onClick={() => setTab("ops")}>กำลังวันนี้</button>
         <button className={tab === "setup" ? "active" : ""} onClick={() => setTab("setup")}>ตั้งค่าอัตรา</button>
+        <button className={tab === "line" ? "active" : ""} onClick={() => setTab("line")}>LINE OA</button>
         <button className={tab === "billing" ? "active" : ""} onClick={() => setTab("billing")}>วางบิล</button>
         <button className="quiet" onClick={() => void loadDashboard()} disabled={loading}>รีเฟรช</button>
       </nav>
@@ -712,6 +742,53 @@ export default function Home() {
             ))}
           </section>
         </>
+      ) : tab === "line" ? (
+        <section className="line-control" aria-label="ศูนย์ควบคุม LINE OA">
+          <div className="line-control-hero">
+            <div>
+              <p className="eyebrow">LINE OA CONTROL</p>
+              <h2>ทะเบียนกลุ่ม และการควบคุมการเชื่อมต่อ</h2>
+              <p>กลุ่มที่ส่ง webhook ที่ตรวจสอบลายเซ็นแล้วจะเข้าทะเบียนอัตโนมัติ จากนั้นผู้จัดการเลือกผูกกลุ่มกับจุดได้เอง ระบบไม่เก็บข้อความในกลุ่ม และไม่ส่งสถานะกำลังภายในออกไป</p>
+            </div>
+            <div className={data?.lineIntegration.configured ? "line-ready" : "line-not-ready"}>
+              <strong>{data?.lineIntegration.configured ? "ตั้งค่า Secret แล้ว" : "รอการตั้งค่า Secret"}</strong>
+              <span>Webhook: {data?.lineIntegration.webhookPath ?? "/api/line/webhook"}</span>
+            </div>
+          </div>
+
+          <section className="line-kpis">
+            <article><span>กลุ่มในทะเบียน</span><strong>{data?.lineIntegration.receivedGroups ?? 0}</strong><small>พบจาก webhook หรือเพิ่มด้วยผู้จัดการ</small></article>
+            <article><span>ผูกกับจุดแล้ว</span><strong>{data?.lineIntegration.mappedGroups ?? 0}</strong><small>กลุ่มละ 1 จุด เพื่อไม่ให้สับสน</small></article>
+            <article><span>ยังไม่ผูกจุด</span><strong>{Math.max(0, (data?.lineIntegration.receivedGroups ?? 0) - (data?.lineIntegration.mappedGroups ?? 0))}</strong><small>เลือกจุดจากตารางด้านล่าง</small></article>
+          </section>
+
+          <section className="line-safety-note">
+            <span className="line-avatar">LINE</span>
+            <div><strong>การทดสอบจะส่งเพียงข้อความกลาง</strong><p>กด “ทดสอบ” เมื่อพร้อมเท่านั้น ข้อความไม่ระบุชื่อ รปภ. จุดที่ขาด สถานะลา หรือรายละเอียดการดำเนินงาน</p></div>
+          </section>
+
+          <section className="line-groups-table">
+            <div className="line-table-head"><span>กลุ่ม LINE</span><span>เชื่อมกับจุด</span><span>พบล่าสุด</span><span>จัดการ</span></div>
+            {(data?.lineGroups ?? []).map((group) => (
+              <article className="line-group-row" key={group.id}>
+                <div className="line-group-identity">
+                  {group.pictureUrl ? <img src={group.pictureUrl} alt="" /> : <span className="line-avatar">LINE</span>}
+                  <div><strong>{group.groupName}</strong><code title={group.id}>{group.id}</code><small>{group.source === "webhook" ? "พบจาก LINE webhook" : "บันทึกโดยผู้จัดการ"}</small></div>
+                </div>
+                <div className="line-mapping-cell">
+                  <select value={group.siteId ?? ""} onChange={(event) => linkRegistryGroup(group, event.target.value)} disabled={busyId === "line-map-" + group.id}>
+                    <option value="">เลือกจุดที่จะผูก…</option>
+                    {(data?.sites ?? []).map((site) => <option key={site.id} value={site.id}>{site.siteName} · {site.customerName}</option>)}
+                  </select>
+                  {group.siteId && <button className="action-text danger" disabled={busyId === "line-unmap-" + group.id} onClick={() => unmapRegistryGroup(group)}>ยกเลิก</button>}
+                </div>
+                <div className="line-last-seen">{displayTime(group.lastSeenAt)}<small>{group.lastSeenAt ? "เวลาไทย" : "ยังไม่ได้รับ webhook"}</small></div>
+                <div className="line-row-actions"><button className="action-confirm" disabled={!data?.lineIntegration.configured || busyId === "line-test-" + group.id} onClick={() => testLineGroup(group)}>ทดสอบ</button></div>
+              </article>
+            ))}
+            {!loading && !(data?.lineGroups ?? []).length && <p className="line-empty">ยังไม่มีกลุ่มในทะเบียน เมื่อ OA รับ webhook จากกลุ่ม กลุ่มจะปรากฏที่นี่เพื่อให้เลือกผูกกับจุด</p>}
+          </section>
+        </section>
       ) : (
         <section className="setup-board" aria-label="ตั้งค่าอัตรากำลัง">
           <div className="setup-hero">

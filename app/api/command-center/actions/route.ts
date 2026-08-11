@@ -1,10 +1,10 @@
 import { getChatGPTUser } from "../../../chatgpt-auth";
-import { addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, generateTodayFromTemplates, importShiftTemplates, mapLineGroup, markLeave, removeDemoData, replaceSlot, type TemplateImportRow } from "../../../../db/command-center";
+import { addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, generateTodayFromTemplates, importShiftTemplates, mapLineGroup, markLeave, removeDemoData, replaceSlot, sendLineConnectionTest, unmapLineGroup, type TemplateImportRow } from "../../../../db/command-center";
 
 export const runtime = "edge";
 
 type ActionPayload = {
-  type?: "confirm" | "replace" | "leave" | "site" | "slot" | "billing" | "template_import" | "generate_today" | "remove_demo" | "line_group";
+  type?: "confirm" | "replace" | "leave" | "site" | "slot" | "billing" | "template_import" | "generate_today" | "remove_demo" | "line_group" | "line_unmap" | "line_connection_test";
   slotId?: string;
   siteId?: string;
   source?: string;
@@ -57,6 +57,10 @@ export async function POST(request: Request) {
         pictureUrl: payload.pictureUrl,
         actor,
       });
+    } else if (payload.type === "line_unmap") {
+      await unmapLineGroup(payload.groupId ?? "", actor);
+    } else if (payload.type === "line_connection_test") {
+      await sendLineConnectionTest({ groupId: payload.groupId ?? "", actor });
     } else if (payload.type === "generate_today") {
       result = { ok: true, ...(await generateTodayFromTemplates(actor)) };
     } else if (payload.type === "remove_demo") {

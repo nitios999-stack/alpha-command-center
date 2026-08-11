@@ -37,9 +37,18 @@ export type OperationalSite = {
 
 export type LineGroup = {
   id: string;
-  siteId: string;
+  siteId: string | null;
   groupName: string;
   pictureUrl: string | null;
+  lastSeenAt: string | null;
+  source: "manual" | "webhook";
+};
+
+export type LineIntegrationStatus = {
+  configured: boolean;
+  webhookPath: string;
+  receivedGroups: number;
+  mappedGroups: number;
 };
 
 export type TemplateImportRow = {
@@ -147,10 +156,21 @@ function toOperationalSite(row: D1Row): OperationalSite {
 function toLineGroup(row: D1Row): LineGroup {
   return {
     id: String(row.id),
-    siteId: String(row.site_id),
+    siteId: value(row, "site_id"),
     groupName: String(row.group_name),
     pictureUrl: value(row, "picture_url"),
+    lastSeenAt: value(row, "last_seen_at"),
+    source: String(row.source ?? "manual") === "webhook" ? "webhook" : "manual",
   };
+}
+
+type LineEnvironment = {
+  LINE_CHANNEL_ACCESS_TOKEN?: string;
+  LINE_CHANNEL_SECRET?: string;
+};
+
+function lineEnvironment() {
+  return env as typeof env & LineEnvironment;
 }
 
 function siteIdentifier(siteName: string) {
@@ -211,6 +231,8 @@ export async function ensureDatabase() {
   await db.batch([
     db.prepare("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS line_groups (id TEXT PRIMARY KEY, site_id TEXT NOT NULL, group_name TEXT NOT NULL, picture_url TEXT, updated_at TEXT NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS line_group_registry (id TEXT PRIMARY KEY, group_name TEXT NOT NULL, picture_url TEXT, last_seen_at TEXT, source TEXT NOT NULL DEFAULT 'manual', updated_at TEXT NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS line_webhook_events (id TEXT PRIMARY KEY, group_id TEXT, event_type TEXT NOT NULL, received_at TEXT NOT NULL, summary TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS operational_sites (id TEXT PRIMARY KEY, site_name TEXT NOT NULL, customer_name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS shift_templates (id TEXT PRIMARY KEY, site_id TEXT NOT NULL, wave TEXT NOT NULL, post_name TEXT NOT NULL, slot_label TEXT NOT NULL, assigned_guard TEXT, deadline TEXT NOT NULL, verification_policy TEXT NOT NULL DEFAULT 'standard', active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS coverage_slots (id TEXT PRIMARY KEY, operational_date TEXT NOT NULL, wave TEXT NOT NULL, site_id TEXT NOT NULL, site_name TEXT NOT NULL, customer_name TEXT NOT NULL, post_name TEXT NOT NULL, slot_label TEXT NOT NULL, assigned_guard TEXT, assignment_type TEXT NOT NULL DEFAULT 'regular', state TEXT NOT NULL, verification_policy TEXT NOT NULL DEFAULT 'standard', deadline TEXT NOT NULL, reported_at TEXT, source TEXT, late_minutes INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)"),
@@ -224,6 +246,10 @@ export async function ensureDatabase() {
     db.prepare("CREATE INDEX IF NOT EXISTS idx_shift_templates_site_slot ON shift_templates(site_id, wave, post_name, slot_label)"),
     db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS uq_line_groups_site ON line_groups(site_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_groups_name ON line_groups(group_name)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_line_registry_name ON line_group_registry(group_name)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_line_registry_seen ON line_group_registry(last_seen_at)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_line_events_group_time ON line_webhook_events(group_id, received_at)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_line_events_type_time ON line_webhook_events(event_type, received_at)"),
   ]);
 
   const seedSetting = await db.prepare("SELECT value FROM system_settings WHERE key = 'demo_seeded'").first<{ value: string }>();
@@ -236,6 +262,7 @@ export async function ensureDatabase() {
   const templateCount = await db.prepare("SELECT COUNT(*) AS count FROM shift_templates").first<{ count: number }>();
   if ((templateCount?.count ?? 0) === 0) await syncTemplatesFromCoverageSlots();
   await seedDemoLineGroups();
+  await syncLineRegistryFromMappings();
 }
 
 async function syncSiteRegistryFromSlots() {
@@ -262,6 +289,12 @@ async function seedDemoLineGroups() {
     db.prepare("INSERT OR IGNORE INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, NULL, ?)").bind("demo-line-waiting", "site-waiting", "กลุ่ม รปภ. ริเวอร์พาร์ค", now),
     db.prepare("INSERT OR IGNORE INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, NULL, ?)").bind("demo-line-missing", "site-missing", "กลุ่ม รปภ. เอสพีโลจิสติกส์", now),
   ]);
+}
+
+async function syncLineRegistryFromMappings() {
+  const now = bangkokNow().iso;
+  await database().prepare("INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at) SELECT id, group_name, picture_url, NULL, 'manual', ? FROM line_groups WHERE 1 = 1 ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), updated_at = excluded.updated_at")
+    .bind(now).run();
 }
 
 async function seedDemoData() {
@@ -294,10 +327,11 @@ export async function getDashboard() {
   const today = bangkokNow().date;
   const slotResult = await db.prepare("SELECT * FROM coverage_slots WHERE operational_date = ? ORDER BY wave, site_name, post_name, slot_label").bind(today).all<D1Row>();
   const siteResult = await db.prepare("SELECT * FROM operational_sites WHERE active = 1 ORDER BY site_name").all<D1Row>();
-  const lineGroupResult = await db.prepare("SELECT * FROM line_groups ORDER BY group_name").all<D1Row>();
+  const lineGroupResult = await db.prepare("SELECT r.id, m.site_id, r.group_name, r.picture_url, r.last_seen_at, r.source FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id ORDER BY CASE WHEN m.site_id IS NULL THEN 0 ELSE 1 END, r.group_name").all<D1Row>();
   const templateResult = await db.prepare("SELECT wave, COUNT(*) AS count FROM shift_templates WHERE active = 1 GROUP BY wave").all<D1Row>();
   const demoCount = await db.prepare("SELECT COUNT(*) AS count FROM operational_sites WHERE id IN ('site-green', 'site-late', 'site-waiting', 'site-missing')").first<{ count: number }>();
   const billingResult = await db.prepare("SELECT * FROM billing_cases ORDER BY due_at ASC, updated_at DESC LIMIT 30").all<D1Row>();
+  const lineCounts = await db.prepare("SELECT COUNT(*) AS received_groups, COUNT(m.id) AS mapped_groups FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id").first<{ received_groups: number; mapped_groups: number }>();
   const templates: TemplateSummary = { total: 0, morning: 0, evening: 0 };
   (templateResult.results ?? []).forEach((row) => {
     const wave = String(row.wave);
@@ -311,6 +345,12 @@ export async function getDashboard() {
     slots: (slotResult.results ?? []).map(toCoverageSlot),
     sites: (siteResult.results ?? []).map(toOperationalSite),
     lineGroups: (lineGroupResult.results ?? []).map(toLineGroup),
+    lineIntegration: {
+      configured: Boolean(lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN && lineEnvironment().LINE_CHANNEL_SECRET),
+      webhookPath: "/api/line/webhook",
+      receivedGroups: Number(lineCounts?.received_groups ?? 0),
+      mappedGroups: Number(lineCounts?.mapped_groups ?? 0),
+    } satisfies LineIntegrationStatus,
     templates,
     demoDataPresent: Number(demoCount?.count ?? 0) > 0,
     billingCases: (billingResult.results ?? []).map(toBillingCase),
@@ -400,12 +440,73 @@ export async function mapLineGroup(input: { siteId: string; groupId: string; gro
   const site = await db.prepare("SELECT site_name FROM operational_sites WHERE id = ? AND active = 1").bind(siteId).first<D1Row>();
   if (!site) throw new Error("ไม่พบจุดที่ต้องการผูกกลุ่ม LINE");
   const now = bangkokNow().iso;
+  const safePictureUrl = pictureUrl(input.pictureUrl);
   await db.batch([
     db.prepare("DELETE FROM line_groups WHERE site_id = ? AND id != ?").bind(siteId, groupId),
     db.prepare("INSERT INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET site_id = excluded.site_id, group_name = excluded.group_name, picture_url = excluded.picture_url, updated_at = excluded.updated_at")
-      .bind(groupId, siteId, groupName, pictureUrl(input.pictureUrl), now),
+      .bind(groupId, siteId, groupName, safePictureUrl, now),
+    db.prepare("INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at) VALUES (?, ?, ?, NULL, 'manual', ?) ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), updated_at = excluded.updated_at")
+      .bind(groupId, groupName, safePictureUrl, now),
   ]);
   await addAudit("line_group", groupId, "mapped", input.actor, `ผูกกลุ่ม LINE ${groupName} กับ ${String(site.site_name)}`);
+}
+
+export async function unmapLineGroup(groupId: string, actor: string) {
+  await ensureDatabase();
+  const id = groupId.trim();
+  if (!id) throw new Error("ไม่พบกลุ่ม LINE ที่ต้องการยกเลิกการผูก");
+  const db = database();
+  const mapping = await db.prepare("SELECT group_name, site_id FROM line_groups WHERE id = ?").bind(id).first<D1Row>();
+  if (!mapping) return;
+  await db.prepare("DELETE FROM line_groups WHERE id = ?").bind(id).run();
+  await addAudit("line_group", id, "unmapped", actor, `ยกเลิกการผูกกลุ่ม LINE ${String(mapping.group_name)} จากจุด ${String(mapping.site_id)}`);
+}
+
+export async function saveLineWebhookEvent(input: {
+  eventId: string;
+  groupId: string;
+  eventType: string;
+  groupName?: string;
+  pictureUrl?: string | null;
+}) {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow().iso;
+  const groupId = input.groupId.trim();
+  if (!groupId) return { saved: false, duplicate: false };
+  const eventId = input.eventId.trim();
+  if (!eventId) return { saved: false, duplicate: false };
+  const prior = await db.prepare("SELECT id FROM line_webhook_events WHERE id = ?").bind(eventId).first<D1Row>();
+  if (prior) return { saved: false, duplicate: true };
+  const groupName = input.groupName?.trim() || `กลุ่ม LINE ${groupId.slice(-6)}`;
+  const safePictureUrl = input.pictureUrl ? pictureUrl(input.pictureUrl) : null;
+  await db.batch([
+    db.prepare("INSERT OR IGNORE INTO line_webhook_events (id, group_id, event_type, received_at, summary) VALUES (?, ?, ?, ?, ?)")
+      .bind(eventId, groupId, input.eventType.slice(0, 48), now, "Webhook ที่ตรวจสอบลายเซ็นแล้ว; ไม่เก็บข้อความในกลุ่ม"),
+    db.prepare("INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at) VALUES (?, ?, ?, ?, 'webhook', ?) ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), last_seen_at = excluded.last_seen_at, source = 'webhook', updated_at = excluded.updated_at")
+      .bind(groupId, groupName, safePictureUrl, now, now),
+  ]);
+  return { saved: true, duplicate: false };
+}
+
+export async function sendLineConnectionTest(input: { groupId: string; actor: string }) {
+  await ensureDatabase();
+  const groupId = input.groupId.trim();
+  const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
+  if (!groupId) throw new Error("ไม่พบกลุ่ม LINE ที่ต้องการทดสอบ");
+  if (!token) throw new Error("ยังไม่ได้ตั้งค่า Channel access token ในระบบที่ปลอดภัย");
+  const group = await database().prepare("SELECT group_name FROM line_group_registry WHERE id = ?").bind(groupId).first<D1Row>();
+  if (!group) throw new Error("กลุ่มนี้ยังไม่อยู่ในทะเบียน LINE");
+  const response = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      to: groupId,
+      messages: [{ type: "text", text: "ALPHA Command Center: ทดสอบการเชื่อมต่อกลุ่มสำเร็จ\nข้อความนี้ไม่แสดงสถานะกำลังหรือข้อมูลภายใน" }],
+    }),
+  });
+  if (!response.ok) throw new Error("LINE OA ไม่รับการส่งข้อความทดสอบ โปรดตรวจว่าบอตอยู่ในกลุ่มและสิทธิ์ Channel ถูกต้อง");
+  await addAudit("line_group", groupId, "connection_test_sent", input.actor, `ส่งข้อความทดสอบไปยัง ${String(group.group_name)} โดยไม่ส่งข้อมูลภายใน`);
 }
 
 export async function importShiftTemplates(rows: TemplateImportRow[], actor: string) {
@@ -477,6 +578,8 @@ export async function importShiftTemplates(rows: TemplateImportRow[], actor: str
     db.prepare("DELETE FROM line_groups WHERE site_id = ? AND id != ?").bind(siteId, group.id),
     db.prepare("INSERT INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET site_id = excluded.site_id, group_name = excluded.group_name, picture_url = excluded.picture_url, updated_at = excluded.updated_at")
       .bind(group.id, siteId, group.name, group.pictureUrl || null, now),
+    db.prepare("INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at) VALUES (?, ?, ?, NULL, 'manual', ?) ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), updated_at = excluded.updated_at")
+      .bind(group.id, group.name, group.pictureUrl || null, now),
   ]);
   for (let offset = 0; offset < lineOperations.length; offset += 80) {
     await db.batch(lineOperations.slice(offset, offset + 80));
@@ -514,6 +617,7 @@ export async function removeDemoData(actor: string) {
   const demoSites = "'site-green', 'site-late', 'site-waiting', 'site-missing'";
   await db.batch([
     db.prepare("DELETE FROM line_groups WHERE site_id IN (" + demoSites + ")"),
+    db.prepare("DELETE FROM line_group_registry WHERE id IN ('demo-line-green', 'demo-line-late', 'demo-line-waiting', 'demo-line-missing')"),
     db.prepare("DELETE FROM coverage_slots WHERE site_id IN (" + demoSites + ")"),
     db.prepare("DELETE FROM shift_templates WHERE site_id IN (" + demoSites + ")"),
     db.prepare("DELETE FROM operational_sites WHERE id IN (" + demoSites + ")"),

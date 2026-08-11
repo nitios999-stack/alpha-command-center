@@ -66,6 +66,31 @@ export const lineGroups = sqliteTable("line_groups", {
   index("idx_line_groups_name").on(table.groupName),
 ]);
 
+// The registry holds groups discovered by the verified webhook. line_groups is
+// deliberately kept as the manager-owned one-point-to-one-group mapping.
+export const lineGroupRegistry = sqliteTable("line_group_registry", {
+  id: text("id").primaryKey(),
+  groupName: text("group_name").notNull(),
+  pictureUrl: text("picture_url"),
+  lastSeenAt: text("last_seen_at"),
+  source: text("source").notNull().default("manual"),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  index("idx_line_registry_name").on(table.groupName),
+  index("idx_line_registry_seen").on(table.lastSeenAt),
+]);
+
+export const lineWebhookEvents = sqliteTable("line_webhook_events", {
+  id: text("id").primaryKey(),
+  groupId: text("group_id"),
+  eventType: text("event_type").notNull(),
+  receivedAt: text("received_at").notNull(),
+  summary: text("summary").notNull(),
+}, (table) => [
+  index("idx_line_events_group_time").on(table.groupId, table.receivedAt),
+  index("idx_line_events_type_time").on(table.eventType, table.receivedAt),
+]);
+
 export const billingCases = sqliteTable("billing_cases", {
   id: text("id").primaryKey(),
   customerName: text("customer_name").notNull(),

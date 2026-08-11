@@ -44,13 +44,14 @@ test("server-renders the ALPHA Command Center shell", async () => {
 });
 
 test("keeps the command center database and product surface in source", async () => {
-  const [schema, commands, page, styles, layout, packageJson, migrations] = await Promise.all([
+  const [schema, commands, page, styles, layout, packageJson, webhook, migrations] = await Promise.all([
     readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
     readFile(new URL("../db/command-center.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/line/webhook/route.ts", import.meta.url), "utf8"),
     readdir(new URL("../drizzle/", import.meta.url)),
   ]);
 
@@ -60,6 +61,8 @@ test("keeps the command center database and product surface in source", async ()
   assert.match(schema, /shift_templates/);
   assert.match(schema, /system_settings/);
   assert.match(schema, /line_groups/);
+  assert.match(schema, /line_group_registry/);
+  assert.match(schema, /line_webhook_events/);
   assert.match(schema, /idx_coverage_today/);
   assert.match(commands, /confirmSlot/);
   assert.match(commands, /replaceSlot/);
@@ -69,11 +72,18 @@ test("keeps the command center database and product surface in source", async ()
   assert.match(commands, /generateTodayFromTemplates/);
   assert.match(commands, /removeDemoData/);
   assert.match(commands, /mapLineGroup/);
+  assert.match(commands, /sendLineConnectionTest/);
+  assert.match(commands, /saveLineWebhookEvent/);
   assert.match(page, /site-wall/);
   assert.match(page, /csvToTemplates/);
   assert.match(page, /lineGroupId/);
+  assert.match(page, /LINE OA/);
   assert.match(styles, /tile-line/);
+  assert.match(styles, /line-control/);
   assert.match(styles, /--wall-columns/);
+  assert.match(webhook, /x-line-signature/);
+  assert.match(webhook, /crypto\.subtle/);
+  assert.doesNotMatch(webhook, /message\.text|event\.message/);
   assert.match(page, /สีเขียว = ครบทุกช่องกำลัง/);
   assert.match(layout, /ALPHA Command Center/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
