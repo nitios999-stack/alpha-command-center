@@ -297,6 +297,25 @@ function displayTime(value: string | null) {
   }).format(new Date(value));
 }
 
+function lineAgeLabel(value: string | null, nowMs: number) {
+  if (!value) return "ยังไม่มีรายงาน";
+  if (!nowMs) return "กำลังซิงค์";
+  const seenAt = Date.parse(value);
+  if (!Number.isFinite(seenAt)) return "เวลาไม่พร้อม";
+  const ageSeconds = Math.max(0, Math.floor((nowMs - seenAt) / 1_000));
+  if (ageSeconds < 10) return "เพิ่งส่ง";
+  if (ageSeconds < 60) return `${ageSeconds} วินาทีที่แล้ว`;
+  const ageMinutes = Math.floor(ageSeconds / 60);
+  if (ageMinutes < 60) return `${ageMinutes} นาทีที่แล้ว`;
+  const ageHours = Math.floor(ageMinutes / 60);
+  return `${ageHours} ชม.ที่แล้ว`;
+}
+
+function clientTime(value: number | null) {
+  if (!value) return "กำลังดึงข้อมูล";
+  return new Intl.DateTimeFormat("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(value);
+}
+
 export default function Home() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [tab, setTab] = useState<"ops" | "billing" | "setup" | "line" | "reports">("ops");
@@ -311,6 +330,7 @@ export default function Home() {
   const [templateRows, setTemplateRows] = useState<TemplateRow[]>([]);
   const [templateFileName, setTemplateFileName] = useState("");
   const [lastLoadedAt, setLastLoadedAt] = useState<number | null>(null);
+  const [reportClockMs, setReportClockMs] = useState(0);
   const [networkState, setNetworkState] = useState<"online" | "offline" | "error" | "auth">("online");
   const [replaceTarget, setReplaceTarget] = useState<CoverageSlot | null>(null);
   const [replaceName, setReplaceName] = useState("");
@@ -350,17 +370,34 @@ export default function Home() {
     queueMicrotask(() => { void loadDashboard(); });
     const refreshTimer = window.setInterval(() => {
       if (document.visibilityState === "visible") void loadDashboard({ silent: true });
-    }, 30_000);
+    }, tab === "reports" ? 5_000 : 30_000);
+    const refreshOnVisible = () => {
+      if (document.visibilityState === "visible") void loadDashboard({ silent: true });
+    };
     const markOnline = () => setNetworkState("online");
     const markOffline = () => setNetworkState("offline");
+    document.addEventListener("visibilitychange", refreshOnVisible);
     window.addEventListener("online", markOnline);
     window.addEventListener("offline", markOffline);
     return () => {
       window.clearInterval(refreshTimer);
+      document.removeEventListener("visibilitychange", refreshOnVisible);
       window.removeEventListener("online", markOnline);
       window.removeEventListener("offline", markOffline);
     };
-  }, [loadDashboard]);
+  }, [loadDashboard, tab]);
+
+  useEffect(() => {
+    if (tab !== "reports") {
+      return;
+    }
+    const initialClock = window.setTimeout(() => setReportClockMs(Date.now()), 0);
+    const clockTimer = window.setInterval(() => setReportClockMs(Date.now()), 1_000);
+    return () => {
+      window.clearTimeout(initialClock);
+      window.clearInterval(clockTimer);
+    };
+  }, [tab]);
 
   const visibleSlots = useMemo(
     () => (data?.slots ?? []).filter((slot) => slot.wave === wave),
@@ -380,22 +417,23 @@ export default function Home() {
   const operationalSiteById = useMemo(() => new Map((data?.sites ?? []).map((site) => [site.id, site])), [data?.sites]);
   const lineOverviewGroups = useMemo(
     () => [...(data?.lineGroups ?? [])].sort((left, right) => {
-      const statusRank: Record<LineSignalStatus, number> = { red: 0, yellow: 1, gray: 2, green: 3 };
-      const leftStatus = lineSignalStatus(left, data?.now.time ?? "00:00");
-      const rightStatus = lineSignalStatus(right, data?.now.time ?? "00:00");
-      return statusRank[leftStatus] - statusRank[rightStatus]
-        || (left.lastSeenAt ? -Date.parse(left.lastSeenAt) : Number.POSITIVE_INFINITY)
+      const leftSeenAt = left.lastSeenAt ? Date.parse(left.lastSeenAt) : Number.NaN;
+      const rightSeenAt = right.lastSeenAt ? Date.parse(right.lastSeenAt) : Number.NaN;
+      const leftTimestamp = Number.isFinite(leftSeenAt) ? leftSeenAt : Number.NEGATIVE_INFINITY;
+      const rightTimestamp = Number.isFinite(rightSeenAt) ? rightSeenAt : Number.NEGATIVE_INFINITY;
+      return rightTimestamp - leftTimestamp
         || left.groupName.localeCompare(right.groupName, "th");
     }),
-    [data?.lineGroups, data?.now.time],
+    [data?.lineGroups],
   );
-  const lineOverviewStats = useMemo(() => lineOverviewGroups.reduce(
+  const lineOverviewStats = lineOverviewGroups.reduce(
     (all, group) => {
       all[lineSignalStatus(group, data?.now.time ?? "00:00")] += 1;
       return all;
     },
     { green: 0, yellow: 0, red: 0, gray: 0 } as Record<LineSignalStatus, number>,
-  ), [data?.now.time, lineOverviewGroups]);
+  );
+  const reportNowMs = reportClockMs || lastLoadedAt || 0;
   const visibleSites = useMemo(
     () => statusFilter === "all" ? sites : sites.filter((site) => site.status === statusFilter),
     [sites, statusFilter],
@@ -908,9 +946,9 @@ export default function Home() {
               <p>ดูว่าจุดไหนส่งรายงานเข้าระบบแล้ว จุดไหนเงียบ โดยไม่ต้องเปิด LINE OA ไล่ดูทีละกลุ่ม</p>
             </div>
             <div className="report-window">
-              <span>อัปเดตอัตโนมัติ</span>
-              <strong>ทุก 30 วินาที</strong>
-              <small>{data?.lineIntegration.webhookStatus === "healthy" ? "Webhook ทำงานปกติ" : "กำลังรอสัญญาณจาก LINE"}</small>
+              <span>ดึงข้อมูลอัตโนมัติ</span>
+              <strong>ทุก 5 วินาที</strong>
+              <small>{data?.lineIntegration.webhookStatus === "healthy" ? `Webhook ปกติ · ดึงล่าสุด ${clientTime(lastLoadedAt)}` : "กำลังรอสัญญาณจาก LINE"}</small>
             </div>
           </div>
           <section className="line-overview" aria-label="ภาพรวมสัญญาณ LINE OA">
@@ -918,7 +956,7 @@ export default function Home() {
               <div>
                 <p className="eyebrow">LIVE LINE OVERVIEW</p>
                 <h3>ภาพรวมกลุ่ม LINE OA</h3>
-                <p>ฐานข้อมูลจาก LINE webhook/gateway อัปเดตอัตโนมัติทุก 30 วินาที · ไม่ต้องเปิด OA ไล่ดูทีละกลุ่ม</p>
+                <p>ดึงจากฐานข้อมูล LINE webhook โดยตรง · เรียงกลุ่มที่ส่งล่าสุดขึ้นก่อน · ไม่ต้องเปิด OA ไล่ดูทีละกลุ่ม</p>
               </div>
               <div className="line-overview-counts" aria-label="สรุปสัญญาณ LINE">
                 <span className="green"><b>{lineOverviewStats.green}</b> ล่าสุด</span>
@@ -929,7 +967,7 @@ export default function Home() {
             </div>
             <p className="line-overview-note">สีนี้บอกความเคลื่อนไหวของ LINE เท่านั้น ไม่ใช้แทนการยืนยันเข้าเวร ผู้จัดการกดเช็คเข้าเวรในจุดด้านล่างเมื่อเห็นรายงานแล้ว</p>
             <div className="line-overview-grid">
-              {lineOverviewGroups.map((group) => {
+              {lineOverviewGroups.map((group, index) => {
                 const signal = lineSignalStatus(group, data?.now.time ?? "00:00");
                 const site = group.siteId ? operationalSiteById.get(group.siteId) : null;
                 return (
@@ -944,10 +982,11 @@ export default function Home() {
                     <span className="line-overview-card-top">
                       {group.pictureUrl ? <img src={group.pictureUrl} alt="" /> : <b>LINE</b>}
                       <span className="line-overview-name">{group.nameResolved ? group.groupName : "รอชื่อจริงจาก LINE"}</span>
+                      <em className="line-overview-rank">#{index + 1}</em>
                       <i aria-hidden="true" />
                     </span>
                     <span className="line-overview-site">{site ? site.siteName : "ยังไม่ผูกจุด"}</span>
-                    <span className="line-overview-meta"><b>{lineSignalLabel(signal)}</b><span>{displayTime(group.lastSeenAt)} · {group.eventCount} เหตุการณ์</span></span>
+                    <span className="line-overview-meta"><b>{lineSignalLabel(signal)}</b><span>{displayTime(group.lastSeenAt)} · {lineAgeLabel(group.lastSeenAt, reportNowMs)} · {group.eventCount} รายการ</span></span>
                   </button>
                 );
               })}

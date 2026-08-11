@@ -97,6 +97,9 @@ test("keeps the command center database and product surface in source", async ()
   assert.match(page, /attendance-intro/);
   assert.match(page, /report-control/);
   assert.match(page, /ตรวจการส่งรายงานจาก LINE/);
+  assert.match(page, /lineAgeLabel/);
+  assert.match(page, /ทุก 5 วินาที/);
+  assert.match(page, /เรียงกลุ่มที่ส่งล่าสุดขึ้นก่อน/);
   assert.match(page, /เข้าเวรวันนี้/);
   assert.match(page, /lineSignalStatus/);
   assert.doesNotMatch(page, /lineMapGroupName|lineMapPictureUrl/);
