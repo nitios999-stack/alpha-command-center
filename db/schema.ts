@@ -1,4 +1,4 @@
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const coverageSlots = sqliteTable("coverage_slots", {
   id: text("id").primaryKey(),
@@ -54,6 +54,17 @@ export const systemSettings = sqliteTable("system_settings", {
   value: text("value").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
+
+export const lineGroups = sqliteTable("line_groups", {
+  id: text("id").primaryKey(),
+  siteId: text("site_id").notNull(),
+  groupName: text("group_name").notNull(),
+  pictureUrl: text("picture_url"),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("uq_line_groups_site").on(table.siteId),
+  index("idx_line_groups_name").on(table.groupName),
+]);
 
 export const billingCases = sqliteTable("billing_cases", {
   id: text("id").primaryKey(),

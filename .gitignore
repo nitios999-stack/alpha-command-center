@@ -42,5 +42,6 @@ yarn-error.log*
 /.wall-dev-*.log
 /.template-dev-*.log
 /.demo-dev-*.log
+/.line-dev-*.log
 /.package-stage/
 /*.tgz

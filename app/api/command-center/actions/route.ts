@@ -1,11 +1,12 @@
 import { getChatGPTUser } from "../../../chatgpt-auth";
-import { addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, generateTodayFromTemplates, importShiftTemplates, markLeave, removeDemoData, replaceSlot, type TemplateImportRow } from "../../../../db/command-center";
+import { addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, generateTodayFromTemplates, importShiftTemplates, mapLineGroup, markLeave, removeDemoData, replaceSlot, type TemplateImportRow } from "../../../../db/command-center";
 
 export const runtime = "edge";
 
 type ActionPayload = {
-  type?: "confirm" | "replace" | "leave" | "site" | "slot" | "billing" | "template_import" | "generate_today" | "remove_demo";
+  type?: "confirm" | "replace" | "leave" | "site" | "slot" | "billing" | "template_import" | "generate_today" | "remove_demo" | "line_group";
   slotId?: string;
+  siteId?: string;
   source?: string;
   guardName?: string;
   customerName?: string;
@@ -21,6 +22,9 @@ type ActionPayload = {
   deadline?: string;
   verificationPolicy?: "standard" | "reviewed" | "manual";
   rows?: TemplateImportRow[];
+  groupId?: string;
+  groupName?: string;
+  pictureUrl?: string;
 };
 
 export async function POST(request: Request) {
@@ -45,6 +49,14 @@ export async function POST(request: Request) {
       await addOperationalSite({ siteName, customerName, actor });
     } else if (payload.type === "template_import") {
       result = { ok: true, ...(await importShiftTemplates(payload.rows ?? [], actor)) };
+    } else if (payload.type === "line_group") {
+      await mapLineGroup({
+        siteId: payload.siteId ?? "",
+        groupId: payload.groupId ?? "",
+        groupName: payload.groupName ?? "",
+        pictureUrl: payload.pictureUrl,
+        actor,
+      });
     } else if (payload.type === "generate_today") {
       result = { ok: true, ...(await generateTodayFromTemplates(actor)) };
     } else if (payload.type === "remove_demo") {

@@ -44,6 +44,13 @@ type OperationalSite = {
   active: number;
 };
 
+type LineGroup = {
+  id: string;
+  siteId: string;
+  groupName: string;
+  pictureUrl: string | null;
+};
+
 type TemplateSummary = {
   total: number;
   morning: number;
@@ -59,6 +66,9 @@ type TemplateRow = {
   assignedGuard: string;
   deadline: string;
   verificationPolicy: "standard" | "reviewed" | "manual";
+  lineGroupId: string;
+  lineGroupName: string;
+  linePictureUrl: string;
 };
 
 type DashboardData = {
@@ -66,6 +76,7 @@ type DashboardData = {
   now: { time: string };
   slots: CoverageSlot[];
   sites: OperationalSite[];
+  lineGroups: LineGroup[];
   templates: TemplateSummary;
   demoDataPresent: boolean;
   billingCases: BillingCase[];
@@ -81,6 +92,7 @@ type SiteCard = {
   slots: CoverageSlot[];
   confirmed: number;
   lateCount: number;
+  lineGroup: LineGroup | null;
 };
 
 const statusText: Record<SiteStatus, string> = {
@@ -106,7 +118,7 @@ function deriveSiteStatus(slots: CoverageSlot[]): SiteStatus {
   return "yellow";
 }
 
-function groupSites(slots: CoverageSlot[], registry: OperationalSite[]) {
+function groupSites(slots: CoverageSlot[], registry: OperationalSite[], lineGroups: LineGroup[]) {
   const groups = new Map<string, CoverageSlot[]>();
   slots.forEach((slot) => {
     const existing = groups.get(slot.siteId) ?? [];
@@ -114,6 +126,7 @@ function groupSites(slots: CoverageSlot[], registry: OperationalSite[]) {
     groups.set(slot.siteId, existing);
   });
   const registryById = new Map(registry.map((site) => [site.id, site]));
+  const lineGroupBySite = new Map(lineGroups.map((group) => [group.siteId, group]));
   const siteIds = new Set([...registry.map((site) => site.id), ...groups.keys()]);
   return Array.from(siteIds)
     .map((id) => {
@@ -128,6 +141,7 @@ function groupSites(slots: CoverageSlot[], registry: OperationalSite[]) {
         slots: grouped,
         confirmed: grouped.filter((slot) => slot.state === "confirmed").length,
         lateCount: grouped.filter((slot) => slot.lateMinutes > 0).length,
+        lineGroup: lineGroupBySite.get(id) ?? null,
       } satisfies SiteCard;
     })
     .sort((a, b) => {
@@ -202,6 +216,9 @@ function csvToTemplates(text: string): TemplateRow[] {
       assignedGuard: valueAt(row, ["assigned_guard", "guard", "รปภ"]),
       deadline: valueAt(row, ["deadline", "เวลา"]),
       verificationPolicy: rawPolicy === "manual" || rawPolicy.includes("ผู้จัดการ") ? "manual" : rawPolicy === "reviewed" || rawPolicy.includes("หัวหน้า") ? "reviewed" : "standard",
+      lineGroupId: valueAt(row, ["line_group_id", "group_id", "ไลน์กลุ่มไอดี"]),
+      lineGroupName: valueAt(row, ["line_group_name", "group_name", "ชื่อกลุ่มไลน์"]),
+      linePictureUrl: valueAt(row, ["line_picture_url", "group_picture_url", "โลโก้กลุ่มไลน์"]),
     };
     if (!item.siteName || !item.customerName || !item.postName || !item.slotLabel || !/^\d{2}:\d{2}$/.test(item.deadline)) {
       throw new Error(`แถวที่ ${index + 2} ไม่ครบ: ต้องมีชื่อจุด ลูกค้า จุดย่อย ช่อง และเวลา HH:MM`);
@@ -266,7 +283,7 @@ export default function Home() {
     () => (data?.slots ?? []).filter((slot) => slot.wave === wave),
     [data?.slots, wave],
   );
-  const sites = useMemo(() => groupSites(visibleSlots, data?.sites ?? []), [visibleSlots, data?.sites]);
+  const sites = useMemo(() => groupSites(visibleSlots, data?.sites ?? [], data?.lineGroups ?? []), [visibleSlots, data?.sites, data?.lineGroups]);
   const stats = useMemo(() => {
     return sites.reduce(
       (all, site) => {
@@ -317,6 +334,15 @@ export default function Home() {
     const name = window.prompt("ระบุชื่อ รปภ. สแปร์ที่รับจุดนี้", "นายสมพงษ์ (สแปร์)");
     if (!name) return;
     void runAction({ type: "replace", slotId: slot.id, guardName: name }, slot.id, "มอบหมายสแปร์แล้ว ระบบกำลังรอรายงานเข้าเวร");
+  };
+
+  const mapLineGroup = (site: SiteCard) => {
+    const groupId = window.prompt("รหัสกลุ่ม LINE (groupId)", site.lineGroup?.id ?? "");
+    if (!groupId) return;
+    const groupName = window.prompt("ชื่อที่ต้องการแสดงของกลุ่ม LINE", site.lineGroup?.groupName ?? "");
+    if (!groupName) return;
+    const pictureUrl = window.prompt("ลิงก์โลโก้กลุ่ม LINE (เว้นว่างได้)", site.lineGroup?.pictureUrl ?? "");
+    void runAction({ type: "line_group", siteId: site.id, groupId, groupName, pictureUrl }, "line-" + site.id, "ผูกกลุ่ม LINE กับจุดนี้แล้ว");
   };
 
   const addSiteWithoutRoster = () => {
@@ -401,7 +427,7 @@ export default function Home() {
   };
 
   const downloadTemplate = () => {
-    const sample = "site_name,customer_name,wave,post_name,slot_label,assigned_guard,deadline,verification_policy\nหมู่บ้านตัวอย่าง,นิติบุคคลตัวอย่าง,morning,ป้อมหน้า,ช่อง 1,นายสมชาย,06:00,standard\nหมู่บ้านตัวอย่าง,นิติบุคคลตัวอย่าง,evening,ป้อมหน้า,ช่อง 1,นายสมชาย,18:00,standard";
+    const sample = "site_name,customer_name,wave,post_name,slot_label,assigned_guard,deadline,verification_policy,line_group_id,line_group_name,line_picture_url\nหมู่บ้านตัวอย่าง,นิติบุคคลตัวอย่าง,morning,ป้อมหน้า,ช่อง 1,นายสมชาย,06:00,standard,C123EXAMPLE,กลุ่ม รปภ. หมู่บ้านตัวอย่าง,\nหมู่บ้านตัวอย่าง,นิติบุคคลตัวอย่าง,evening,ป้อมหน้า,ช่อง 1,นายสมชาย,18:00,standard,C123EXAMPLE,กลุ่ม รปภ. หมู่บ้านตัวอย่าง,";
     const url = URL.createObjectURL(new Blob(["\uFEFF" + sample], { type: "text/csv;charset=utf-8" }));
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -511,7 +537,7 @@ export default function Home() {
           )}
 
           <section
-            className="site-wall"
+            className={"site-wall " + (visibleSites.length > 40 ? "dense-wall" : "")}
             aria-label="แผงสถานะทุกจุด"
             aria-live="polite"
             style={{ "--wall-columns": wallLayout.columns, "--wall-rows": wallLayout.rows } as CSSProperties}
@@ -532,6 +558,10 @@ export default function Home() {
                 </span>
                 <span className="tile-name">{site.name}</span>
                 <span className="tile-summary">{siteStatusSummary(site)}</span>
+                <span className={"tile-line " + (site.lineGroup ? "linked" : "unlinked")}>
+                  {site.lineGroup?.pictureUrl ? <img src={site.lineGroup.pictureUrl} alt="" /> : <b>LINE</b>}
+                  <span>{site.lineGroup?.groupName ?? "ยังไม่ผูก LINE"}</span>
+                </span>
               </button>
             ))}
           </section>
@@ -600,6 +630,15 @@ export default function Home() {
                   <p>{selectedSite.customerName} · ยืนยัน {selectedSite.confirmed}/{selectedSite.slots.length}</p>
                 </div>
                 <button type="button" className="drawer-close" onClick={() => setSelectedSiteId(null)} aria-label="ปิดรายละเอียด">×</button>
+              </div>
+              <div className={"drawer-line-group " + (selectedSite.lineGroup ? "linked" : "unlinked")}>
+                {selectedSite.lineGroup?.pictureUrl ? <img src={selectedSite.lineGroup.pictureUrl} alt="" /> : <span className="line-avatar">LINE</span>}
+                <div>
+                  <small>กลุ่ม LINE ของจุดนี้</small>
+                  <strong>{selectedSite.lineGroup?.groupName ?? "ยังไม่ผูกกลุ่ม"}</strong>
+                  {selectedSite.lineGroup && <code title={selectedSite.lineGroup.id}>{selectedSite.lineGroup.id}</code>}
+                </div>
+                <button className="action-text" onClick={() => mapLineGroup(selectedSite)}>{selectedSite.lineGroup ? "แก้ไข" : "ผูกกลุ่ม"}</button>
               </div>
               <div className="drawer-slots">
                 {selectedSite.slots.map((slot) => (
@@ -684,7 +723,7 @@ export default function Home() {
             <div className="template-counts" aria-label="อัตราต้นแบบปัจจุบัน">
               <strong>{data?.templates.total ?? 0}</strong>
               <span>อัตราต้นแบบ</span>
-              <small>เช้า {data?.templates.morning ?? 0} · เย็น {data?.templates.evening ?? 0}</small>
+              <small>เช้า {data?.templates.morning ?? 0} · เย็น {data?.templates.evening ?? 0} · LINE {data?.lineGroups.length ?? 0}/{data?.sites.length ?? 0}</small>
             </div>
           </div>
 
@@ -696,10 +735,15 @@ export default function Home() {
           )}
 
           <div className="setup-steps">
-            <article><span>1</span><div><strong>ดาวน์โหลดไฟล์ตัวอย่าง</strong><p>เปิดด้วย Excel แล้วใส่รายชื่อจุดและกำลังประจำ</p></div><button className="small-secondary" onClick={downloadTemplate}>ดาวน์โหลด CSV</button></article>
-            <article><span>2</span><div><strong>เลือกไฟล์ที่จัดทำแล้ว</strong><p>รองรับสูงสุด 300 อัตราต่อครั้ง เหมาะกับ 80 จุดและสองผลัด</p></div><label className="file-picker">เลือกไฟล์ CSV<input type="file" accept=".csv,text/csv" onChange={(event) => void loadTemplateFile(event.target.files?.[0])} /></label></article>
+            <article><span>1</span><div><strong>ดาวน์โหลดไฟล์ตัวอย่าง</strong><p>เปิดด้วย Excel แล้วใส่รายชื่อจุด, กำลังประจำ และกลุ่ม LINE ของแต่ละจุด</p></div><button className="small-secondary" onClick={downloadTemplate}>ดาวน์โหลด CSV</button></article>
+            <article><span>2</span><div><strong>เลือกไฟล์ที่จัดทำแล้ว</strong><p>รองรับสูงสุด 300 อัตราต่อครั้ง เหมาะกับ 80 จุด สองผลัด และการผูกกลุ่ม LINE</p></div><label className="file-picker">เลือกไฟล์ CSV<input type="file" accept=".csv,text/csv" onChange={(event) => void loadTemplateFile(event.target.files?.[0])} /></label></article>
             <article><span>3</span><div><strong>ตรวจและนำเข้า</strong><p>ระบบจะอัปเดตเฉพาะอัตราต้นแบบ ยังไม่เปลี่ยนสถานะหน้างาน</p></div><button className="primary-button" disabled={!templateRows.length || busyId === "template-import"} onClick={importTemplates}>{busyId === "template-import" ? "กำลังนำเข้า…" : `ยืนยัน ${templateRows.length} อัตรา`}</button></article>
           </div>
+
+          <section className="line-mapping-note">
+            <span className="line-avatar">LINE</span>
+            <div><strong>การผูกกลุ่ม LINE</strong><p>คอลัมน์ <code>line_group_id</code> และ <code>line_group_name</code> ใช้ระบุว่าจุดนี้อยู่ในกลุ่มใด ส่วน <code>line_picture_url</code> เป็นลิงก์โลโก้กลุ่ม (เว้นว่างได้) เมื่อเปิดเชื่อม LINE OA ในเฟสถัดไป ระบบจะใช้ groupId เดียวกันนี้เป็นตัวจับคู่</p></div>
+          </section>
 
           {templateRows.length > 0 && (
             <section className="import-preview" aria-label="ตัวอย่างข้อมูลที่รอนำเข้า">
@@ -709,8 +753,8 @@ export default function Home() {
               </div>
               <button className="action-text" onClick={() => { setTemplateRows([]); setTemplateFileName(""); }}>ล้างไฟล์</button>
               <div className="preview-table">
-                <div className="preview-head"><span>จุด</span><span>ผลัด</span><span>ตำแหน่ง</span><span>รปภ. ประจำ</span><span>กำหนด</span></div>
-                {templateRows.slice(0, 5).map((row, index) => <div className="preview-row" key={`${row.siteName}-${row.wave}-${index}`}><span>{row.siteName}</span><span>{row.wave === "morning" ? "เช้า" : "เย็น"}</span><span>{row.postName} · {row.slotLabel}</span><span>{row.assignedGuard || "ยังไม่ระบุ"}</span><span>{row.deadline}</span></div>)}
+                <div className="preview-head"><span>จุด</span><span>ผลัด</span><span>ตำแหน่ง</span><span>รปภ. ประจำ</span><span>กลุ่ม LINE</span><span>กำหนด</span></div>
+                {templateRows.slice(0, 5).map((row, index) => <div className="preview-row" key={`${row.siteName}-${row.wave}-${index}`}><span>{row.siteName}</span><span>{row.wave === "morning" ? "เช้า" : "เย็น"}</span><span>{row.postName} · {row.slotLabel}</span><span>{row.assignedGuard || "ยังไม่ระบุ"}</span><span>{row.lineGroupName || "ยังไม่ผูก"}</span><span>{row.deadline}</span></div>)}
               </div>
             </section>
           )}

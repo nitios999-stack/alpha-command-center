@@ -35,6 +35,13 @@ export type OperationalSite = {
   active: number;
 };
 
+export type LineGroup = {
+  id: string;
+  siteId: string;
+  groupName: string;
+  pictureUrl: string | null;
+};
+
 export type TemplateImportRow = {
   siteName: string;
   customerName: string;
@@ -44,6 +51,9 @@ export type TemplateImportRow = {
   assignedGuard?: string;
   deadline: string;
   verificationPolicy?: "standard" | "reviewed" | "manual";
+  lineGroupId?: string;
+  lineGroupName?: string;
+  linePictureUrl?: string;
 };
 
 export type TemplateSummary = {
@@ -134,12 +144,33 @@ function toOperationalSite(row: D1Row): OperationalSite {
   };
 }
 
+function toLineGroup(row: D1Row): LineGroup {
+  return {
+    id: String(row.id),
+    siteId: String(row.site_id),
+    groupName: String(row.group_name),
+    pictureUrl: value(row, "picture_url"),
+  };
+}
+
 function siteIdentifier(siteName: string) {
   return "site-" + siteName.trim().toLowerCase().replace(/[^a-z0-9ก-๙]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
 function templateIdentifier(siteId: string, wave: string, postName: string, slotLabel: string) {
   return ["template", siteId, wave, postName.trim().toLowerCase(), slotLabel.trim().toLowerCase()].join("|");
+}
+
+function pictureUrl(value?: string) {
+  const candidate = value?.trim() ?? "";
+  if (!candidate) return null;
+  try {
+    const url = new URL(candidate);
+    if (url.protocol !== "https:") throw new Error();
+    return url.toString();
+  } catch {
+    throw new Error("ลิงก์โลโก้ LINE ต้องเป็น https:// เท่านั้น");
+  }
 }
 
 export function bangkokNow() {
@@ -179,6 +210,7 @@ export async function ensureDatabase() {
   const db = database();
   await db.batch([
     db.prepare("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS line_groups (id TEXT PRIMARY KEY, site_id TEXT NOT NULL, group_name TEXT NOT NULL, picture_url TEXT, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS operational_sites (id TEXT PRIMARY KEY, site_name TEXT NOT NULL, customer_name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS shift_templates (id TEXT PRIMARY KEY, site_id TEXT NOT NULL, wave TEXT NOT NULL, post_name TEXT NOT NULL, slot_label TEXT NOT NULL, assigned_guard TEXT, deadline TEXT NOT NULL, verification_policy TEXT NOT NULL DEFAULT 'standard', active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS coverage_slots (id TEXT PRIMARY KEY, operational_date TEXT NOT NULL, wave TEXT NOT NULL, site_id TEXT NOT NULL, site_name TEXT NOT NULL, customer_name TEXT NOT NULL, post_name TEXT NOT NULL, slot_label TEXT NOT NULL, assigned_guard TEXT, assignment_type TEXT NOT NULL DEFAULT 'regular', state TEXT NOT NULL, verification_policy TEXT NOT NULL DEFAULT 'standard', deadline TEXT NOT NULL, reported_at TEXT, source TEXT, late_minutes INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)"),
@@ -190,6 +222,8 @@ export async function ensureDatabase() {
     db.prepare("CREATE INDEX IF NOT EXISTS idx_operational_sites_active ON operational_sites(active, site_name)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_shift_templates_wave_active ON shift_templates(wave, active, site_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_shift_templates_site_slot ON shift_templates(site_id, wave, post_name, slot_label)"),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS uq_line_groups_site ON line_groups(site_id)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_line_groups_name ON line_groups(group_name)"),
   ]);
 
   const seedSetting = await db.prepare("SELECT value FROM system_settings WHERE key = 'demo_seeded'").first<{ value: string }>();
@@ -201,6 +235,7 @@ export async function ensureDatabase() {
   await syncSiteRegistryFromSlots();
   const templateCount = await db.prepare("SELECT COUNT(*) AS count FROM shift_templates").first<{ count: number }>();
   if ((templateCount?.count ?? 0) === 0) await syncTemplatesFromCoverageSlots();
+  await seedDemoLineGroups();
 }
 
 async function syncSiteRegistryFromSlots() {
@@ -213,6 +248,20 @@ async function syncTemplatesFromCoverageSlots() {
   const now = bangkokNow().iso;
   await database().prepare("INSERT OR IGNORE INTO shift_templates (id, site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, active, updated_at) SELECT 'template|' || site_id || '|' || wave || '|' || lower(post_name) || '|' || lower(slot_label), site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, 1, ? FROM coverage_slots")
     .bind(now).run();
+}
+
+async function seedDemoLineGroups() {
+  const db = database();
+  const demoCount = await db.prepare("SELECT COUNT(*) AS count FROM operational_sites WHERE id = 'site-green'").first<{ count: number }>();
+  const linkedCount = await db.prepare("SELECT COUNT(*) AS count FROM line_groups WHERE site_id IN ('site-green', 'site-late', 'site-waiting', 'site-missing')").first<{ count: number }>();
+  if (!(demoCount?.count ?? 0) || (linkedCount?.count ?? 0)) return;
+  const now = bangkokNow().iso;
+  await db.batch([
+    db.prepare("INSERT OR IGNORE INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, NULL, ?)").bind("demo-line-green", "site-green", "กลุ่ม รปภ. กรีนวิลล์", now),
+    db.prepare("INSERT OR IGNORE INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, NULL, ?)").bind("demo-line-late", "site-late", "กลุ่ม รปภ. ซิตี้ทาวเวอร์", now),
+    db.prepare("INSERT OR IGNORE INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, NULL, ?)").bind("demo-line-waiting", "site-waiting", "กลุ่ม รปภ. ริเวอร์พาร์ค", now),
+    db.prepare("INSERT OR IGNORE INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, NULL, ?)").bind("demo-line-missing", "site-missing", "กลุ่ม รปภ. เอสพีโลจิสติกส์", now),
+  ]);
 }
 
 async function seedDemoData() {
@@ -245,6 +294,7 @@ export async function getDashboard() {
   const today = bangkokNow().date;
   const slotResult = await db.prepare("SELECT * FROM coverage_slots WHERE operational_date = ? ORDER BY wave, site_name, post_name, slot_label").bind(today).all<D1Row>();
   const siteResult = await db.prepare("SELECT * FROM operational_sites WHERE active = 1 ORDER BY site_name").all<D1Row>();
+  const lineGroupResult = await db.prepare("SELECT * FROM line_groups ORDER BY group_name").all<D1Row>();
   const templateResult = await db.prepare("SELECT wave, COUNT(*) AS count FROM shift_templates WHERE active = 1 GROUP BY wave").all<D1Row>();
   const demoCount = await db.prepare("SELECT COUNT(*) AS count FROM operational_sites WHERE id IN ('site-green', 'site-late', 'site-waiting', 'site-missing')").first<{ count: number }>();
   const billingResult = await db.prepare("SELECT * FROM billing_cases ORDER BY due_at ASC, updated_at DESC LIMIT 30").all<D1Row>();
@@ -260,6 +310,7 @@ export async function getDashboard() {
     now: bangkokNow(),
     slots: (slotResult.results ?? []).map(toCoverageSlot),
     sites: (siteResult.results ?? []).map(toOperationalSite),
+    lineGroups: (lineGroupResult.results ?? []).map(toLineGroup),
     templates,
     demoDataPresent: Number(demoCount?.count ?? 0) > 0,
     billingCases: (billingResult.results ?? []).map(toBillingCase),
@@ -339,6 +390,24 @@ export async function addOperationalSite(input: { siteName: string; customerName
   await addAudit("operational_site", id, "created", input.actor, "เพิ่มจุดสำหรับตั้งอัตรา " + siteName);
 }
 
+export async function mapLineGroup(input: { siteId: string; groupId: string; groupName: string; pictureUrl?: string; actor: string }) {
+  await ensureDatabase();
+  const siteId = input.siteId.trim();
+  const groupId = input.groupId.trim();
+  const groupName = input.groupName.trim();
+  if (!siteId || !groupId || !groupName) throw new Error("กรุณาระบุรหัสกลุ่มและชื่อกลุ่ม LINE ให้ครบ");
+  const db = database();
+  const site = await db.prepare("SELECT site_name FROM operational_sites WHERE id = ? AND active = 1").bind(siteId).first<D1Row>();
+  if (!site) throw new Error("ไม่พบจุดที่ต้องการผูกกลุ่ม LINE");
+  const now = bangkokNow().iso;
+  await db.batch([
+    db.prepare("DELETE FROM line_groups WHERE site_id = ? AND id != ?").bind(siteId, groupId),
+    db.prepare("INSERT INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET site_id = excluded.site_id, group_name = excluded.group_name, picture_url = excluded.picture_url, updated_at = excluded.updated_at")
+      .bind(groupId, siteId, groupName, pictureUrl(input.pictureUrl), now),
+  ]);
+  await addAudit("line_group", groupId, "mapped", input.actor, `ผูกกลุ่ม LINE ${groupName} กับ ${String(site.site_name)}`);
+}
+
 export async function importShiftTemplates(rows: TemplateImportRow[], actor: string) {
   await ensureDatabase();
   if (!rows.length) throw new Error("ไม่พบรายการอัตรากำลังในไฟล์");
@@ -347,6 +416,8 @@ export async function importShiftTemplates(rows: TemplateImportRow[], actor: str
   const now = bangkokNow().iso;
   const db = database();
   const uniqueRows = new Map<string, TemplateImportRow>();
+  const lineGroupBySite = new Map<string, { id: string; name: string; pictureUrl: string }>();
+  const siteByLineGroup = new Map<string, string>();
 
   rows.forEach((raw, index) => {
     const siteName = raw.siteName?.trim() ?? "";
@@ -356,10 +427,23 @@ export async function importShiftTemplates(rows: TemplateImportRow[], actor: str
     const deadline = raw.deadline?.trim() ?? "";
     const wave = raw.wave === "evening" ? "evening" : "morning";
     const verificationPolicy = raw.verificationPolicy === "manual" || raw.verificationPolicy === "reviewed" ? raw.verificationPolicy : "standard";
+    const lineGroupId = raw.lineGroupId?.trim() ?? "";
+    const lineGroupName = raw.lineGroupName?.trim() ?? "";
+    const linePictureUrl = pictureUrl(raw.linePictureUrl) ?? "";
     if (!siteName || !customerName || !postName || !slotLabel || !/^\d{2}:\d{2}$/.test(deadline)) {
       throw new Error(`แถวที่ ${index + 2} มีข้อมูลไม่ครบหรือเวลาไม่ถูกต้อง`);
     }
+    if ((lineGroupName || linePictureUrl) && !lineGroupId) throw new Error(`แถวที่ ${index + 2} ระบุชื่อหรือโลโก้ LINE แต่ไม่มี line_group_id`);
+    if (lineGroupId && !lineGroupName) throw new Error(`แถวที่ ${index + 2} มี line_group_id แต่ไม่มี line_group_name`);
     const siteId = siteIdentifier(siteName);
+    if (lineGroupId) {
+      const alreadyMapped = lineGroupBySite.get(siteId);
+      if (alreadyMapped && alreadyMapped.id !== lineGroupId) throw new Error(`จุด ${siteName} ผูกกับ LINE มากกว่า 1 กลุ่มในไฟล์เดียวกัน`);
+      const linkedSite = siteByLineGroup.get(lineGroupId);
+      if (linkedSite && linkedSite !== siteId) throw new Error(`กลุ่ม LINE ${lineGroupName} ถูกผูกซ้ำมากกว่า 1 จุด`);
+      lineGroupBySite.set(siteId, { id: lineGroupId, name: lineGroupName, pictureUrl: linePictureUrl });
+      siteByLineGroup.set(lineGroupId, siteId);
+    }
     uniqueRows.set(templateIdentifier(siteId, wave, postName, slotLabel), {
       siteName,
       customerName,
@@ -369,6 +453,9 @@ export async function importShiftTemplates(rows: TemplateImportRow[], actor: str
       assignedGuard: raw.assignedGuard?.trim() ?? "",
       deadline,
       verificationPolicy,
+      lineGroupId,
+      lineGroupName,
+      linePictureUrl,
     });
   });
 
@@ -382,9 +469,20 @@ export async function importShiftTemplates(rows: TemplateImportRow[], actor: str
     ];
   });
 
-  await db.batch(operations);
-  await addAudit("shift_template", "bulk-import", "imported", actor, `นำเข้าอัตรากำลัง ${uniqueRows.size} ช่อง`);
-  return { imported: uniqueRows.size };
+  for (let offset = 0; offset < operations.length; offset += 80) {
+    await db.batch(operations.slice(offset, offset + 80));
+  }
+
+  const lineOperations = Array.from(lineGroupBySite.entries()).flatMap(([siteId, group]) => [
+    db.prepare("DELETE FROM line_groups WHERE site_id = ? AND id != ?").bind(siteId, group.id),
+    db.prepare("INSERT INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET site_id = excluded.site_id, group_name = excluded.group_name, picture_url = excluded.picture_url, updated_at = excluded.updated_at")
+      .bind(group.id, siteId, group.name, group.pictureUrl || null, now),
+  ]);
+  for (let offset = 0; offset < lineOperations.length; offset += 80) {
+    await db.batch(lineOperations.slice(offset, offset + 80));
+  }
+  await addAudit("shift_template", "bulk-import", "imported", actor, `นำเข้าอัตรากำลัง ${uniqueRows.size} ช่อง และผูก LINE ${lineGroupBySite.size} กลุ่ม`);
+  return { imported: uniqueRows.size, lineGroups: lineGroupBySite.size };
 }
 
 export async function generateTodayFromTemplates(actor: string) {
@@ -415,6 +513,7 @@ export async function removeDemoData(actor: string) {
   const db = database();
   const demoSites = "'site-green', 'site-late', 'site-waiting', 'site-missing'";
   await db.batch([
+    db.prepare("DELETE FROM line_groups WHERE site_id IN (" + demoSites + ")"),
     db.prepare("DELETE FROM coverage_slots WHERE site_id IN (" + demoSites + ")"),
     db.prepare("DELETE FROM shift_templates WHERE site_id IN (" + demoSites + ")"),
     db.prepare("DELETE FROM operational_sites WHERE id IN (" + demoSites + ")"),
