@@ -326,6 +326,9 @@ async function seedDemoData() {
 
 export async function getDashboard() {
   await ensureDatabase();
+  // The public gateway holds only signed LINE group metadata. Refreshing it
+  // here keeps the private control wall current without exposing D1.
+  await syncLineGroupsFromGateway().catch(() => null);
   const db = database();
   const today = bangkokNow().date;
   const slotResult = await db.prepare("SELECT * FROM coverage_slots WHERE operational_date = ? ORDER BY wave, site_name, post_name, slot_label").bind(today).all<D1Row>();
@@ -513,7 +516,7 @@ export async function sendLineConnectionTest(input: { groupId: string; actor: st
   await addAudit("line_group", groupId, "connection_test_sent", input.actor, `ส่งข้อความทดสอบไปยัง ${String(group.group_name)} โดยไม่ส่งข้อมูลภายใน`);
 }
 
-export async function syncLineGroupsFromGateway(actor: string) {
+export async function syncLineGroupsFromGateway(actor?: string) {
   await ensureDatabase();
   const gatewayUrl = lineEnvironment().LINE_GATEWAY_URL?.trim();
   const syncToken = lineEnvironment().LINE_GATEWAY_SYNC_TOKEN;
@@ -551,7 +554,7 @@ export async function syncLineGroupsFromGateway(actor: string) {
         .bind(group.id, group.groupName, group.pictureUrl, group.lastSeenAt, now),
     ));
   }
-  await addAudit("line_gateway", "registry", "synced", actor, `รับทะเบียนกลุ่ม LINE ${groups.length} กลุ่มจาก gateway ที่ยืนยันตัวตนแล้ว`);
+  if (actor) await addAudit("line_gateway", "registry", "synced", actor, `รับทะเบียนกลุ่ม LINE ${groups.length} กลุ่มจาก gateway ที่ยืนยันตัวตนแล้ว`);
   return { imported: groups.length };
 }
 
