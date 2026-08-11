@@ -48,6 +48,7 @@ export type LineIntegrationStatus = {
   configured: boolean;
   gatewayConfigured: boolean;
   webhookPath: string;
+  lastWebhookAt: string | null;
   receivedGroups: number;
   mappedGroups: number;
 };
@@ -326,9 +327,6 @@ async function seedDemoData() {
 
 export async function getDashboard() {
   await ensureDatabase();
-  // The public gateway holds only signed LINE group metadata. Refreshing it
-  // here keeps the private control wall current without exposing D1.
-  await syncLineGroupsFromGateway().catch(() => null);
   const db = database();
   const today = bangkokNow().date;
   const slotResult = await db.prepare("SELECT * FROM coverage_slots WHERE operational_date = ? ORDER BY wave, site_name, post_name, slot_label").bind(today).all<D1Row>();
@@ -337,7 +335,7 @@ export async function getDashboard() {
   const templateResult = await db.prepare("SELECT wave, COUNT(*) AS count FROM shift_templates WHERE active = 1 GROUP BY wave").all<D1Row>();
   const demoCount = await db.prepare("SELECT COUNT(*) AS count FROM operational_sites WHERE id IN ('site-green', 'site-late', 'site-waiting', 'site-missing')").first<{ count: number }>();
   const billingResult = await db.prepare("SELECT * FROM billing_cases ORDER BY due_at ASC, updated_at DESC LIMIT 30").all<D1Row>();
-  const lineCounts = await db.prepare("SELECT COUNT(*) AS received_groups, COUNT(m.id) AS mapped_groups FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id").first<{ received_groups: number; mapped_groups: number }>();
+  const lineCounts = await db.prepare("SELECT COUNT(*) AS received_groups, COUNT(m.id) AS mapped_groups, MAX(r.last_seen_at) AS last_webhook_at FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id").first<{ received_groups: number; mapped_groups: number; last_webhook_at: string | null }>();
   const templates: TemplateSummary = { total: 0, morning: 0, evening: 0 };
   (templateResult.results ?? []).forEach((row) => {
     const wave = String(row.wave);
@@ -354,7 +352,8 @@ export async function getDashboard() {
     lineIntegration: {
       configured: Boolean(lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN && lineEnvironment().LINE_CHANNEL_SECRET),
       gatewayConfigured: Boolean(lineEnvironment().LINE_GATEWAY_URL && lineEnvironment().LINE_GATEWAY_SYNC_TOKEN),
-      webhookPath: "/api/line/webhook",
+      webhookPath: lineEnvironment().LINE_GATEWAY_URL ? `${lineEnvironment().LINE_GATEWAY_URL.replace(/\/$/, "")}/api/line/webhook` : "/api/line/webhook",
+      lastWebhookAt: lineCounts?.last_webhook_at ?? null,
       receivedGroups: Number(lineCounts?.received_groups ?? 0),
       mappedGroups: Number(lineCounts?.mapped_groups ?? 0),
     } satisfies LineIntegrationStatus,
@@ -362,6 +361,18 @@ export async function getDashboard() {
     demoDataPresent: Number(demoCount?.count ?? 0) > 0,
     billingCases: (billingResult.results ?? []).map(toBillingCase),
   };
+}
+
+export async function saveGatewayLineGroup(input: { groupId: string; groupName: string; pictureUrl?: string | null; lastSeenAt?: string }) {
+  await ensureDatabase();
+  const groupId = input.groupId.trim();
+  const groupName = input.groupName.trim();
+  if (!groupId || !groupName || groupId.length > 255 || groupName.length > 255) throw new Error("invalid LINE group record");
+  const candidateTime = input.lastSeenAt?.trim() ?? "";
+  const lastSeenAt = candidateTime && !Number.isNaN(Date.parse(candidateTime)) ? candidateTime : bangkokNow().iso;
+  const now = bangkokNow().iso;
+  await database().prepare("INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at) VALUES (?, ?, ?, ?, 'webhook', ?) ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), last_seen_at = excluded.last_seen_at, source = 'webhook', updated_at = excluded.updated_at")
+    .bind(groupId, groupName, pictureUrl(input.pictureUrl ?? undefined), lastSeenAt, now).run();
 }
 
 export async function addAudit(entityType: string, entityId: string, action: string, actor: string, summary: string) {
