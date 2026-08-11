@@ -55,6 +55,7 @@ type LineGroup = {
 
 type LineIntegrationStatus = {
   configured: boolean;
+  gatewayConfigured: boolean;
   webhookPath: string;
   receivedGroups: number;
   mappedGroups: number;
@@ -750,8 +751,8 @@ export default function Home() {
               <h2>ทะเบียนกลุ่ม และการควบคุมการเชื่อมต่อ</h2>
               <p>กลุ่มที่ส่ง webhook ที่ตรวจสอบลายเซ็นแล้วจะเข้าทะเบียนอัตโนมัติ จากนั้นผู้จัดการเลือกผูกกลุ่มกับจุดได้เอง ระบบไม่เก็บข้อความในกลุ่ม และไม่ส่งสถานะกำลังภายในออกไป</p>
             </div>
-            <div className={data?.lineIntegration.configured ? "line-ready" : "line-not-ready"}>
-              <strong>{data?.lineIntegration.configured ? "ตั้งค่า Secret แล้ว" : "รอการตั้งค่า Secret"}</strong>
+            <div className={data?.lineIntegration.configured && data?.lineIntegration.gatewayConfigured ? "line-ready" : "line-not-ready"}>
+              <strong>{data?.lineIntegration.configured && data?.lineIntegration.gatewayConfigured ? "Gateway พร้อมรับกลุ่ม" : "กำลังเชื่อมต่อ Gateway"}</strong>
               <span>Webhook: {data?.lineIntegration.webhookPath ?? "/api/line/webhook"}</span>
             </div>
           </div>
@@ -770,6 +771,7 @@ export default function Home() {
           <section className="line-callback-gate">
             <strong>Webhook Gateway แยกต่างหาก</strong>
             <p>Dashboard นี้ยังเป็น private ตามที่ควรเป็น จึงต้องใช้ public gateway เฉพาะรับ LINE webhook ก่อนใส่ Callback URL ใน LINE Developers — gateway จะตรวจลายเซ็นและส่งเฉพาะข้อมูลทะเบียนกลุ่มเข้าระบบ โดยไม่เปิดหน้า Command Center</p>
+            <button className="small-secondary" disabled={!data?.lineIntegration.gatewayConfigured || busyId === "line-gateway-sync"} onClick={() => void runAction({ type: "line_gateway_sync" }, "line-gateway-sync", "รับทะเบียนกลุ่มล่าสุดจาก LINE Gateway แล้ว")}>{busyId === "line-gateway-sync" ? "กำลังรับข้อมูล…" : "รับกลุ่มล่าสุด"}</button>
           </section>
 
           <section className="line-groups-table">

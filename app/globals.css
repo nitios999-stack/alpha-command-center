@@ -1406,6 +1406,7 @@ button:disabled {
 .line-callback-gate { padding: 16px 18px; color: #164334; background: #edf7f1; border: 1px solid #bde4cf; border-radius: 15px; }
 .line-callback-gate strong { display: block; color: var(--forest-dark); }
 .line-callback-gate p { margin: 5px 0 0; color: #4d675c; font-size: 0.86rem; line-height: 1.55; }
+.line-callback-gate .small-secondary { margin-top: 12px; }
 
 .line-groups-table { overflow: hidden; background: white; border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); }
 .line-table-head,

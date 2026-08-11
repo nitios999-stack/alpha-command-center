@@ -74,10 +74,12 @@ test("keeps the command center database and product surface in source", async ()
   assert.match(commands, /mapLineGroup/);
   assert.match(commands, /sendLineConnectionTest/);
   assert.match(commands, /saveLineWebhookEvent/);
+  assert.match(commands, /syncLineGroupsFromGateway/);
   assert.match(page, /site-wall/);
   assert.match(page, /csvToTemplates/);
   assert.match(page, /lineGroupId/);
   assert.match(page, /LINE OA/);
+  assert.match(page, /line_gateway_sync/);
   assert.match(styles, /tile-line/);
   assert.match(styles, /line-control/);
   assert.match(styles, /--wall-columns/);

@@ -46,6 +46,7 @@ export type LineGroup = {
 
 export type LineIntegrationStatus = {
   configured: boolean;
+  gatewayConfigured: boolean;
   webhookPath: string;
   receivedGroups: number;
   mappedGroups: number;
@@ -167,6 +168,8 @@ function toLineGroup(row: D1Row): LineGroup {
 type LineEnvironment = {
   LINE_CHANNEL_ACCESS_TOKEN?: string;
   LINE_CHANNEL_SECRET?: string;
+  LINE_GATEWAY_URL?: string;
+  LINE_GATEWAY_SYNC_TOKEN?: string;
 };
 
 function lineEnvironment() {
@@ -347,6 +350,7 @@ export async function getDashboard() {
     lineGroups: (lineGroupResult.results ?? []).map(toLineGroup),
     lineIntegration: {
       configured: Boolean(lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN && lineEnvironment().LINE_CHANNEL_SECRET),
+      gatewayConfigured: Boolean(lineEnvironment().LINE_GATEWAY_URL && lineEnvironment().LINE_GATEWAY_SYNC_TOKEN),
       webhookPath: "/api/line/webhook",
       receivedGroups: Number(lineCounts?.received_groups ?? 0),
       mappedGroups: Number(lineCounts?.mapped_groups ?? 0),
@@ -507,6 +511,48 @@ export async function sendLineConnectionTest(input: { groupId: string; actor: st
   });
   if (!response.ok) throw new Error("LINE OA ไม่รับการส่งข้อความทดสอบ โปรดตรวจว่าบอตอยู่ในกลุ่มและสิทธิ์ Channel ถูกต้อง");
   await addAudit("line_group", groupId, "connection_test_sent", input.actor, `ส่งข้อความทดสอบไปยัง ${String(group.group_name)} โดยไม่ส่งข้อมูลภายใน`);
+}
+
+export async function syncLineGroupsFromGateway(actor: string) {
+  await ensureDatabase();
+  const gatewayUrl = lineEnvironment().LINE_GATEWAY_URL?.trim();
+  const syncToken = lineEnvironment().LINE_GATEWAY_SYNC_TOKEN;
+  if (!gatewayUrl || !syncToken) throw new Error("ยังไม่ได้ตั้งค่าการเชื่อมต่อ LINE Gateway ที่ปลอดภัย");
+  let endpoint: string;
+  try {
+    const base = new URL(gatewayUrl);
+    if (base.protocol !== "https:") throw new Error();
+    endpoint = new URL("/api/groups", base).toString();
+  } catch {
+    throw new Error("ที่อยู่ LINE Gateway ต้องเป็น https:// ที่ถูกต้อง");
+  }
+  const response = await fetch(endpoint, { headers: { "x-alpha-gateway-token": syncToken } });
+  if (!response.ok) throw new Error("ไม่สามารถรับทะเบียนกลุ่มจาก LINE Gateway ได้");
+  const payload = await response.json() as { groups?: unknown };
+  if (!Array.isArray(payload.groups)) throw new Error("ข้อมูลทะเบียนกลุ่มจาก LINE Gateway ไม่ถูกต้อง");
+  const now = bangkokNow().iso;
+  const groups = payload.groups.flatMap((raw) => {
+    if (!raw || typeof raw !== "object") return [];
+    const group = raw as { id?: unknown; groupName?: unknown; pictureUrl?: unknown; lastSeenAt?: unknown };
+    const id = typeof group.id === "string" ? group.id.trim() : "";
+    const groupName = typeof group.groupName === "string" ? group.groupName.trim() : "";
+    if (!id || !groupName || id.length > 255 || groupName.length > 255) return [];
+    let avatar: string | null = null;
+    if (typeof group.pictureUrl === "string" && group.pictureUrl.trim()) {
+      try { avatar = pictureUrl(group.pictureUrl); } catch { avatar = null; }
+    }
+    const lastSeenAt = typeof group.lastSeenAt === "string" && group.lastSeenAt.length <= 64 ? group.lastSeenAt : now;
+    return [{ id, groupName, pictureUrl: avatar, lastSeenAt }];
+  });
+  const db = database();
+  for (let offset = 0; offset < groups.length; offset += 80) {
+    await db.batch(groups.slice(offset, offset + 80).map((group) =>
+      db.prepare("INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at) VALUES (?, ?, ?, ?, 'webhook', ?) ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), last_seen_at = excluded.last_seen_at, source = 'webhook', updated_at = excluded.updated_at")
+        .bind(group.id, group.groupName, group.pictureUrl, group.lastSeenAt, now),
+    ));
+  }
+  await addAudit("line_gateway", "registry", "synced", actor, `รับทะเบียนกลุ่ม LINE ${groups.length} กลุ่มจาก gateway ที่ยืนยันตัวตนแล้ว`);
+  return { imported: groups.length };
 }
 
 export async function importShiftTemplates(rows: TemplateImportRow[], actor: string) {
