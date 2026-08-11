@@ -1,10 +1,10 @@
 import { apiAuthRequiredResponse, getChatGPTUser } from "../../../chatgpt-auth";
-import { addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, generateTodayFromTemplates, importShiftTemplates, mapLineGroup, markLeave, removeDemoData, replaceSlot, sendLineConnectionTest, syncLineGroupsFromGateway, unmapLineGroup, type TemplateImportRow } from "../../../../db/command-center";
+import { addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, deleteLineGroup, deleteOperationalSite, generateTodayFromTemplates, importShiftTemplates, mapLineGroup, markLeave, removeDemoData, replaceSlot, sendLineConnectionTest, syncLineGroupsFromGateway, unmapLineGroup, updateOperationalSite, type TemplateImportRow } from "../../../../db/command-center";
 
 export const runtime = "edge";
 
 type ActionPayload = {
-  type?: "confirm" | "replace" | "leave" | "site" | "slot" | "billing" | "template_import" | "generate_today" | "remove_demo" | "line_group" | "line_unmap" | "line_connection_test" | "line_gateway_sync";
+  type?: "confirm" | "replace" | "leave" | "site" | "site_update" | "site_delete" | "slot" | "billing" | "template_import" | "generate_today" | "remove_demo" | "line_group" | "line_unmap" | "line_delete" | "line_connection_test" | "line_gateway_sync";
   slotId?: string;
   siteId?: string;
   source?: string;
@@ -59,6 +59,16 @@ export async function POST(request: Request) {
         return Response.json({ error: "กรอกชื่อจุดและลูกค้าให้ครบ" }, { status: 400 });
       }
       await addOperationalSite({ siteName, customerName, actor });
+    } else if (payload.type === "site_update") {
+      const siteId = payload.siteId?.trim() ?? "";
+      const siteName = payload.siteName?.trim() ?? "";
+      const customerName = payload.customerName?.trim() ?? "";
+      if (!siteId || !siteName || !customerName) {
+        return Response.json({ error: "กรอกชื่อจุดและลูกค้าให้ครบ" }, { status: 400 });
+      }
+      await updateOperationalSite({ siteId, siteName, customerName, actor });
+    } else if (payload.type === "site_delete") {
+      await deleteOperationalSite(payload.siteId ?? "", actor);
     } else if (payload.type === "template_import") {
       result = { ok: true, ...(await importShiftTemplates(payload.rows ?? [], actor)) };
     } else if (payload.type === "line_group") {
@@ -69,6 +79,8 @@ export async function POST(request: Request) {
       });
     } else if (payload.type === "line_unmap") {
       await unmapLineGroup(payload.groupId ?? "", actor);
+    } else if (payload.type === "line_delete") {
+      await deleteLineGroup(payload.groupId ?? "", actor);
     } else if (payload.type === "line_connection_test") {
       await sendLineConnectionTest({ groupId: payload.groupId ?? "", actor });
     } else if (payload.type === "line_gateway_sync") {

@@ -105,6 +105,8 @@ type SiteCard = {
   slots: CoverageSlot[];
   confirmed: number;
   lateCount: number;
+  nextDeadline: string | null;
+  checkedAt: string | null;
   lineGroup: LineGroup | null;
 };
 
@@ -146,6 +148,11 @@ function groupSites(slots: CoverageSlot[], registry: OperationalSite[], lineGrou
       const grouped = groups.get(id) ?? [];
       const registered = registryById.get(id);
       const status = deriveSiteStatus(grouped);
+      const orderedSlots = [...grouped].sort((left, right) => left.deadline.localeCompare(right.deadline));
+      const pendingSlot = orderedSlots.find((slot) => slot.state !== "confirmed") ?? orderedSlots[0];
+      const checkedAt = [...grouped]
+        .filter((slot) => slot.reportedAt)
+        .sort((left, right) => String(right.reportedAt).localeCompare(String(left.reportedAt)))[0]?.reportedAt ?? null;
       return {
         id,
         name: grouped[0]?.siteName ?? registered?.siteName ?? "ไม่ระบุจุด",
@@ -154,12 +161,16 @@ function groupSites(slots: CoverageSlot[], registry: OperationalSite[], lineGrou
         slots: grouped,
         confirmed: grouped.filter((slot) => slot.state === "confirmed").length,
         lateCount: grouped.filter((slot) => slot.lateMinutes > 0).length,
+        nextDeadline: pendingSlot?.deadline ?? null,
+        checkedAt,
         lineGroup: lineGroupBySite.get(id) ?? null,
       } satisfies SiteCard;
     })
     .sort((a, b) => {
       const priority: Record<SiteStatus, number> = { red: 0, yellow: 1, gray: 2, green: 3 };
-      return priority[a.status] - priority[b.status] || a.name.localeCompare(b.name, "th");
+      return priority[a.status] - priority[b.status]
+        || (a.nextDeadline ?? "99:99").localeCompare(b.nextDeadline ?? "99:99")
+        || a.name.localeCompare(b.name, "th");
     });
 }
 
@@ -283,6 +294,7 @@ export default function Home() {
   const [lineMapTarget, setLineMapTarget] = useState<SiteCard | null>(null);
   const [lineMapGroupId, setLineMapGroupId] = useState("");
   const [showSiteForm, setShowSiteForm] = useState(false);
+  const [siteEditTarget, setSiteEditTarget] = useState<SiteCard | null>(null);
 
   const loadDashboard = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     if (!silent) setLoading(true);
@@ -416,8 +428,34 @@ export default function Home() {
     void runAction({ type: "line_connection_test", groupId: group.id }, "line-test-" + group.id, "ส่งข้อความทดสอบ LINE OA แล้ว");
   };
 
+  const syncLineGroups = () => {
+    void runAction({ type: "line_gateway_sync" }, "line-gateway-sync", "ซิงค์ทะเบียนกลุ่มจาก LINE OA แล้ว");
+  };
+
+  const deleteLineRegistryGroup = (group: LineGroup) => {
+    if (group.siteId) {
+      setMessage("กลุ่มนี้ยังผูกกับจุดอยู่ กรุณายกเลิกการผูกก่อนลบ");
+      return;
+    }
+    if (!window.confirm(`ลบกลุ่ม “${lineGroupLabel(group)}” ออกจากทะเบียนที่ไม่ใช้งานใช่หรือไม่? ถ้ากลุ่มส่ง webhook อีกครั้งจะกลับมาอัตโนมัติ`)) return;
+    void runAction({ type: "line_delete", groupId: group.id }, "line-delete-" + group.id, "ลบกลุ่มที่ไม่ใช้งานแล้ว");
+  };
+
   const addSiteWithoutRoster = () => {
+    setSiteEditTarget(null);
     setShowSiteForm(true);
+  };
+
+  const editSite = (site: SiteCard) => {
+    setSiteEditTarget(site);
+    setShowSiteForm(true);
+  };
+
+  const deleteSite = (site: SiteCard) => {
+    if (!window.confirm(`ลบจุด “${site.name}” พร้อมอัตรากำลังและสถานะของจุดนี้ใช่หรือไม่? กลุ่ม LINE จะถูกยกเลิกการผูกแต่ยังอยู่ในทะเบียน LINE`)) return;
+    void runAction({ type: "site_delete", siteId: site.id }, "site-delete-" + site.id, "ลบจุดและอัตรากำลังแล้ว").then((result) => {
+      if (result) setSelectedSiteId(null);
+    });
   };
 
   const submitReplacement = (event: FormEvent<HTMLFormElement>) => {
@@ -460,12 +498,18 @@ export default function Home() {
     const siteName = String(form.get("siteName") ?? "").trim();
     const customerName = String(form.get("customerName") ?? "").trim();
     if (!siteName || !customerName) return;
+    const editing = Boolean(siteEditTarget);
     void runAction(
-      { type: "site", siteName, customerName },
-      "site-" + siteName,
-      "เพิ่มจุดสีเทาแล้ว — ตั้งอัตรากำลังได้เมื่อพร้อม",
+      editing
+        ? { type: "site_update", siteId: siteEditTarget?.id ?? "", siteName, customerName }
+        : { type: "site", siteName, customerName },
+      editing ? "site-edit-" + (siteEditTarget?.id ?? "") : "site-" + siteName,
+      editing ? "แก้ไขจุดแล้ว" : "เพิ่มจุดสีเทาแล้ว — ตั้งอัตรากำลังได้เมื่อพร้อม",
     ).then((result) => {
-      if (result) setShowSiteForm(false);
+      if (result) {
+        setShowSiteForm(false);
+        setSiteEditTarget(null);
+      }
     });
   };
 
@@ -607,10 +651,10 @@ export default function Home() {
       {tab === "ops" ? (
         <>
           <section className="metrics wall-metrics" aria-label="สรุปกำลัง">
-            <article className="metric green"><span>ครบยืนยันแล้ว</span><strong>{stats.green}</strong><small>จุด</small></article>
-            <article className="metric yellow"><span>รอตรวจ</span><strong>{stats.yellow}</strong><small>จุด</small></article>
+            <article className="metric neutral"><span>ทั้งหมด</span><strong>{sites.length}</strong><small>จุดในผลัดนี้</small></article>
             <article className="metric red"><span>ต้องจัดการ</span><strong>{stats.red}</strong><small>จุด</small></article>
-            <article className="metric neutral"><span>ยืนยันกำลังแล้ว</span><strong>{stats.confirmed}</strong><small>ช่องกำลัง</small></article>
+            <article className="metric yellow"><span>ต้องเช็ค</span><strong>{stats.yellow}</strong><small>จุด</small></article>
+            <article className="metric green"><span>ครบแล้ว</span><strong>{stats.green}</strong><small>จุด</small></article>
           </section>
 
           {!loading && visibleSlots.length === 0 && (data?.templates[wave] ?? 0) > 0 && (
@@ -686,6 +730,7 @@ export default function Home() {
                   <strong>{site.confirmed}/{site.slots.length}</strong>
                 </span>
                 <span className="tile-name">{site.name}</span>
+                <span className="tile-time"><b>{site.nextDeadline ? `เช็คก่อน ${site.nextDeadline}` : "ยังไม่ตั้งเวลา"}</b>{site.checkedAt && <small>เข้าแล้ว {displayTime(site.checkedAt)}</small>}</span>
                 <span className="tile-summary">{siteStatusSummary(site)}</span>
                 <span className={"tile-line " + (site.lineGroup ? "linked" : "unlinked")}>
                   {site.lineGroup?.pictureUrl ? <img src={site.lineGroup.pictureUrl} alt="" /> : <b>LINE</b>}
@@ -730,6 +775,7 @@ export default function Home() {
                       <div className="slot-meta">
                         <span>{slotText[slot.state]}</span>
                         <small>กำหนด {slot.deadline}</small>
+                        <small className={slot.reportedAt ? "reported-time" : "pending-time"}>{slot.reportedAt ? `เช็คเข้า ${displayTime(slot.reportedAt)}` : `เช็คก่อน ${slot.deadline}`}</small>
                         {slot.lateMinutes > 0 && <small className="late-text">สาย {slot.lateMinutes} นาที</small>}
                       </div>
                       <div className="slot-actions">
@@ -758,7 +804,11 @@ export default function Home() {
                   <h3>{selectedSite.name}</h3>
                   <p>{selectedSite.customerName} · ยืนยัน {selectedSite.confirmed}/{selectedSite.slots.length}</p>
                 </div>
-                <button type="button" className="drawer-close" onClick={() => setSelectedSiteId(null)} aria-label="ปิดรายละเอียด">×</button>
+                <div className="drawer-header-actions">
+                  <button type="button" className="action-text" onClick={() => editSite(selectedSite)}>แก้ไขจุด</button>
+                  <button type="button" className="action-text danger" onClick={() => deleteSite(selectedSite)}>ลบจุด</button>
+                  <button type="button" className="drawer-close" onClick={() => setSelectedSiteId(null)} aria-label="ปิดรายละเอียด">×</button>
+                </div>
               </div>
               <div className={"drawer-line-group " + (selectedSite.lineGroup ? "linked" : "unlinked")}>
                 {selectedSite.lineGroup?.pictureUrl ? <img src={selectedSite.lineGroup.pictureUrl} alt="" /> : <span className="line-avatar">LINE</span>}
@@ -776,6 +826,7 @@ export default function Home() {
                       <strong>{slot.postName} · {slot.slotLabel}</strong>
                       <p>{slot.assignedGuard ?? "ยังไม่มีผู้รับผิดชอบ"}{slot.assignmentType === "spare" ? " · สแปร์" : ""}</p>
                       <small className={slot.lateMinutes > 0 ? "late-text" : ""}>{slotText[slot.state]} · กำหนด {slot.deadline}{slot.lateMinutes > 0 ? ` · สาย ${slot.lateMinutes} นาที` : ""}</small>
+                      {slot.reportedAt && <small className="reported-time">เช็คเข้า {displayTime(slot.reportedAt)}</small>}
                     </div>
                     <div className="drawer-actions">
                       {slot.state !== "confirmed" && (
@@ -852,6 +903,7 @@ export default function Home() {
             <div className={data?.lineIntegration.webhookStatus === "healthy" ? "line-ready" : data?.lineIntegration.webhookStatus === "stale" ? "line-stale" : "line-not-ready"}>
               <strong>{data?.lineIntegration.webhookStatus === "healthy" ? "รับ LINE webhook แล้ว" : data?.lineIntegration.webhookStatus === "stale" ? "Webhook เงียบเกิน 24 ชั่วโมง" : data?.lineIntegration.configured ? "รอ webhook จากกลุ่ม" : "กำลังเชื่อมต่อ LINE OA"}</strong>
               <span>Webhook: {data?.lineIntegration.webhookPath ?? "/api/line/webhook"}{data?.lineIntegration.webhookAgeMinutes !== null && data?.lineIntegration.webhookAgeMinutes !== undefined ? ` · ล่าสุด ${data.lineIntegration.webhookAgeMinutes} นาทีที่แล้ว` : ""}</span>
+              <button className="small-secondary line-sync-button" disabled={!data?.lineIntegration.gatewayConfigured || busyId === "line-gateway-sync"} onClick={syncLineGroups}>{busyId === "line-gateway-sync" ? "กำลังซิงค์…" : "ซิงค์ทะเบียน LINE"}</button>
             </div>
           </div>
 
@@ -887,7 +939,7 @@ export default function Home() {
                   {group.siteId && <button className="action-text danger" disabled={busyId === "line-unmap-" + group.id} onClick={() => unmapRegistryGroup(group)}>ยกเลิก</button>}
                 </div>
                 <div className="line-last-seen">{displayTime(group.lastSeenAt)}<small>{group.lastSeenAt ? "เวลาไทย" : "ยังไม่ได้รับ webhook"}</small></div>
-                <div className="line-row-actions"><button className="action-confirm" disabled={!data?.lineIntegration.configured || busyId === "line-test-" + group.id} onClick={() => testLineGroup(group)}>ทดสอบ</button></div>
+                <div className="line-row-actions"><button className="action-confirm" disabled={!data?.lineIntegration.configured || busyId === "line-test-" + group.id} onClick={() => testLineGroup(group)}>ทดสอบ</button>{!group.siteId && <button className="action-text danger" disabled={busyId === "line-delete-" + group.id} onClick={() => deleteLineRegistryGroup(group)}>{busyId === "line-delete-" + group.id ? "กำลังลบ…" : "ลบกลุ่ม"}</button>}</div>
               </article>
             ))}
             {!loading && !(data?.lineGroups ?? []).length && <p className="line-empty">ยังไม่มีกลุ่มในทะเบียน เมื่อ OA รับ webhook จากกลุ่ม กลุ่มจะปรากฏที่นี่เพื่อให้เลือกผูกกับจุด</p>}
@@ -983,11 +1035,11 @@ export default function Home() {
 
       {showSiteForm && (
         <div className="modal-backdrop" role="presentation">
-          <form className="modal-card" onSubmit={submitSite} role="dialog" aria-modal="true" aria-labelledby="site-dialog-title">
-            <div className="modal-head"><div><p className="eyebrow">ทะเบียนจุด</p><h3 id="site-dialog-title">เพิ่มจุดสีเทา</h3><p>เพิ่มจุดไว้ก่อน แล้วค่อยตั้งอัตรากำลังภายหลัง</p></div><button type="button" className="drawer-close" onClick={() => setShowSiteForm(false)} aria-label="ปิด">×</button></div>
-            <label>ชื่อจุด<input name="siteName" required placeholder="เช่น จุดตรวจหน้าโรงงาน" /></label>
-            <label>ลูกค้าหรือหน่วยงาน<input name="customerName" required placeholder="ชื่อบริษัท/หน่วยงาน" /></label>
-            <div className="modal-actions"><button type="button" className="small-secondary" onClick={() => setShowSiteForm(false)}>ยกเลิก</button><button className="small-primary" disabled={busyId?.startsWith("site-") === true}>{busyId?.startsWith("site-") ? "กำลังบันทึก…" : "เพิ่มจุด"}</button></div>
+          <form className="modal-card" key={siteEditTarget?.id ?? "new-site"} onSubmit={submitSite} role="dialog" aria-modal="true" aria-labelledby="site-dialog-title">
+            <div className="modal-head"><div><p className="eyebrow">ทะเบียนจุด</p><h3 id="site-dialog-title">{siteEditTarget ? "แก้ไขจุดปฏิบัติงาน" : "เพิ่มจุดสีเทา"}</h3><p>{siteEditTarget ? "แก้ชื่อจุดหรือลูกค้าได้ โดยไม่ลบผลเช็คเดิม" : "เพิ่มจุดไว้ก่อน แล้วค่อยตั้งอัตรากำลังภายหลัง"}</p></div><button type="button" className="drawer-close" onClick={() => { setShowSiteForm(false); setSiteEditTarget(null); }} aria-label="ปิด">×</button></div>
+            <label>ชื่อจุด<input name="siteName" required defaultValue={siteEditTarget?.name ?? ""} placeholder="เช่น จุดตรวจหน้าโรงงาน" /></label>
+            <label>ลูกค้าหรือหน่วยงาน<input name="customerName" required defaultValue={siteEditTarget?.customerName ?? ""} placeholder="ชื่อบริษัท/หน่วยงาน" /></label>
+            <div className="modal-actions"><button type="button" className="small-secondary" onClick={() => { setShowSiteForm(false); setSiteEditTarget(null); }}>ยกเลิก</button><button className="small-primary" disabled={busyId?.startsWith("site-") === true}>{busyId?.startsWith("site-") ? "กำลังบันทึก…" : siteEditTarget ? "บันทึกการแก้ไข" : "เพิ่มจุด"}</button></div>
           </form>
         </div>
       )}

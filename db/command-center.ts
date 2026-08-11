@@ -489,6 +489,42 @@ export async function addOperationalSite(input: { siteName: string; customerName
   await addAudit("operational_site", id, "created", input.actor, "เพิ่มจุดสำหรับตั้งอัตรา " + siteName);
 }
 
+export async function updateOperationalSite(input: { siteId: string; siteName: string; customerName: string; actor: string }) {
+  await ensureDatabase();
+  const siteId = input.siteId.trim();
+  const siteName = input.siteName.trim();
+  const customerName = input.customerName.trim();
+  if (!siteId || !siteName || !customerName) throw new Error("กรุณาระบุชื่อจุดและลูกค้า");
+  const db = database();
+  const existing = await db.prepare("SELECT site_name FROM operational_sites WHERE id = ? AND active = 1").bind(siteId).first<D1Row>();
+  if (!existing) throw new Error("ไม่พบจุดที่ต้องการแก้ไข");
+  const now = bangkokNow().iso;
+  await db.batch([
+    db.prepare("UPDATE operational_sites SET site_name = ?, customer_name = ?, updated_at = ? WHERE id = ?")
+      .bind(siteName, customerName, now, siteId),
+    db.prepare("UPDATE coverage_slots SET site_name = ?, customer_name = ?, updated_at = ? WHERE site_id = ?")
+      .bind(siteName, customerName, now, siteId),
+  ]);
+  await addAudit("operational_site", siteId, "updated", input.actor, `แก้ไขจุด ${String(existing.site_name)} เป็น ${siteName}`);
+}
+
+export async function deleteOperationalSite(siteIdInput: string, actor: string) {
+  await ensureDatabase();
+  const siteId = siteIdInput.trim();
+  if (!siteId) throw new Error("ไม่พบจุดที่ต้องการลบ");
+  const db = database();
+  const existing = await db.prepare("SELECT site_name FROM operational_sites WHERE id = ?").bind(siteId).first<D1Row>();
+  if (!existing) throw new Error("ไม่พบจุดที่ต้องการลบ");
+  const siteName = String(existing.site_name);
+  await db.batch([
+    db.prepare("DELETE FROM line_groups WHERE site_id = ?").bind(siteId),
+    db.prepare("DELETE FROM coverage_slots WHERE site_id = ?").bind(siteId),
+    db.prepare("DELETE FROM shift_templates WHERE site_id = ?").bind(siteId),
+    db.prepare("DELETE FROM operational_sites WHERE id = ?").bind(siteId),
+  ]);
+  await addAudit("operational_site", siteId, "deleted", actor, "ลบจุดและอัตรากำลังของ " + siteName);
+}
+
 export async function mapLineGroup(input: { siteId: string; groupId: string; actor: string }) {
   await ensureDatabase();
   const siteId = input.siteId.trim();
@@ -527,6 +563,20 @@ export async function unmapLineGroup(groupId: string, actor: string) {
   if (!mapping) return;
   await db.prepare("DELETE FROM line_groups WHERE id = ?").bind(id).run();
   await addAudit("line_group", id, "unmapped", actor, `ยกเลิกการผูกกลุ่ม LINE ${String(mapping.group_name)} จากจุด ${String(mapping.site_id)}`);
+}
+
+export async function deleteLineGroup(groupIdInput: string, actor: string) {
+  await ensureDatabase();
+  const groupId = groupIdInput.trim();
+  if (!groupId) throw new Error("ไม่พบกลุ่ม LINE ที่ต้องการลบ");
+  const db = database();
+  const group = await db.prepare("SELECT r.group_name, m.site_id FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id WHERE r.id = ?")
+    .bind(groupId).first<D1Row>();
+  if (!group) return;
+  if (value(group, "site_id")) throw new Error("กลุ่มนี้ยังผูกกับจุดอยู่ กรุณายกเลิกการผูกก่อนลบ");
+  const groupName = String(group.group_name ?? groupId);
+  await db.prepare("DELETE FROM line_group_registry WHERE id = ?").bind(groupId).run();
+  await addAudit("line_group", groupId, "deleted", actor, "ลบกลุ่ม LINE ที่ไม่ใช้งาน " + groupName);
 }
 
 export async function saveLineWebhookEvent(input: {
