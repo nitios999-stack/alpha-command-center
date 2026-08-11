@@ -352,7 +352,7 @@ export async function getDashboard() {
     lineIntegration: {
       configured: Boolean(lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN && lineEnvironment().LINE_CHANNEL_SECRET),
       gatewayConfigured: Boolean(lineEnvironment().LINE_GATEWAY_URL && lineEnvironment().LINE_GATEWAY_SYNC_TOKEN),
-      webhookPath: lineEnvironment().LINE_GATEWAY_URL ? `${lineEnvironment().LINE_GATEWAY_URL.replace(/\/$/, "")}/api/line/webhook` : "/api/line/webhook",
+      webhookPath: "/api/line/webhook",
       lastWebhookAt: lineCounts?.last_webhook_at ?? null,
       receivedGroups: Number(lineCounts?.received_groups ?? 0),
       mappedGroups: Number(lineCounts?.mapped_groups ?? 0),
@@ -505,6 +505,18 @@ export async function saveLineWebhookEvent(input: {
       .bind(groupId, groupName, safePictureUrl, now, now),
   ]);
   return { saved: true, duplicate: false };
+}
+
+export async function updateLineGroupProfile(input: { groupId: string; groupName?: string; pictureUrl?: string }) {
+  await ensureDatabase();
+  const groupId = input.groupId.trim();
+  if (!groupId) return;
+  const groupName = input.groupName?.trim();
+  const avatar = pictureUrl(input.pictureUrl);
+  if (!groupName && !avatar) return;
+  const now = bangkokNow().iso;
+  await database().prepare("UPDATE line_group_registry SET group_name = COALESCE(?, group_name), picture_url = COALESCE(?, picture_url), updated_at = ? WHERE id = ?")
+    .bind(groupName || null, avatar, now, groupId).run();
 }
 
 export async function sendLineConnectionTest(input: { groupId: string; actor: string }) {

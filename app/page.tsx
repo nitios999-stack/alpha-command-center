@@ -753,7 +753,7 @@ export default function Home() {
               <p>กลุ่มที่ส่ง webhook ที่ตรวจสอบลายเซ็นแล้วจะเข้าทะเบียนอัตโนมัติ จากนั้นผู้จัดการเลือกผูกกลุ่มกับจุดได้เอง ระบบไม่เก็บข้อความในกลุ่ม และไม่ส่งสถานะกำลังภายในออกไป</p>
             </div>
             <div className={data?.lineIntegration.lastWebhookAt ? "line-ready" : "line-not-ready"}>
-              <strong>{data?.lineIntegration.lastWebhookAt ? "รับ LINE webhook แล้ว" : data?.lineIntegration.gatewayConfigured ? "รอ webhook จากกลุ่ม" : "กำลังเชื่อมต่อ Gateway"}</strong>
+              <strong>{data?.lineIntegration.lastWebhookAt ? "รับ LINE webhook แล้ว" : data?.lineIntegration.configured ? "รอ webhook จากกลุ่ม" : "กำลังเชื่อมต่อ LINE OA"}</strong>
               <span>Webhook: {data?.lineIntegration.webhookPath ?? "/api/line/webhook"}</span>
             </div>
           </div>
@@ -770,9 +770,8 @@ export default function Home() {
           </section>
 
           <section className="line-callback-gate">
-            <strong>Webhook Gateway แยกต่างหาก</strong>
-            <p>LINE จะส่ง webhook เข้า Gateway ที่ตรวจลายเซ็นและบันทึกกลุ่มก่อนตอบกลับ LINE ทันที จากนั้นจึงส่งเฉพาะทะเบียนกลุ่มที่ยืนยันแล้วเข้า Dashboard โดยไม่เก็บข้อความในกลุ่ม</p>
-            <button className="small-secondary" disabled={!data?.lineIntegration.gatewayConfigured || busyId === "line-gateway-sync"} onClick={() => void runAction({ type: "line_gateway_sync" }, "line-gateway-sync", "รับทะเบียนกลุ่มล่าสุดจาก LINE Gateway แล้ว")}>{busyId === "line-gateway-sync" ? "กำลังรับข้อมูล…" : "รับกลุ่มล่าสุด"}</button>
+            <strong>LINE Callback เชื่อมเข้าระบบโดยตรง</strong>
+            <p>LINE OA ส่ง webhook ที่ตรวจลายเซ็นแล้วเข้าฐานข้อมูล Dashboard โดยตรง ระบบจะบันทึกทะเบียนกลุ่มก่อนตอบกลับ LINE และไม่เก็บข้อความในกลุ่ม</p>
           </section>
 
           <section className="line-groups-table">

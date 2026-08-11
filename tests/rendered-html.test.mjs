@@ -44,7 +44,7 @@ test("server-renders the ALPHA Command Center shell", async () => {
 });
 
 test("keeps the command center database and product surface in source", async () => {
-  const [schema, commands, page, styles, layout, packageJson, webhook, migrations] = await Promise.all([
+  const [schema, commands, page, styles, layout, packageJson, webhook, lineIntake, worker, migrations] = await Promise.all([
     readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
     readFile(new URL("../db/command-center.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
@@ -52,6 +52,8 @@ test("keeps the command center database and product surface in source", async ()
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../app/api/line/webhook/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/line-webhook.ts", import.meta.url), "utf8"),
+    readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
     readdir(new URL("../drizzle/", import.meta.url)),
   ]);
 
@@ -79,13 +81,15 @@ test("keeps the command center database and product surface in source", async ()
   assert.match(page, /csvToTemplates/);
   assert.match(page, /lineGroupId/);
   assert.match(page, /LINE OA/);
-  assert.match(page, /line_gateway_sync/);
+  assert.match(page, /LINE Callback เชื่อมเข้าระบบโดยตรง/);
   assert.match(styles, /tile-line/);
   assert.match(styles, /line-control/);
   assert.match(styles, /--wall-columns/);
-  assert.match(webhook, /x-line-signature/);
-  assert.match(webhook, /crypto\.subtle/);
-  assert.doesNotMatch(webhook, /message\.text|event\.message/);
+  assert.match(webhook, /receiveLineWebhook/);
+  assert.match(lineIntake, /x-line-signature/);
+  assert.match(lineIntake, /crypto\.subtle/);
+  assert.match(worker, /ctx\.waitUntil/);
+  assert.doesNotMatch(lineIntake, /message\.text|event\.message/);
   assert.match(page, /สีเขียว = ครบทุกช่องกำลัง/);
   assert.match(layout, /ALPHA Command Center/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
