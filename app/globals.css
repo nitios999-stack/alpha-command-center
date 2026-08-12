@@ -2460,6 +2460,42 @@ select:focus-visible {
 .report-quick-stats button.gray strong { color: #687672; }
 .report-quick-stats button.unmapped strong { color: #6751a4; }
 
+.report-quick-stat-muted {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding: 11px 12px;
+  color: #687672;
+  text-align: left;
+  background: #f1f5f3;
+  border: 1px dashed #cddbd3;
+  border-radius: 14px;
+}
+.report-quick-stat-muted span { overflow: hidden; font-size: 0.7rem; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+.report-quick-stat-muted strong { color: #687672; font-size: 1.45rem; line-height: 1; }
+.report-quick-stat-muted small { color: #7a8982; font-size: 0.61rem; }
+
+.report-shift-config {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  background: #f8fcfa;
+  border: 1px solid #d9e8df;
+  border-radius: 18px;
+}
+.report-shift-config-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.report-shift-config-head h3 { margin: 2px 0 4px; color: var(--forest-dark); font-size: 1.05rem; }
+.report-shift-config-head p:not(.eyebrow) { max-width: 680px; margin: 0; color: #61726a; font-size: 0.75rem; line-height: 1.5; }
+.shift-config-select { display: grid; min-width: min(100%, 280px); gap: 4px; color: #65766e; font-size: 0.68rem; font-weight: 800; }
+.shift-config-select select { min-height: 39px; padding: 7px 10px; color: var(--ink); background: white; border: 1px solid #d3e2d9; border-radius: 10px; }
+.shift-config-editor { display: grid; grid-template-columns: minmax(210px, 0.8fr) minmax(0, 1.45fr) auto; align-items: center; gap: 9px; padding: 11px 12px; background: white; border: 1px solid #e1ebe5; border-radius: 13px; }
+.shift-config-toggle { display: inline-flex; align-items: center; gap: 6px; color: #345c4b; font-size: 0.72rem; font-weight: 800; }
+.shift-config-toggle input { width: 16px; height: 16px; accent-color: #087457; }
+.shift-config-row { display: grid; grid-template-columns: 45px minmax(0, 1fr); align-items: center; gap: 6px; color: #52635c; font-size: 0.7rem; font-weight: 800; }
+.shift-config-row input { width: 100%; min-height: 37px; padding: 7px 9px; color: var(--ink); background: #f8fcfa; border: 1px solid #d5e4db; border-radius: 9px; outline: 0; }
+.shift-config-row small { grid-column: 2; margin-top: -3px; color: #84918c; font-size: 0.58rem; font-weight: 500; }
+.shift-config-empty { margin: 0; padding: 11px 12px; color: #718078; font-size: 0.72rem; background: white; border: 1px dashed #cddbd3; border-radius: 12px; }
+
 .report-toolbar {
   display: flex;
   align-items: center;
@@ -2648,4 +2684,18 @@ select:focus-visible {
   .reminder-toggle { white-space: normal; }
   .reminder-plan > .small-primary { width: 100%; margin-left: 0; }
   .reminder-foot { display: grid; gap: 4px; }
+}
+
+@media (max-width: 760px) {
+  .report-shift-config { padding: 13px; border-radius: 16px; }
+  .report-shift-config-head { display: grid; gap: 10px; }
+  .shift-config-select { min-width: 0; }
+  .shift-config-select select { width: 100%; }
+  .shift-config-editor { grid-template-columns: 1fr; align-items: stretch; gap: 10px; padding: 10px; }
+  .shift-config-row { grid-template-columns: 42px minmax(0, 1fr); }
+  .shift-config-editor .small-secondary { width: 100%; min-height: 40px; }
+  .report-quick-stat-muted { min-height: 74px; padding: 9px; border-radius: 12px; }
+  .report-quick-stat-muted strong { font-size: 1.2rem; }
+  .report-quick-stat-muted span { font-size: 0.63rem; }
+  .report-quick-stat-muted small { font-size: 0.56rem; }
 }

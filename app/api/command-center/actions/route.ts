@@ -1,10 +1,10 @@
 import { apiAuthRequiredResponse, getChatGPTUser } from "../../../chatgpt-auth";
-import { addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, deleteLineGroup, deleteOperationalSite, generateTodayFromTemplates, importShiftTemplates, mapLineGroup, markLeave, removeDemoData, replaceSlot, saveLineReminderSettings, sendLineConnectionTest, sendLineReportReminder, syncLineGroupsFromGateway, unmapLineGroup, updateOperationalSite, type TemplateImportRow } from "../../../../db/command-center";
+import { addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, deleteLineGroup, deleteOperationalSite, generateTodayFromTemplates, importShiftTemplates, mapLineGroup, markLeave, removeDemoData, replaceSlot, saveLineReminderSettings, saveLineReportConfig, sendLineConnectionTest, sendLineReportReminder, syncLineGroupsFromGateway, unmapLineGroup, updateOperationalSite, type LineReportConfig, type TemplateImportRow } from "../../../../db/command-center";
 
 export const runtime = "edge";
 
 type ActionPayload = {
-  type?: "confirm" | "replace" | "leave" | "site" | "site_update" | "site_delete" | "slot" | "billing" | "template_import" | "generate_today" | "remove_demo" | "line_group" | "line_unmap" | "line_delete" | "line_connection_test" | "line_gateway_sync" | "line_reminder_settings" | "line_reminder_send";
+  type?: "confirm" | "replace" | "leave" | "site" | "site_update" | "site_delete" | "slot" | "billing" | "template_import" | "generate_today" | "remove_demo" | "line_group" | "line_unmap" | "line_delete" | "line_connection_test" | "line_gateway_sync" | "line_reminder_settings" | "line_reminder_send" | "line_report_config";
   slotId?: string;
   siteId?: string;
   source?: string;
@@ -26,6 +26,8 @@ type ActionPayload = {
   targetGroupId?: string;
   autoEnabled?: boolean;
   force?: boolean;
+  includeClear?: boolean;
+  reportConfig?: LineReportConfig;
 };
 
 export async function POST(request: Request) {
@@ -89,7 +91,9 @@ export async function POST(request: Request) {
     } else if (payload.type === "line_reminder_settings") {
       await saveLineReminderSettings({ targetGroupId: payload.targetGroupId ?? "", autoEnabled: payload.autoEnabled === true, actor });
     } else if (payload.type === "line_reminder_send") {
-      result = { ok: true, ...(await sendLineReportReminder({ targetGroupId: payload.targetGroupId ?? "", wave: payload.wave === "evening" ? "evening" : "morning", force: payload.force === true, actor })) };
+      result = { ok: true, ...(await sendLineReportReminder({ targetGroupId: payload.targetGroupId ?? "", wave: payload.wave === "evening" ? "evening" : "morning", force: payload.force === true, includeClear: payload.includeClear === true, actor })) };
+    } else if (payload.type === "line_report_config") {
+      await saveLineReportConfig({ groupId: payload.groupId ?? "", config: payload.reportConfig ?? { enabled: true, morningTimes: [], eveningTimes: [] }, actor });
     } else if (payload.type === "line_gateway_sync") {
       result = { ok: true, ...(await syncLineGroupsFromGateway(actor)) };
     } else if (payload.type === "generate_today") {

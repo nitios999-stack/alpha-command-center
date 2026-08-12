@@ -75,6 +75,12 @@ type LineReminderSettings = {
   lastTargetName: string | null;
 };
 
+type LineReportConfig = {
+  enabled: boolean;
+  morningTimes: string[];
+  eveningTimes: string[];
+};
+
 type TemplateSummary = {
   total: number;
   morning: number;
@@ -101,6 +107,7 @@ type DashboardData = {
   lineGroups: LineGroup[];
   lineIntegration: LineIntegrationStatus;
   lineReminder: LineReminderSettings;
+  lineReportConfigs: Record<string, LineReportConfig>;
   templates: TemplateSummary;
   demoDataPresent: boolean;
   billingCases: BillingCase[];
@@ -334,7 +341,8 @@ function lineAgeLabel(value: string | null, nowMs: number) {
   const ageMinutes = Math.floor(ageSeconds / 60);
   if (ageMinutes < 60) return `${ageMinutes} นาทีที่แล้ว`;
   const ageHours = Math.floor(ageMinutes / 60);
-  return `${ageHours} ชม.ที่แล้ว`;
+  const remainder = ageMinutes % 60;
+  return remainder ? `${ageHours} ชม. ${remainder} นาทีที่แล้ว` : `${ageHours} ชม.ที่แล้ว`;
 }
 
 function clientTime(value: number | null) {
@@ -342,13 +350,28 @@ function clientTime(value: number | null) {
   return new Intl.DateTimeFormat("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(value);
 }
 
-function reminderTimes(wave: "morning" | "evening") {
-  return wave === "morning" ? ["06:00", "06:30", "07:15"] : ["17:30", "18:00", "19:00"];
+const DEFAULT_LINE_REPORT_CONFIG: LineReportConfig = {
+  enabled: true,
+  morningTimes: ["06:00", "06:30", "07:15"],
+  eveningTimes: ["17:30", "18:00", "19:00"],
+};
+
+function lineReportConfigFor(groupId: string, configs: Record<string, LineReportConfig> | undefined) {
+  return configs?.[groupId] ?? DEFAULT_LINE_REPORT_CONFIG;
 }
 
-function nextReminderTime(wave: "morning" | "evening", nowTime: string) {
-  const times = reminderTimes(wave);
-  return times.find((time) => time >= nowTime) ?? times[0];
+function parseTimeList(value: string) {
+  return [...new Set(value.split(/[\s,]+/).map((time) => time.trim()).filter((time) => /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)))].sort().slice(0, 8);
+}
+
+function reminderTimes(wave: "morning" | "evening", config: LineReportConfig = DEFAULT_LINE_REPORT_CONFIG) {
+  return wave === "morning" ? config.morningTimes : config.eveningTimes;
+}
+
+function nextReminderTime(wave: "morning" | "evening", nowTime: string, groups: LineGroup[] = [], configs?: Record<string, LineReportConfig>) {
+  const times = [...new Set(groups.flatMap((group) => reminderTimes(wave, lineReportConfigFor(group.id, configs))))].sort();
+  const schedule = times.length ? times : reminderTimes(wave);
+  return schedule.find((time) => time >= nowTime) ?? schedule[0];
 }
 
 export default function Home() {
@@ -371,6 +394,7 @@ export default function Home() {
   const [reminderTargetDraft, setReminderTargetDraft] = useState<string | null>(null);
   const [reminderAutoDraft, setReminderAutoDraft] = useState<boolean | null>(null);
   const [reminderWave, setReminderWave] = useState<"morning" | "evening">("morning");
+  const [scheduleDraft, setScheduleDraft] = useState<{ groupId: string; config: LineReportConfig } | null>(null);
   const autoReminderKeyRef = useRef<string | null>(null);
   const [networkState, setNetworkState] = useState<"online" | "offline" | "error" | "auth">("online");
   const [replaceTarget, setReplaceTarget] = useState<CoverageSlot | null>(null);
@@ -467,19 +491,27 @@ export default function Home() {
     }),
     [data?.lineGroups],
   );
-  const lineOverviewStats = lineOverviewGroups.reduce(
+  const reportNowMs = reportClockMs || lastLoadedAt || 0;
+  const lineNowTime = data?.now.time ?? "00:00";
+  const lineConfigurableGroups = useMemo(
+    () => lineOverviewGroups.filter((group) => Boolean(group.siteId && operationalSiteById.get(group.siteId)?.active === 1)),
+    [lineOverviewGroups, operationalSiteById],
+  );
+  const trackedLineGroups = useMemo(
+    () => lineConfigurableGroups.filter((group) => lineReportConfigFor(group.id, data?.lineReportConfigs).enabled),
+    [data?.lineReportConfigs, lineConfigurableGroups],
+  );
+  const ignoredLineGroupCount = Math.max(0, lineOverviewGroups.length - trackedLineGroups.length);
+  const trackedLineOverviewStats = trackedLineGroups.reduce(
     (all, group) => {
-      all[lineSignalStatus(group, data?.now.time ?? "00:00")] += 1;
+      all[lineSignalStatus(group, lineNowTime)] += 1;
       return all;
     },
     { green: 0, yellow: 0, red: 0, gray: 0 } as Record<LineSignalStatus, number>,
   );
-  const reportNowMs = reportClockMs || lastLoadedAt || 0;
-  const lineUnmappedCount = lineOverviewGroups.filter((group) => !group.siteId).length;
-  const lineNowTime = data?.now.time ?? "00:00";
   const reportVisibleGroups = useMemo(() => {
     const search = reportSearch.trim().toLocaleLowerCase("th");
-    return lineOverviewGroups.filter((group) => {
+    return trackedLineGroups.filter((group) => {
       const signal = lineSignalStatus(group, lineNowTime);
       const site = group.siteId ? operationalSiteById.get(group.siteId) : null;
       const matchesFilter = reportFilter === "all"
@@ -489,7 +521,7 @@ export default function Home() {
         .some((value) => String(value).toLocaleLowerCase("th").includes(search));
       return matchesFilter && matchesSearch;
     });
-  }, [lineNowTime, lineOverviewGroups, operationalSiteById, reportFilter, reportSearch]);
+  }, [lineNowTime, operationalSiteById, reportFilter, reportSearch, trackedLineGroups]);
   const reportRefreshIn = lastLoadedAt && reportClockMs
     ? Math.max(0, 5 - Math.floor((reportClockMs - lastLoadedAt) / 1_000))
     : 5;
@@ -500,7 +532,11 @@ export default function Home() {
   const reminderTargetId = reminderTargetDraft ?? data?.lineReminder.targetGroupId ?? suggestedReminderTarget?.id ?? "";
   const reminderAutoEnabled = reminderAutoDraft ?? data?.lineReminder.autoEnabled ?? false;
   const reminderTargetGroup = (data?.lineGroups ?? []).find((group) => group.id === reminderTargetId) ?? null;
-  const reminderNextTime = nextReminderTime(reminderWave, lineNowTime);
+  const reminderNextTime = nextReminderTime(reminderWave, trackedLineGroups, data?.lineReportConfigs);
+  const scheduleGroupId = scheduleDraft?.groupId ?? lineConfigurableGroups[0]?.id ?? "";
+  const scheduleConfig = scheduleDraft?.groupId === scheduleGroupId
+    ? scheduleDraft.config
+    : lineReportConfigFor(scheduleGroupId, data?.lineReportConfigs);
   const visibleSites = useMemo(
     () => statusFilter === "all" ? sites : sites.filter((site) => site.status === statusFilter),
     [sites, statusFilter],
@@ -533,7 +569,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const result = (await response.json()) as { error?: string; message?: string; skipped?: boolean; silentCount?: number; imported?: number; created?: number; existing?: number; total?: number };
+      const result = (await response.json()) as { error?: string; message?: string; skipped?: boolean; silentCount?: number; trackedCount?: number; imported?: number; created?: number; existing?: number; total?: number };
       if (!response.ok) throw new Error(result.error ?? "ทำรายการไม่สำเร็จ");
       setMessage(success);
       await loadDashboard();
@@ -558,14 +594,14 @@ export default function Home() {
     );
   }, [reminderAutoEnabled, reminderTargetId, runAction]);
 
-  const sendReminder = useCallback(async (force = true, automatic = false) => {
+  const sendReminder = useCallback(async (force = true, automatic = false, waveOverride: "morning" | "evening" = reminderWave, includeClear = false) => {
     if (!reminderTargetId) {
       setMessage("กรุณาเลือกกลุ่ม LINE หลักก่อนส่งเตือน");
       return undefined;
     }
     if (force && !automatic && !window.confirm(`ส่งรายการกลุ่มเงียบไปที่ “${lineGroupLabel(reminderTargetGroup)}” ใช่หรือไม่?`)) return undefined;
     const result = await runAction(
-      { type: "line_reminder_send", targetGroupId: reminderTargetId, wave: reminderWave, force },
+      { type: "line_reminder_send", targetGroupId: reminderTargetId, wave: waveOverride, force, includeClear },
       automatic ? "line-reminder-auto" : "line-reminder-send",
       automatic ? "ระบบส่งเตือนตามแผนแล้ว" : "ส่งเตือนกลุ่มเงียบไปยังกลุ่มหลักแล้ว",
     );
@@ -573,20 +609,37 @@ export default function Home() {
     return result;
   }, [reminderTargetGroup, reminderTargetId, reminderWave, runAction]);
 
+  const saveReportSchedule = useCallback(() => {
+    if (!scheduleGroupId) {
+      setMessage("ยังไม่มีจุดที่ผูกกลุ่ม LINE และเปิดใช้งานให้ตั้งกะ");
+      return;
+    }
+    void runAction(
+      { type: "line_report_config", groupId: scheduleGroupId, reportConfig: scheduleConfig },
+      "line-report-config",
+      "บันทึกกะและเวลาส่งเตือนของจุดนี้แล้ว",
+    );
+  }, [runAction, scheduleConfig, scheduleGroupId]);
+
   useEffect(() => {
     if (tab !== "reports" || !reminderAutoEnabled || !reminderTargetId || !data?.today) return;
     const checkSchedule = () => {
-      const scheduledTime = reminderTimes(reminderWave).find((time) => time === lineNowTime);
-      if (!scheduledTime) return;
-      const key = `${data.today}-${reminderWave}-${scheduledTime}`;
+      const scheduled = (["morning", "evening"] as const)
+        .map((scheduledWave) => ({
+          wave: scheduledWave,
+          time: [...new Set(trackedLineGroups.flatMap((group) => reminderTimes(scheduledWave, lineReportConfigFor(group.id, data.lineReportConfigs))))].find((time) => time === lineNowTime),
+        }))
+        .find((item) => item.time);
+      if (!scheduled?.time) return;
+      const key = `${data.today}-${scheduled.wave}-${scheduled.time}`;
       if (autoReminderKeyRef.current === key) return;
       autoReminderKeyRef.current = key;
-      void sendReminder(false, true);
+      void sendReminder(false, true, scheduled.wave, true);
     };
     checkSchedule();
     const timer = window.setInterval(checkSchedule, 5_000);
     return () => window.clearInterval(timer);
-  }, [data?.today, lineNowTime, reminderAutoEnabled, reminderTargetId, reminderWave, sendReminder, tab]);
+  }, [data?.lineReportConfigs, data?.today, lineNowTime, reminderAutoEnabled, reminderTargetId, sendReminder, tab, trackedLineGroups]);
 
   const replaceGuard = (slot: CoverageSlot) => {
     setReplaceTarget(slot);
@@ -1099,25 +1152,53 @@ export default function Home() {
               <span>{data?.lineReminder.lastSentAt ? `ส่งล่าสุด ${displayTime(data.lineReminder.lastSentAt)} · ${data.lineReminder.lastSentCount} กลุ่ม` : "ยังไม่เคยส่งแจ้งเตือนจากระบบ"}</span>
             </div>
           </section>
+          <section className="report-shift-config" aria-label="ตั้งค่ากะและเวลาเตือนรายจุด">
+            <div className="report-shift-config-head">
+              <div>
+                <p className="eyebrow">POINT SCHEDULE</p>
+                <h3>กำหนดกะรายจุดและรอบสรุป</h3>
+                <p>เลือกจุดที่ต้องตรวจจริง เปิด/ปิดการนับ และกำหนดเวลาที่ระบบจะสรุปเข้าไปยังกลุ่มหลัก</p>
+              </div>
+              <label className="shift-config-select">จุดที่กำลังแก้ไข
+                <select value={scheduleGroupId} onChange={(event) => {
+                  const groupId = event.target.value;
+                  setScheduleDraft({ groupId, config: lineReportConfigFor(groupId, data?.lineReportConfigs) });
+                }}>
+                  <option value="">เลือกจุด…</option>
+                  {lineConfigurableGroups.map((group) => {
+                    const site = group.siteId ? operationalSiteById.get(group.siteId) : null;
+                    const enabled = lineReportConfigFor(group.id, data?.lineReportConfigs).enabled;
+                    return <option key={group.id} value={group.id}>{site?.siteName ?? group.groupName}{enabled ? "" : " · ไม่รวม"}</option>;
+                  })}
+                </select>
+              </label>
+            </div>
+            {scheduleGroupId ? (
+              <div className="shift-config-editor">
+                <label className="shift-config-toggle"><input type="checkbox" checked={scheduleConfig.enabled} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, enabled: event.target.checked } })} /> นับจุดนี้ในการตรวจรายงาน</label>
+                <label className="shift-config-row"><span>กะเช้า</span><input type="text" value={scheduleConfig.morningTimes.join(", ")} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, morningTimes: parseTimeList(event.target.value) } })} placeholder="06:00, 06:30, 07:15" /><small>05:30–08:20</small></label>
+                <label className="shift-config-row"><span>กะเย็น</span><input type="text" value={scheduleConfig.eveningTimes.join(", ")} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, eveningTimes: parseTimeList(event.target.value) } })} placeholder="17:30, 18:00, 19:00" /><small>17:00–20:00</small></label>
+                <button className="small-secondary" onClick={saveReportSchedule} disabled={busyId === "line-report-config"}>{busyId === "line-report-config" ? "กำลังบันทึก…" : "บันทึกเวลาจุดนี้"}</button>
+              </div>
+            ) : <p className="shift-config-empty">ยังไม่มีจุดที่ผูกกลุ่ม LINE และเปิดใช้งานให้ตั้งค่า</p>}
+          </section>
           <section className="report-quick-stats" aria-label="สรุปการส่งรายงาน">
             <button className={reportFilter === "all" && !reportSearch ? "active" : ""} onClick={() => { setReportFilter("all"); setReportSearch(""); }}>
-              <span>กลุ่มทั้งหมด</span><strong>{lineOverviewGroups.length}</strong><small>แสดงทุกกลุ่ม</small>
+              <span>จุดที่ติดตาม</span><strong>{trackedLineGroups.length}</strong><small>นับเฉพาะจุดใช้งาน</small>
             </button>
             <button className={reportFilter === "green" ? "active green" : "green"} onClick={() => setReportFilter("green")}>
-              <span>ส่งล่าสุด</span><strong>{lineOverviewStats.green}</strong><small>สัญญาณไม่เกิน 30 นาที</small>
+              <span>ส่งล่าสุด</span><strong>{trackedLineOverviewStats.green}</strong><small>สัญญาณไม่เกิน 30 นาที</small>
             </button>
             <button className={reportFilter === "yellow" ? "active yellow" : "yellow"} onClick={() => setReportFilter("yellow")}>
-              <span>ช้าลง</span><strong>{lineOverviewStats.yellow}</strong><small>ควรติดตาม</small>
+              <span>ช้าลง</span><strong>{trackedLineOverviewStats.yellow}</strong><small>ควรติดตาม</small>
             </button>
             <button className={reportFilter === "red" ? "active red" : "red"} onClick={() => setReportFilter("red")}>
-              <span>เงียบในช่วงเวร</span><strong>{lineOverviewStats.red}</strong><small>ควรตรวจทันที</small>
+              <span>เงียบในช่วงเวร</span><strong>{trackedLineOverviewStats.red}</strong><small>ควรตรวจทันที</small>
             </button>
             <button className={reportFilter === "gray" ? "active gray" : "gray"} onClick={() => setReportFilter("gray")}>
-              <span>ยังไม่มีข้อมูล</span><strong>{lineOverviewStats.gray}</strong><small>ยังไม่เคยรับรายงาน</small>
+              <span>ยังไม่มีข้อมูล</span><strong>{trackedLineOverviewStats.gray}</strong><small>ยังไม่เคยรับรายงาน</small>
             </button>
-            <button className={reportFilter === "unmapped" ? "active unmapped" : "unmapped"} onClick={() => setReportFilter("unmapped")}>
-              <span>ยังไม่ผูกจุด</span><strong>{lineUnmappedCount}</strong><small>จัดการใน LINE OA</small>
-            </button>
+            <div className="report-quick-stat-muted"><span>ไม่นับในการตรวจ</span><strong>{ignoredLineGroupCount}</strong><small>กลุ่มสั่งการ/ไม่ใช้งาน</small></div>
           </section>
           <section className="report-toolbar" aria-label="ค้นหาและกรองรายงาน">
             <label className="report-search">
@@ -1125,7 +1206,7 @@ export default function Home() {
               <input value={reportSearch} onChange={(event) => setReportSearch(event.target.value)} placeholder="ค้นหาชื่อกลุ่ม จุด หรือลูกค้า" />
             </label>
             <div className="report-toolbar-actions">
-              <span>แสดง {reportVisibleGroups.length} / {lineOverviewGroups.length} กลุ่ม · ดึงล่าสุด {clientTime(lastLoadedAt)}</span>
+              <span>แสดง {reportVisibleGroups.length} / {trackedLineGroups.length} จุด · ไม่นับ {ignoredLineGroupCount} กลุ่ม · ดึงล่าสุด {clientTime(lastLoadedAt)}</span>
               <button className="small-primary" onClick={() => void loadDashboard()} disabled={loading}>{loading ? "กำลังดึง…" : "ดึงข้อมูลตอนนี้"}</button>
             </div>
           </section>
@@ -1137,10 +1218,10 @@ export default function Home() {
                 <p>ดึงจากฐานข้อมูล LINE webhook โดยตรง · เรียงกลุ่มที่ส่งล่าสุดขึ้นก่อน · ไม่ต้องเปิด OA ไล่ดูทีละกลุ่ม</p>
               </div>
               <div className="line-overview-counts" aria-label="สรุปสัญญาณ LINE">
-                <span className="green"><b>{lineOverviewStats.green}</b> ล่าสุด</span>
-                <span className="yellow"><b>{lineOverviewStats.yellow}</b> ช้าลง</span>
-                <span className="red"><b>{lineOverviewStats.red}</b> เงียบ</span>
-                <span className="gray"><b>{lineOverviewStats.gray}</b> ยังไม่มี</span>
+                <span className="green"><b>{trackedLineOverviewStats.green}</b> ล่าสุด</span>
+                <span className="yellow"><b>{trackedLineOverviewStats.yellow}</b> ช้าลง</span>
+                <span className="red"><b>{trackedLineOverviewStats.red}</b> เงียบ</span>
+                <span className="gray"><b>{trackedLineOverviewStats.gray}</b> ยังไม่มี</span>
               </div>
             </div>
             <p className="line-overview-note">เรียงจากกลุ่มที่ส่งล่าสุดขึ้นก่อน · คลิกการ์ดเพื่อเปิดจุดที่ผูกไว้ · สีนี้บอกความเคลื่อนไหวของ LINE เท่านั้น ไม่ใช่การยืนยันเข้าเวร</p>
