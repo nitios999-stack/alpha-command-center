@@ -90,10 +90,32 @@ export type TemplateImportRow = {
   lineGroupId?: string;
 };
 
+export type LinePointSetupInput = {
+  groupId: string;
+  customerName?: string;
+  postName?: string;
+  slotLabel?: string;
+  morningEnabled?: boolean;
+  eveningEnabled?: boolean;
+  morningGuard?: string;
+  eveningGuard?: string;
+  morningDeadline?: string;
+  eveningDeadline?: string;
+  active?: boolean;
+  actor: string;
+};
+
 export type TemplateSummary = {
   total: number;
   morning: number;
   evening: number;
+};
+
+export type LinePointDetail = {
+  customerName: string;
+  active: boolean;
+  morning?: { postName: string; slotLabel: string; assignedGuard: string; deadline: string };
+  evening?: { postName: string; slotLabel: string; assignedGuard: string; deadline: string };
 };
 
 export type BillingCase = {
@@ -274,6 +296,10 @@ function siteIdentifier(siteName: string) {
   return "site-" + siteName.trim().toLowerCase().replace(/[^a-z0-9ก-๙]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
+function linePointSiteIdentifier(groupId: string) {
+  return "line-point-" + groupId.trim().replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 220);
+}
+
 function templateIdentifier(siteId: string, wave: string, postName: string, slotLabel: string) {
   return ["template", siteId, wave, postName.trim().toLowerCase(), slotLabel.trim().toLowerCase()].join("|");
 }
@@ -375,6 +401,7 @@ export async function ensureDatabase() {
   if ((templateCount?.count ?? 0) === 0) await syncTemplatesFromCoverageSlots();
   if (demoSeedEnabled()) await seedDemoLineGroups();
   await syncLineRegistryFromMappings();
+  await provisionLinePointRecords();
 }
 
 async function syncSiteRegistryFromSlots() {
@@ -409,6 +436,31 @@ async function syncLineRegistryFromMappings() {
     .bind(now).run();
 }
 
+// Verified LINE groups are the source of truth for points. Create a dormant
+// operational record automatically so setup starts from the real group rather
+// than asking the manager to create a duplicate point and map it later.
+async function provisionLinePointRecords() {
+  const db = database();
+  const now = bangkokNow().iso;
+  const result = await db.prepare("SELECT r.id, r.group_name, r.picture_url FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id WHERE r.source = 'webhook' AND m.id IS NULL").all<D1Row>();
+  const rows = result.results ?? [];
+  for (let offset = 0; offset < rows.length; offset += 80) {
+    const operations = rows.slice(offset, offset + 80).flatMap((row) => {
+      const groupId = String(row.id ?? "").trim();
+      const groupName = String(row.group_name ?? "").trim();
+      if (!groupId || !groupName || isPlaceholderLineGroupName(groupName, groupId)) return [];
+      const siteId = linePointSiteIdentifier(groupId);
+      return [
+        db.prepare("INSERT OR IGNORE INTO operational_sites (id, site_name, customer_name, active, created_at, updated_at) VALUES (?, ?, 'ยังไม่ระบุลูกค้า', 0, ?, ?)")
+          .bind(siteId, groupName, now, now),
+        db.prepare("INSERT OR IGNORE INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, ?, ?)")
+          .bind(groupId, siteId, groupName, value(row, "picture_url"), now),
+      ];
+    });
+    if (operations.length) await db.batch(operations);
+  }
+}
+
 async function seedDemoData() {
   const db = database();
   const today = bangkokNow().date;
@@ -439,12 +491,13 @@ export async function getDashboard() {
   const current = bangkokNow();
   const today = current.date;
   const slotResult = await db.prepare("SELECT * FROM coverage_slots WHERE operational_date = ? ORDER BY wave, site_name, post_name, slot_label").bind(today).all<D1Row>();
-  const siteResult = await db.prepare("SELECT * FROM operational_sites WHERE active = 1 ORDER BY site_name").all<D1Row>();
+  const siteResult = await db.prepare("SELECT * FROM operational_sites ORDER BY active DESC, site_name").all<D1Row>();
   const lineGroupResult = await db.prepare("SELECT r.id, m.site_id, r.group_name, r.picture_url, r.last_seen_at, r.source, (SELECT e.event_type FROM line_webhook_events e WHERE e.group_id = r.id ORDER BY e.received_at DESC LIMIT 1) AS last_event_type, (SELECT COUNT(*) FROM line_webhook_events e WHERE e.group_id = r.id) AS event_count FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id ORDER BY CASE WHEN m.site_id IS NULL THEN 0 ELSE 1 END, r.group_name").all<D1Row>();
   const templateResult = await db.prepare("SELECT wave, COUNT(*) AS count FROM shift_templates WHERE active = 1 GROUP BY wave").all<D1Row>();
   const demoCount = await db.prepare("SELECT COUNT(*) AS count FROM operational_sites WHERE id IN ('site-green', 'site-late', 'site-waiting', 'site-missing')").first<{ count: number }>();
   const billingResult = await db.prepare("SELECT * FROM billing_cases ORDER BY due_at ASC, updated_at DESC LIMIT 30").all<D1Row>();
-  const lineCounts = await db.prepare("SELECT COUNT(*) AS received_groups, COUNT(m.id) AS mapped_groups, MAX(r.last_seen_at) AS last_webhook_at FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id").first<{ received_groups: number; mapped_groups: number; last_webhook_at: string | null }>();
+  const lineCounts = await db.prepare("SELECT COUNT(*) AS received_groups, COUNT(CASE WHEN s.active = 1 THEN m.id END) AS mapped_groups, MAX(r.last_seen_at) AS last_webhook_at FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id LEFT JOIN operational_sites s ON s.id = m.site_id").first<{ received_groups: number; mapped_groups: number; last_webhook_at: string | null }>();
+  const linePointDetailResult = await db.prepare("SELECT m.id AS group_id, s.customer_name, s.active, t.wave, t.post_name, t.slot_label, t.assigned_guard, t.deadline FROM line_groups m INNER JOIN operational_sites s ON s.id = m.site_id LEFT JOIN shift_templates t ON t.site_id = s.id AND t.active = 1 ORDER BY m.id, t.wave, t.updated_at DESC").all<D1Row>();
   const lineReminder = await getLineReminderSettings();
   const lineReportConfigs = await getLineReportConfigs();
   const lastWebhookAt = lineCounts?.last_webhook_at ?? null;
@@ -458,6 +511,25 @@ export async function getDashboard() {
     const count = numberValue(row, "count");
     if (wave === "morning" || wave === "evening") templates[wave] = count;
     templates.total += count;
+  });
+  const linePointDetails: Record<string, LinePointDetail> = {};
+  (linePointDetailResult.results ?? []).forEach((row) => {
+    const groupId = String(row.group_id ?? "");
+    if (!groupId) return;
+    const detail = linePointDetails[groupId] ?? {
+      customerName: String(row.customer_name ?? ""),
+      active: Number(row.active ?? 0) === 1,
+    };
+    const wave = String(row.wave ?? "");
+    const shift = {
+      postName: String(row.post_name ?? "จุดประจำ"),
+      slotLabel: String(row.slot_label ?? "ช่อง 1"),
+      assignedGuard: String(row.assigned_guard ?? ""),
+      deadline: String(row.deadline ?? ""),
+    };
+    if (wave === "morning" && !detail.morning) detail.morning = shift;
+    if (wave === "evening" && !detail.evening) detail.evening = shift;
+    linePointDetails[groupId] = detail;
   });
   return {
     today,
@@ -477,6 +549,7 @@ export async function getDashboard() {
     } satisfies LineIntegrationStatus,
     lineReminder,
     lineReportConfigs,
+    linePointDetails,
     templates,
     demoDataPresent: Number(demoCount?.count ?? 0) > 0,
     billingCases: (billingResult.results ?? []).map(toBillingCase),
@@ -636,6 +709,56 @@ export async function mapLineGroup(input: { siteId: string; groupId: string; act
   await addAudit("line_group", groupId, "mapped", input.actor, `ผูกกลุ่ม LINE ${groupName} กับ ${String(site.site_name)}`);
 }
 
+export async function setupLinePoint(input: LinePointSetupInput) {
+  await ensureDatabase();
+  const groupId = input.groupId.trim();
+  if (!groupId) throw new Error("กรุณาเลือกกลุ่ม LINE ที่ต้องการตั้งเป็นจุด");
+  const db = database();
+  const registry = await db.prepare("SELECT group_name, picture_url, source FROM line_group_registry WHERE id = ?").bind(groupId).first<D1Row>();
+  const groupName = String(registry?.group_name ?? "").trim();
+  if (!registry || !groupName || String(registry.source ?? "") !== "webhook" || isPlaceholderLineGroupName(groupName, groupId)) {
+    throw new Error("กลุ่มนี้ยังไม่มีชื่อจริงจาก LINE จึงยังตั้งเป็นจุดไม่ได้");
+  }
+  const currentMapping = await db.prepare("SELECT site_id FROM line_groups WHERE id = ?").bind(groupId).first<D1Row>();
+  const siteId = String(currentMapping?.site_id ?? linePointSiteIdentifier(groupId));
+  const currentSite = await db.prepare("SELECT customer_name FROM operational_sites WHERE id = ?").bind(siteId).first<D1Row>();
+  const customerName = (input.customerName?.trim() || String(currentSite?.customer_name ?? "").trim() || "ยังไม่ระบุลูกค้า").slice(0, 255);
+  const postName = (input.postName?.trim() || "จุดประจำ").slice(0, 255);
+  const slotLabel = (input.slotLabel?.trim() || "ช่อง 1").slice(0, 255);
+  const validateDeadline = (value: string | undefined, fallback: string) => {
+    const candidate = value?.trim() || fallback;
+    if (!/^\d{2}:\d{2}$/.test(candidate) || Number(candidate.slice(0, 2)) > 23 || Number(candidate.slice(3, 5)) > 59) {
+      throw new Error("เวลาต้องเป็นรูปแบบ HH:MM");
+    }
+    return candidate;
+  };
+  const morningDeadline = validateDeadline(input.morningDeadline, "06:00");
+  const eveningDeadline = validateDeadline(input.eveningDeadline, "18:00");
+  const active = input.active !== false;
+  const now = bangkokNow().iso;
+  const existingConfig = await db.prepare("SELECT value FROM system_settings WHERE key = ?").bind(`line_report_config:${groupId}`).first<D1Row>();
+  const reportConfig = safeLineReportConfig(value(existingConfig, "value"));
+  const operations = [
+    db.prepare("INSERT INTO operational_sites (id, site_name, customer_name, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET site_name = excluded.site_name, customer_name = excluded.customer_name, active = excluded.active, updated_at = excluded.updated_at")
+      .bind(siteId, groupName, customerName, active ? 1 : 0, now, now),
+    db.prepare("INSERT INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET site_id = excluded.site_id, group_name = excluded.group_name, picture_url = excluded.picture_url, updated_at = excluded.updated_at")
+      .bind(groupId, siteId, groupName, value(registry, "picture_url"), now),
+    db.prepare("INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+      .bind(`line_report_config:${groupId}`, JSON.stringify({ ...reportConfig, enabled: active }), now),
+  ];
+  const addTemplate = (wave: "morning" | "evening", enabled: boolean, guard: string | undefined, deadline: string) => {
+    if (!enabled) return;
+    const templateId = templateIdentifier(siteId, wave, postName, slotLabel);
+    operations.push(db.prepare("INSERT INTO shift_templates (id, site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, active, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'standard', 1, ?) ON CONFLICT(id) DO UPDATE SET assigned_guard = excluded.assigned_guard, deadline = excluded.deadline, active = 1, updated_at = excluded.updated_at")
+      .bind(templateId, siteId, wave, postName, slotLabel, guard?.trim() || null, deadline, now));
+  };
+  addTemplate("morning", input.morningEnabled !== false, input.morningGuard, morningDeadline);
+  addTemplate("evening", input.eveningEnabled !== false, input.eveningGuard, eveningDeadline);
+  await db.batch(operations);
+  await addAudit("line_point", groupId, active ? "enabled" : "disabled", input.actor, `${active ? "ตั้ง" : "ปิด"} กลุ่ม LINE ${groupName} เป็นจุดใช้งาน · ลูกค้า ${customerName}`);
+  return { siteId, active, groupName };
+}
+
 export async function unmapLineGroup(groupId: string, actor: string) {
   await ensureDatabase();
   const id = groupId.trim();
@@ -643,6 +766,16 @@ export async function unmapLineGroup(groupId: string, actor: string) {
   const db = database();
   const mapping = await db.prepare("SELECT group_name, site_id FROM line_groups WHERE id = ?").bind(id).first<D1Row>();
   if (!mapping) return;
+  if (String(mapping.site_id ?? "").startsWith("line-point-")) {
+    const now = bangkokNow().iso;
+    await db.batch([
+      db.prepare("UPDATE operational_sites SET active = 0, updated_at = ? WHERE id = ?").bind(now, String(mapping.site_id)),
+      db.prepare("INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+        .bind(`line_report_config:${id}`, JSON.stringify({ ...DEFAULT_LINE_REPORT_CONFIG, enabled: false }), now),
+    ]);
+    await addAudit("line_point", id, "disabled", actor, `ปิดการตรวจกลุ่ม LINE ${String(mapping.group_name)}`);
+    return;
+  }
   await db.prepare("DELETE FROM line_groups WHERE id = ?").bind(id).run();
   await addAudit("line_group", id, "unmapped", actor, `ยกเลิกการผูกกลุ่ม LINE ${String(mapping.group_name)} จากจุด ${String(mapping.site_id)}`);
 }

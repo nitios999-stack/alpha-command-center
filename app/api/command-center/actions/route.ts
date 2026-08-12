@@ -1,10 +1,10 @@
 import { apiAuthRequiredResponse, getChatGPTUser } from "../../../chatgpt-auth";
-import { addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, deleteLineGroup, deleteOperationalSite, generateTodayFromTemplates, importShiftTemplates, mapLineGroup, markLeave, removeDemoData, replaceSlot, saveLineReminderSettings, saveLineReportConfig, sendLineConnectionTest, sendLineReportReminder, syncLineGroupsFromGateway, unmapLineGroup, updateOperationalSite, type LineReportConfig, type TemplateImportRow } from "../../../../db/command-center";
+import { addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, deleteLineGroup, deleteOperationalSite, generateTodayFromTemplates, importShiftTemplates, mapLineGroup, markLeave, removeDemoData, replaceSlot, saveLineReminderSettings, saveLineReportConfig, sendLineConnectionTest, sendLineReportReminder, setupLinePoint, syncLineGroupsFromGateway, unmapLineGroup, updateOperationalSite, type LinePointSetupInput, type LineReportConfig, type TemplateImportRow } from "../../../../db/command-center";
 
 export const runtime = "edge";
 
 type ActionPayload = {
-  type?: "confirm" | "replace" | "leave" | "site" | "site_update" | "site_delete" | "slot" | "billing" | "template_import" | "generate_today" | "remove_demo" | "line_group" | "line_unmap" | "line_delete" | "line_connection_test" | "line_gateway_sync" | "line_reminder_settings" | "line_reminder_send" | "line_report_config";
+  type?: "confirm" | "replace" | "leave" | "site" | "site_update" | "site_delete" | "slot" | "billing" | "template_import" | "generate_today" | "remove_demo" | "line_group" | "line_point_setup" | "line_unmap" | "line_delete" | "line_connection_test" | "line_gateway_sync" | "line_reminder_settings" | "line_reminder_send" | "line_report_config";
   slotId?: string;
   siteId?: string;
   source?: string;
@@ -28,6 +28,16 @@ type ActionPayload = {
   force?: boolean;
   includeClear?: boolean;
   reportConfig?: LineReportConfig;
+  customerNameOverride?: string;
+  pointPostName?: string;
+  pointSlotLabel?: string;
+  morningEnabled?: boolean;
+  eveningEnabled?: boolean;
+  morningGuard?: string;
+  eveningGuard?: string;
+  morningDeadline?: string;
+  eveningDeadline?: string;
+  pointActive?: boolean;
 };
 
 export async function POST(request: Request) {
@@ -82,6 +92,22 @@ export async function POST(request: Request) {
         groupId: payload.groupId ?? "",
         actor,
       });
+    } else if (payload.type === "line_point_setup") {
+      const setup: LinePointSetupInput = {
+        groupId: payload.groupId ?? "",
+        customerName: payload.customerNameOverride,
+        postName: payload.pointPostName,
+        slotLabel: payload.pointSlotLabel,
+        morningEnabled: payload.morningEnabled,
+        eveningEnabled: payload.eveningEnabled,
+        morningGuard: payload.morningGuard,
+        eveningGuard: payload.eveningGuard,
+        morningDeadline: payload.morningDeadline,
+        eveningDeadline: payload.eveningDeadline,
+        active: payload.pointActive,
+        actor,
+      };
+      result = { ok: true, ...(await setupLinePoint(setup)) };
     } else if (payload.type === "line_unmap") {
       await unmapLineGroup(payload.groupId ?? "", actor);
     } else if (payload.type === "line_delete") {

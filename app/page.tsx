@@ -87,6 +87,13 @@ type TemplateSummary = {
   evening: number;
 };
 
+type LinePointDetail = {
+  customerName: string;
+  active: boolean;
+  morning?: { postName: string; slotLabel: string; assignedGuard: string; deadline: string };
+  evening?: { postName: string; slotLabel: string; assignedGuard: string; deadline: string };
+};
+
 type TemplateRow = {
   siteName: string;
   customerName: string;
@@ -108,6 +115,7 @@ type DashboardData = {
   lineIntegration: LineIntegrationStatus;
   lineReminder: LineReminderSettings;
   lineReportConfigs: Record<string, LineReportConfig>;
+  linePointDetails: Record<string, LinePointDetail>;
   templates: TemplateSummary;
   demoDataPresent: boolean;
   billingCases: BillingCase[];
@@ -126,6 +134,19 @@ type SiteCard = {
   nextDeadline: string | null;
   checkedAt: string | null;
   lineGroup: LineGroup | null;
+};
+
+type LinePointForm = {
+  customerName: string;
+  postName: string;
+  slotLabel: string;
+  morningEnabled: boolean;
+  eveningEnabled: boolean;
+  morningGuard: string;
+  eveningGuard: string;
+  morningDeadline: string;
+  eveningDeadline: string;
+  active: boolean;
 };
 
 const statusText: Record<SiteStatus, string> = {
@@ -152,15 +173,17 @@ function deriveSiteStatus(slots: CoverageSlot[]): SiteStatus {
 }
 
 function groupSites(slots: CoverageSlot[], registry: OperationalSite[], lineGroups: LineGroup[]) {
+  const activeRegistry = registry.filter((site) => site.active === 1);
   const groups = new Map<string, CoverageSlot[]>();
   slots.forEach((slot) => {
+    if (!activeRegistry.some((site) => site.id === slot.siteId)) return;
     const existing = groups.get(slot.siteId) ?? [];
     existing.push(slot);
     groups.set(slot.siteId, existing);
   });
-  const registryById = new Map(registry.map((site) => [site.id, site]));
+  const registryById = new Map(activeRegistry.map((site) => [site.id, site]));
   const lineGroupBySite = new Map(lineGroups.filter((group): group is LineGroup & { siteId: string } => Boolean(group.siteId)).map((group) => [group.siteId, group]));
-  const siteIds = new Set([...registry.map((site) => site.id), ...groups.keys()]);
+  const siteIds = new Set([...activeRegistry.map((site) => site.id), ...groups.keys()]);
   return Array.from(siteIds)
     .map((id) => {
       const grouped = groups.get(id) ?? [];
@@ -409,6 +432,8 @@ export default function Home() {
   const [replaceName, setReplaceName] = useState("");
   const [lineMapTarget, setLineMapTarget] = useState<SiteCard | null>(null);
   const [lineMapGroupId, setLineMapGroupId] = useState("");
+  const [linePointTarget, setLinePointTarget] = useState<LineGroup | null>(null);
+  const [linePointForm, setLinePointForm] = useState<LinePointForm | null>(null);
   const [showSiteForm, setShowSiteForm] = useState(false);
   const [siteEditTarget, setSiteEditTarget] = useState<SiteCard | null>(null);
 
@@ -658,6 +683,25 @@ export default function Home() {
     setReplaceName(slot.assignedGuard ?? "");
   };
 
+  const openLinePointSetup = (group: LineGroup) => {
+    const existingSite = group.siteId ? operationalSiteById.get(group.siteId) : null;
+    const detail = data?.linePointDetails?.[group.id];
+    const config = lineReportConfigFor(group.id, data?.lineReportConfigs);
+    setLinePointTarget(group);
+    setLinePointForm({
+      customerName: (existingSite?.customerName ?? detail?.customerName) === "ยังไม่ระบุลูกค้า" ? "" : existingSite?.customerName ?? detail?.customerName ?? "",
+      postName: detail?.morning?.postName ?? detail?.evening?.postName ?? "จุดประจำ",
+      slotLabel: detail?.morning?.slotLabel ?? detail?.evening?.slotLabel ?? "ช่อง 1",
+      morningEnabled: detail?.morning ? true : !detail,
+      eveningEnabled: detail?.evening ? true : !detail,
+      morningGuard: detail?.morning?.assignedGuard ?? "",
+      eveningGuard: detail?.evening?.assignedGuard ?? "",
+      morningDeadline: detail?.morning?.deadline ?? "06:00",
+      eveningDeadline: detail?.evening?.deadline ?? "18:00",
+      active: existingSite?.active === 1 && config.enabled,
+    });
+  };
+
   const mapLineGroup = (site: SiteCard) => {
     setLineMapTarget(site);
     setLineMapGroupId(site.lineGroup?.id ?? "");
@@ -695,12 +739,11 @@ export default function Home() {
     void runAction({ type: "line_delete", groupId: group.id }, "line-delete-" + group.id, "ลบกลุ่มที่ไม่ใช้งานแล้ว");
   };
 
-  const addSiteWithoutRoster = () => {
-    setSiteEditTarget(null);
-    setShowSiteForm(true);
-  };
-
   const editSite = (site: SiteCard) => {
+    if (site.lineGroup) {
+      openLinePointSetup(site.lineGroup);
+      return;
+    }
     setSiteEditTarget(site);
     setShowSiteForm(true);
   };
@@ -742,6 +785,34 @@ export default function Home() {
       if (result) {
         setLineMapTarget(null);
         setLineMapGroupId("");
+      }
+    });
+  };
+
+  const submitLinePointSetup = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!linePointTarget || !linePointForm) return;
+    void runAction(
+      {
+        type: "line_point_setup",
+        groupId: linePointTarget.id,
+        customerNameOverride: linePointForm.customerName,
+        pointPostName: linePointForm.postName,
+        pointSlotLabel: linePointForm.slotLabel,
+        morningEnabled: linePointForm.morningEnabled,
+        eveningEnabled: linePointForm.eveningEnabled,
+        morningGuard: linePointForm.morningGuard,
+        eveningGuard: linePointForm.eveningGuard,
+        morningDeadline: linePointForm.morningDeadline,
+        eveningDeadline: linePointForm.eveningDeadline,
+        pointActive: linePointForm.active,
+      },
+      "line-point-setup-" + linePointTarget.id,
+      linePointForm.active ? "ตั้งกลุ่ม LINE เป็นจุดใช้งานแล้ว" : "บันทึกกลุ่ม LINE ไว้ แต่ปิดการนับจุดแล้ว",
+    ).then((result) => {
+      if (result) {
+        setLinePointTarget(null);
+        setLinePointForm(null);
       }
     });
   };
@@ -942,7 +1013,7 @@ export default function Home() {
               <button className="small-secondary" disabled={!data?.templates.total || busyId === "generate-today"} onClick={generateToday}>
                 {busyId === "generate-today" ? "กำลังสร้าง…" : `สร้างวันนี้จาก ${data?.templates.total ?? 0} อัตรา`}
               </button>
-              <button className="small-secondary" onClick={addSiteWithoutRoster}>+ เพิ่มจุดเทา</button>
+              <button className="small-secondary" onClick={() => setTab("line")}>ตั้งจากกลุ่ม LINE</button>
               <button className="small-primary" onClick={() => setShowSlotForm((show) => !show)}>
                 {showSlotForm ? "ปิด" : "+ เพิ่มช่องกำลัง"}
               </button>
@@ -1284,6 +1355,7 @@ export default function Home() {
               <div className="line-ignored-grid">
                 {ignoredLineGroups.map((group) => (
                   <article className="line-ignored-card" key={group.id}>
+                    <button type="button" className="line-ignored-setup" onClick={() => openLinePointSetup(group)} disabled={!group.nameResolved || busyId === "line-point-setup-" + group.id}>{group.siteId ? "แก้ไขข้อมูลจุด" : "ตั้งเป็นจุดใช้งาน"}</button>
                     <div className="line-ignored-card-top">
                       {group.pictureUrl ? <img src={group.pictureUrl} alt="" /> : <b>LINE</b>}
                       <strong>{group.nameResolved ? group.groupName : "รอชื่อจริงจาก LINE"}</strong>
@@ -1377,14 +1449,22 @@ export default function Home() {
           </section>
 
           <section className="line-groups-table">
-            <div className="line-table-head"><span>กลุ่ม LINE</span><span>เชื่อมกับจุด</span><span>พบล่าสุด</span><span>จัดการ</span></div>
-            {(data?.lineGroups ?? []).map((group) => (
+            <div className="line-point-guidance"><strong>กลุ่ม LINE คือฐานข้อมูลจุด</strong><span>กด “ตั้งเป็นจุดใช้งาน” ที่แถวกลุ่ม แล้วเติมเฉพาะลูกค้า กะ และเวลา ระบบจะนำจุดขึ้นภาพรวมเอง ไม่ต้องสร้างจุดแยกหรือผูกซ้ำ</span></div>
+            <div className="line-table-head"><span>กลุ่ม LINE จริง</span><span>ข้อมูลจุด / การนับ</span><span>พบล่าสุด</span><span>จัดการ</span></div>
+            {(data?.lineGroups ?? []).map((group) => {
+              const pointSite = group.siteId ? operationalSiteById.get(group.siteId) : null;
+              return (
               <article className="line-group-row" key={group.id}>
                 <div className="line-group-identity">
                   {group.pictureUrl ? <img src={group.pictureUrl} alt="" /> : <span className="line-avatar">LINE</span>}
                   <div><strong>{group.nameResolved ? group.groupName : "กำลังรอชื่อจริงจาก LINE"}</strong><code title={group.id}>{group.id}</code><small>{group.nameResolved ? "ชื่อจริงจาก LINE webhook" : "LINE รับกลุ่มแล้ว แต่ยังดึงชื่อจริงไม่สำเร็จ"}</small></div>
                 </div>
                 <div className="line-mapping-cell">
+                  <div className="line-point-summary">
+                    <span className={pointSite?.active === 1 ? "point-ready" : "point-dormant"}>{pointSite?.active === 1 ? "พร้อมตรวจ" : group.siteId ? "บันทึกแล้ว · ยังไม่เปิดตรวจ" : "เตรียมเป็นจุดจากกลุ่มนี้"}</span>
+                    <small>{pointSite?.customerName && pointSite.customerName !== "ยังไม่ระบุลูกค้า" ? pointSite.customerName : "เติมลูกค้า กะ และเวลาในบัตรนี้"}</small>
+                    <button type="button" className="small-secondary" onClick={() => openLinePointSetup(group)} disabled={!group.nameResolved || busyId === "line-point-setup-" + group.id}>{group.siteId ? "แก้ไขข้อมูลจุด" : "ตั้งเป็นจุดใช้งาน"}</button>
+                  </div>
                   <select value={group.siteId ?? ""} onChange={(event) => linkRegistryGroup(group, event.target.value)} disabled={!group.nameResolved || busyId === "line-map-" + group.id}>
                     <option value="">{group.nameResolved ? "เลือกจุดที่จะผูก…" : "รอชื่อจริงจาก LINE…"}</option>
                     {(data?.sites ?? []).map((site) => <option key={site.id} value={site.id}>{site.siteName} · {site.customerName}</option>)}
@@ -1394,12 +1474,14 @@ export default function Home() {
                 <div className="line-last-seen">{displayTime(group.lastSeenAt)}<small>{group.lastSeenAt ? "เวลาไทย" : "ยังไม่ได้รับ webhook"}</small></div>
                 <div className="line-row-actions"><button className="action-confirm" disabled={!data?.lineIntegration.configured || busyId === "line-test-" + group.id} onClick={() => testLineGroup(group)}>ทดสอบ</button>{!group.siteId && <button className="action-text danger" disabled={busyId === "line-delete-" + group.id} onClick={() => deleteLineRegistryGroup(group)}>{busyId === "line-delete-" + group.id ? "กำลังลบ…" : "ลบกลุ่ม"}</button>}</div>
               </article>
-            ))}
+              );
+            })}
             {!loading && !(data?.lineGroups ?? []).length && <p className="line-empty">ยังไม่มีกลุ่มในทะเบียน เมื่อ OA รับ webhook จากกลุ่ม กลุ่มจะปรากฏที่นี่เพื่อให้เลือกผูกกับจุด</p>}
           </section>
         </section>
       ) : (
         <section className="setup-board" aria-label="ตั้งค่าอัตรากำลัง">
+          <div className="line-point-guidance"><strong>ไม่ต้องสร้างจุดซ้ำ</strong><span>กลุ่ม LINE ที่รับจาก webhook จะถูกเตรียมเป็นจุดให้โดยอัตโนมัติ ใช้หน้านี้เฉพาะกรณีมีหลายป้อมหรือหลายช่องในจุดเดียว</span></div>
           <div className="setup-hero">
             <div>
               <p className="eyebrow">เตรียมใช้จริง</p>
@@ -1465,6 +1547,43 @@ export default function Home() {
             <div className="modal-head"><div><p className="eyebrow">เปลี่ยนกำลัง</p><h3 id="replace-dialog-title">เลือก รปภ. สแปร์</h3><p>{replaceTarget.siteName} · {replaceTarget.postName} · {replaceTarget.slotLabel}</p></div><button type="button" className="drawer-close" onClick={() => setReplaceTarget(null)} aria-label="ปิด">×</button></div>
             <label>ชื่อ รปภ. สแปร์<input value={replaceName} onChange={(event) => setReplaceName(event.target.value)} required placeholder="เช่น นายสมพงษ์ (สแปร์)" /></label>
             <div className="modal-actions"><button type="button" className="small-secondary" onClick={() => setReplaceTarget(null)}>ยกเลิก</button><button className="small-primary" disabled={busyId === replaceTarget.id}>{busyId === replaceTarget.id ? "กำลังบันทึก…" : "มอบหมายสแปร์"}</button></div>
+          </form>
+        </div>
+      )}
+
+      {linePointTarget && linePointForm && (
+        <div className="modal-backdrop" role="presentation">
+          <form className="modal-card line-point-modal" onSubmit={submitLinePointSetup} role="dialog" aria-modal="true" aria-labelledby="line-point-dialog-title">
+            <div className="modal-head">
+              <div>
+                <p className="eyebrow">กลุ่ม LINE = จุดปฏิบัติงาน</p>
+                <h3 id="line-point-dialog-title">ตั้งค่าจุดจากกลุ่มนี้</h3>
+                <p>{linePointTarget.groupName}</p>
+              </div>
+              <button type="button" className="drawer-close" onClick={() => { setLinePointTarget(null); setLinePointForm(null); }} aria-label="ปิด">×</button>
+            </div>
+            <div className="line-point-form-note">ระบบใช้ชื่อกลุ่มจริงและโลโก้จาก LINE อัตโนมัติ คุณเติมเฉพาะข้อมูลที่จำเป็นต่อการตรวจ</div>
+            <label>ลูกค้า / ผู้ว่าจ้าง<input value={linePointForm.customerName} onChange={(event) => setLinePointForm({ ...linePointForm, customerName: event.target.value })} placeholder="เช่น บริษัท..." /></label>
+            <div className="line-point-form-grid">
+              <label>ตำแหน่งหลัก<input value={linePointForm.postName} onChange={(event) => setLinePointForm({ ...linePointForm, postName: event.target.value })} /></label>
+              <label>ช่องตรวจ<input value={linePointForm.slotLabel} onChange={(event) => setLinePointForm({ ...linePointForm, slotLabel: event.target.value })} /></label>
+            </div>
+            <div className="line-point-shift-grid">
+              <fieldset>
+                <legend>ผลัดเช้า 05:30–08:20</legend>
+                <label className="shift-config-toggle"><input type="checkbox" checked={linePointForm.morningEnabled} onChange={(event) => setLinePointForm({ ...linePointForm, morningEnabled: event.target.checked })} /> ใช้กะเช้า</label>
+                <label>เวลาเข้าล่าสุด<input type="time" value={linePointForm.morningDeadline} onChange={(event) => setLinePointForm({ ...linePointForm, morningDeadline: event.target.value })} /></label>
+                <label>รปภ.ประจำ (ถ้ามี)<input value={linePointForm.morningGuard} onChange={(event) => setLinePointForm({ ...linePointForm, morningGuard: event.target.value })} placeholder="ไม่จำเป็น" /></label>
+              </fieldset>
+              <fieldset>
+                <legend>ผลัดเย็น 17:00–20:00</legend>
+                <label className="shift-config-toggle"><input type="checkbox" checked={linePointForm.eveningEnabled} onChange={(event) => setLinePointForm({ ...linePointForm, eveningEnabled: event.target.checked })} /> ใช้กะเย็น</label>
+                <label>เวลาเข้าล่าสุด<input type="time" value={linePointForm.eveningDeadline} onChange={(event) => setLinePointForm({ ...linePointForm, eveningDeadline: event.target.value })} /></label>
+                <label>รปภ.ประจำ (ถ้ามี)<input value={linePointForm.eveningGuard} onChange={(event) => setLinePointForm({ ...linePointForm, eveningGuard: event.target.value })} placeholder="ไม่จำเป็น" /></label>
+              </fieldset>
+            </div>
+            <label className="shift-config-toggle line-point-active-toggle"><input type="checkbox" checked={linePointForm.active} onChange={(event) => setLinePointForm({ ...linePointForm, active: event.target.checked })} /> ใช้กลุ่มนี้เป็นจุดที่ต้องตรวจในภาพรวม</label>
+            <div className="modal-actions"><button type="button" className="small-secondary" onClick={() => { setLinePointTarget(null); setLinePointForm(null); }}>ยกเลิก</button><button className="small-primary" disabled={busyId === "line-point-setup-" + linePointTarget.id}>{busyId === "line-point-setup-" + linePointTarget.id ? "กำลังบันทึก…" : "บันทึกข้อมูลจุด"}</button></div>
           </form>
         </div>
       )}

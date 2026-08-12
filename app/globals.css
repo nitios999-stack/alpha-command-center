@@ -1535,6 +1535,9 @@ button:disabled {
 .line-groups-table { overflow: hidden; background: white; border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); }
 .line-table-head,
 .line-group-row { display: grid; grid-template-columns: minmax(240px, 1.4fr) minmax(220px, 1.1fr) 115px 90px; gap: 16px; align-items: center; padding: 14px 18px; }
+.line-point-guidance { display: grid; gap: 4px; margin: 0 18px 10px; padding: 12px 14px; color: #4d675b; background: #eef8f2; border: 1px solid #d8ebe0; border-radius: 12px; }
+.line-point-guidance strong { color: #08734f; font-size: 0.8rem; }
+.line-point-guidance span { font-size: 0.74rem; line-height: 1.45; }
 .line-table-head { color: var(--muted); font-size: 0.75rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; background: #f3f8f5; }
 .line-group-row { border-top: 1px solid #edf1ee; }
 .line-group-identity { display: flex; align-items: center; min-width: 0; gap: 11px; }
@@ -1545,6 +1548,22 @@ button:disabled {
 .line-group-identity small,
 .line-last-seen small { color: var(--muted); font-size: 0.72rem; }
 .line-mapping-cell { display: flex; align-items: center; gap: 8px; }
+.line-mapping-cell > select,
+.line-mapping-cell > .action-text { display: none; }
+.line-point-summary { display: grid; min-width: 0; gap: 4px; }
+.line-point-summary span { width: fit-content; padding: 4px 8px; color: #61736b; font-size: 0.68rem; font-weight: 800; background: #eef3f0; border-radius: 999px; }
+.line-point-summary .point-ready { color: #08734f; background: #dff5e9; }
+.line-point-summary small { overflow: hidden; color: var(--muted); font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
+.line-point-summary .small-secondary { justify-self: start; min-height: 32px; padding: 5px 10px; font-size: 0.72rem; }
+.line-point-form-note { margin: -4px 0 14px; padding: 10px 12px; color: #587066; font-size: 0.78rem; line-height: 1.45; background: #eff8f3; border: 1px solid #d9ece1; border-radius: 10px; }
+.line-point-form-grid,
+.line-point-shift-grid { display: grid; gap: 10px; }
+.line-point-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.line-point-shift-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 4px; }
+.line-point-shift-grid fieldset { min-width: 0; margin: 0; padding: 12px; border: 1px solid #dce8e1; border-radius: 12px; }
+.line-point-shift-grid legend { padding: 0 5px; color: #08734f; font-size: 0.75rem; font-weight: 800; }
+.line-point-shift-grid label { margin-top: 8px; }
+.line-point-active-toggle { margin-top: 12px; padding: 11px 12px; background: #f4f8f5; border-radius: 10px; }
 .line-mapping-cell select { width: min(100%, 250px); min-height: 36px; padding: 0 9px; color: var(--ink); background: white; border: 1px solid #cedbd4; border-radius: 9px; }
 .line-last-seen { display: grid; gap: 3px; color: var(--forest-dark); font-size: 0.84rem; }
 .line-row-actions { justify-self: end; }
@@ -1615,6 +1634,8 @@ button:disabled {
   .line-table-head { display: none; }
   .line-group-row { grid-template-columns: 1fr; gap: 10px; padding: 16px; }
   .line-mapping-cell { align-items: flex-start; flex-direction: column; }
+  .line-point-form-grid,
+  .line-point-shift-grid { grid-template-columns: 1fr; }
   .line-mapping-cell select { width: 100%; }
   .line-row-actions { justify-self: start; }
 
@@ -2445,6 +2466,7 @@ select:focus-visible {
 .line-ignored-head p:not(.eyebrow) { max-width: 680px; margin: 0; color: #718078; font-size: 0.7rem; line-height: 1.5; }
 .line-ignored-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; max-height: 360px; overflow: auto; padding-right: 2px; }
 .line-ignored-card { display: grid; min-width: 0; gap: 5px; padding: 9px; background: rgba(255, 255, 255, 0.8); border: 1px solid #e0e9e3; border-radius: 12px; }
+.line-ignored-setup { justify-self: end; min-height: 28px; padding: 4px 8px; color: #08734f; font-size: 0.66rem; font-weight: 800; background: #e3f4ea; border: 1px solid #c7e8d5; border-radius: 8px; }
 .line-ignored-card-top { display: flex; min-width: 0; align-items: center; gap: 6px; }
 .line-ignored-card-top img,
 .line-ignored-card-top b { display: grid; width: 26px; height: 26px; flex: 0 0 26px; place-items: center; color: #61736b; font-size: 0.46rem; background: #e7f0eb; border-radius: 8px; object-fit: cover; }
