@@ -532,7 +532,7 @@ export default function Home() {
   const reminderTargetId = reminderTargetDraft ?? data?.lineReminder.targetGroupId ?? suggestedReminderTarget?.id ?? "";
   const reminderAutoEnabled = reminderAutoDraft ?? data?.lineReminder.autoEnabled ?? false;
   const reminderTargetGroup = (data?.lineGroups ?? []).find((group) => group.id === reminderTargetId) ?? null;
-  const reminderNextTime = nextReminderTime(reminderWave, trackedLineGroups, data?.lineReportConfigs);
+  const reminderNextTime = nextReminderTime(reminderWave, lineNowTime, trackedLineGroups, data?.lineReportConfigs);
   const scheduleGroupId = scheduleDraft?.groupId ?? lineConfigurableGroups[0]?.id ?? "";
   const scheduleConfig = scheduleDraft?.groupId === scheduleGroupId
     ? scheduleDraft.config
