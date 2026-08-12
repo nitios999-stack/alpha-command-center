@@ -232,6 +232,14 @@ function lineSignalLabel(status: LineSignalStatus) {
   return "ยังไม่มีข้อมูล";
 }
 
+function lineIgnoredReason(group: LineGroup, sites: Map<string, OperationalSite>, configs: Record<string, LineReportConfig> | undefined) {
+  if (!group.siteId) return "ยังไม่ผูกจุด";
+  const site = sites.get(group.siteId);
+  if (!site || site.active !== 1) return "จุดถูกปิดใช้งาน";
+  if (!lineReportConfigFor(group.id, configs).enabled) return "ปิดติดตามรายงาน";
+  return "ไม่รวมในการตรวจ";
+}
+
 function lineEventLabel(eventType: string | null) {
   const labels: Record<string, string> = {
     message: "ข้อความรายงาน",
@@ -502,6 +510,10 @@ export default function Home() {
     [data?.lineReportConfigs, lineConfigurableGroups],
   );
   const ignoredLineGroupCount = Math.max(0, lineOverviewGroups.length - trackedLineGroups.length);
+  const ignoredLineGroups = useMemo(
+    () => lineOverviewGroups.filter((group) => !trackedLineGroups.some((tracked) => tracked.id === group.id)),
+    [lineOverviewGroups, trackedLineGroups],
+  );
   const trackedLineOverviewStats = trackedLineGroups.reduce(
     (all, group) => {
       all[lineSignalStatus(group, lineNowTime)] += 1;
@@ -1259,6 +1271,30 @@ export default function Home() {
               )}
             </div>
           </section>
+          {ignoredLineGroups.length > 0 && (
+            <section className="line-ignored-panel" aria-label="กลุ่ม LINE ที่ยังไม่นับในการตรวจ">
+              <div className="line-ignored-head">
+                <div>
+                  <p className="eyebrow">NOT IN CHECK</p>
+                  <h3>กลุ่มที่ยังไม่นับในการตรวจ <span>{ignoredLineGroups.length}</span></h3>
+                  <p>ข้อมูลกลุ่มยังอยู่ในทะเบียน ไม่ได้ถูกลบ เพียงยังไม่ผูกกับจุดที่เปิดใช้งาน หรือถูกปิดติดตามไว้</p>
+                </div>
+                <button className="small-secondary" onClick={() => setTab("line")}>จัดการการผูกจุด</button>
+              </div>
+              <div className="line-ignored-grid">
+                {ignoredLineGroups.map((group) => (
+                  <article className="line-ignored-card" key={group.id}>
+                    <div className="line-ignored-card-top">
+                      {group.pictureUrl ? <img src={group.pictureUrl} alt="" /> : <b>LINE</b>}
+                      <strong>{group.nameResolved ? group.groupName : "รอชื่อจริงจาก LINE"}</strong>
+                    </div>
+                    <span>{lineIgnoredReason(group, operationalSiteById, data?.lineReportConfigs)}</span>
+                    <small>ล่าสุด {displayTime(group.lastSeenAt)} · {lineAgeLabel(group.lastSeenAt, reportNowMs)}</small>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
         </section>
       ) : tab === "billing" ? (
         <>

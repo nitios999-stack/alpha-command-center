@@ -2431,6 +2431,27 @@ select:focus-visible {
 .line-overview-empty-state span { max-width: 520px; color: #7a8982; font-size: 0.68rem; line-height: 1.5; }
 .line-overview-empty-state .small-secondary { margin-top: 5px; }
 
+.line-ignored-panel {
+  display: grid;
+  gap: 11px;
+  padding: 15px;
+  background: #f7faf8;
+  border: 1px dashed #cddbd3;
+  border-radius: 18px;
+}
+.line-ignored-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.line-ignored-head h3 { margin: 2px 0 4px; color: #496259; font-size: 0.98rem; }
+.line-ignored-head h3 span { display: inline-flex; min-width: 25px; height: 22px; align-items: center; justify-content: center; margin-left: 4px; color: #6751a4; font-size: 0.72rem; background: #eeeafa; border-radius: 999px; }
+.line-ignored-head p:not(.eyebrow) { max-width: 680px; margin: 0; color: #718078; font-size: 0.7rem; line-height: 1.5; }
+.line-ignored-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; max-height: 360px; overflow: auto; padding-right: 2px; }
+.line-ignored-card { display: grid; min-width: 0; gap: 5px; padding: 9px; background: rgba(255, 255, 255, 0.8); border: 1px solid #e0e9e3; border-radius: 12px; }
+.line-ignored-card-top { display: flex; min-width: 0; align-items: center; gap: 6px; }
+.line-ignored-card-top img,
+.line-ignored-card-top b { display: grid; width: 26px; height: 26px; flex: 0 0 26px; place-items: center; color: #61736b; font-size: 0.46rem; background: #e7f0eb; border-radius: 8px; object-fit: cover; }
+.line-ignored-card-top strong { overflow: hidden; color: #476056; font-size: 0.68rem; text-overflow: ellipsis; white-space: nowrap; }
+.line-ignored-card > span { overflow: hidden; color: #7666a4; font-size: 0.61rem; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+.line-ignored-card small { overflow: hidden; color: #84918c; font-size: 0.58rem; text-overflow: ellipsis; white-space: nowrap; }
+
 .report-quick-stats {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -2702,4 +2723,10 @@ select:focus-visible {
   .report-quick-stat-muted strong { font-size: 1.2rem; }
   .report-quick-stat-muted span { font-size: 0.63rem; }
   .report-quick-stat-muted small { font-size: 0.56rem; }
+  .line-ignored-panel { padding: 13px; border-radius: 16px; }
+  .line-ignored-head { display: grid; gap: 8px; }
+  .line-ignored-head .small-secondary { width: 100%; min-height: 40px; }
+  .line-ignored-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 300px; gap: 6px; }
+  .line-ignored-card { padding: 8px; }
+  .line-ignored-card-top strong { font-size: 0.62rem; }
 }

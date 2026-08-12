@@ -109,6 +109,7 @@ test("keeps the command center database and product surface in source", async ()
   assert.match(page, /AI REMINDER PLAN/);
   assert.match(page, /report-shift-config/);
   assert.match(page, /lineReportConfigs/);
+  assert.match(page, /line-ignored-panel/);
   assert.match(page, /ทุก 5 วินาที/);
   assert.match(page, /เรียงกลุ่มที่ส่งล่าสุดขึ้นก่อน/);
   assert.match(page, /เข้าเวรวันนี้/);
