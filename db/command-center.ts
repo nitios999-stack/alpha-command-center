@@ -759,6 +759,65 @@ export async function setupLinePoint(input: LinePointSetupInput) {
   return { siteId, active, groupName };
 }
 
+// Fast onboarding path for the manager: every verified webhook group becomes
+// an active operational point. Existing point details and shift templates are
+// preserved; only records that are missing are filled with safe defaults.
+export async function activateAllLinePoints(actor: string) {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow().iso;
+  const registryResult = await db.prepare("SELECT r.id, r.group_name, r.picture_url, m.site_id, s.customer_name, s.active AS site_active FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id LEFT JOIN operational_sites s ON s.id = m.site_id WHERE r.source = 'webhook' ORDER BY r.group_name").all<D1Row>();
+  const groups = registryResult.results ?? [];
+  let activated = 0;
+  let alreadyActive = 0;
+  let initialized = 0;
+  let skipped = 0;
+  const operations: ReturnType<typeof db.prepare>[] = [];
+  const defaultCustomer = "ยังไม่ระบุลูกค้า";
+  for (const row of groups) {
+    const groupId = String(row.id ?? "").trim();
+    const groupName = String(row.group_name ?? "").trim();
+    if (!groupId || !groupName || isPlaceholderLineGroupName(groupName, groupId)) {
+      skipped += 1;
+      continue;
+    }
+    const siteId = String(row.site_id ?? linePointSiteIdentifier(groupId));
+    const existingCustomer = String(row.customer_name ?? "").trim();
+    const customerName = existingCustomer && existingCustomer !== defaultCustomer ? existingCustomer : defaultCustomer;
+    const wasActive = Number(row.site_active ?? 0) === 1;
+    if (wasActive) alreadyActive += 1;
+    else activated += 1;
+    operations.push(
+      db.prepare("INSERT INTO operational_sites (id, site_name, customer_name, active, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET site_name = excluded.site_name, customer_name = CASE WHEN operational_sites.customer_name IS NULL OR operational_sites.customer_name = '' OR operational_sites.customer_name = ? THEN excluded.customer_name ELSE operational_sites.customer_name END, active = 1, updated_at = excluded.updated_at")
+        .bind(siteId, groupName, customerName, now, now, defaultCustomer),
+      db.prepare("INSERT INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET site_id = excluded.site_id, group_name = excluded.group_name, picture_url = COALESCE(excluded.picture_url, line_groups.picture_url), updated_at = excluded.updated_at")
+        .bind(groupId, siteId, groupName, value(row, "picture_url"), now),
+    );
+    const existingTemplates = await db.prepare("SELECT wave FROM shift_templates WHERE site_id = ? AND active = 1").bind(siteId).all<D1Row>();
+    const waves = new Set((existingTemplates.results ?? []).map((template) => String(template.wave)));
+    if (!waves.has("morning")) {
+      initialized += 1;
+      operations.push(db.prepare("INSERT INTO shift_templates (id, site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, active, updated_at) VALUES (?, ?, 'morning', 'จุดประจำ', 'ช่อง 1', NULL, '06:00', 'standard', 1, ?) ON CONFLICT(id) DO UPDATE SET active = 1, deadline = '06:00', updated_at = excluded.updated_at")
+        .bind(templateIdentifier(siteId, "morning", "จุดประจำ", "ช่อง 1"), now));
+    }
+    if (!waves.has("evening")) {
+      initialized += 1;
+      operations.push(db.prepare("INSERT INTO shift_templates (id, site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, active, updated_at) VALUES (?, ?, 'evening', 'จุดประจำ', 'ช่อง 1', NULL, '18:00', 'standard', 1, ?) ON CONFLICT(id) DO UPDATE SET active = 1, deadline = '18:00', updated_at = excluded.updated_at")
+        .bind(templateIdentifier(siteId, "evening", "จุดประจำ", "ช่อง 1"), now));
+    }
+    const existingConfig = await db.prepare("SELECT value FROM system_settings WHERE key = ?").bind(`line_report_config:${groupId}`).first<D1Row>();
+    const reportConfig = safeLineReportConfig(existingConfig ? value(existingConfig, "value") : null);
+    operations.push(db.prepare("INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+      .bind(`line_report_config:${groupId}`, JSON.stringify({ ...reportConfig, enabled: true }), now));
+  }
+  for (let offset = 0; offset < operations.length; offset += 80) {
+    await db.batch(operations.slice(offset, offset + 80));
+  }
+  const generated = await generateTodayFromTemplates(actor);
+  await addAudit("line_point", "bulk", "enabled", actor, `เปิดใช้งานกลุ่ม LINE จาก webhook ${activated + alreadyActive} จุด · เติมกะ ${initialized} รายการ · ข้าม ${skipped} กลุ่ม`);
+  return { activated, alreadyActive, initialized, skipped, generated: generated.created, total: activated + alreadyActive };
+}
+
 export async function unmapLineGroup(groupId: string, actor: string) {
   await ensureDatabase();
   const id = groupId.trim();

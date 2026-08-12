@@ -1509,6 +1509,10 @@ button:disabled {
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 16px;
 }
+.line-hero-actions { display: grid; gap: 8px; margin-top: 12px; }
+.line-hero-actions button { width: 100%; }
+.line-activate-all { background: #f7b955; color: #271b06; border-color: #f7b955; }
+.line-activate-all:hover { background: #ffd27d; border-color: #ffd27d; }
 
 .line-ready { background: rgba(35, 164, 110, 0.24); }
 .line-stale { background: rgba(240, 190, 60, 0.22); }

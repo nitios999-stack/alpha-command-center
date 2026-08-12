@@ -730,6 +730,15 @@ export default function Home() {
     void runAction({ type: "line_gateway_sync" }, "line-gateway-sync", "ซิงค์ทะเบียนกลุ่มจาก LINE OA แล้ว");
   };
 
+  const activateAllLinePoints = () => {
+    if (!window.confirm("เปิดใช้งานทุกกลุ่ม LINE ที่ webhook ยืนยันแล้วเป็นจุดตรวจทันทีใช่หรือไม่? จุดที่ไม่ใช้สามารถปิดหรือลบภายหลังได้")) return;
+    void runAction(
+      { type: "line_points_activate_all" },
+      "line-points-activate-all",
+      "เปิดใช้งานทุกจุดจากกลุ่ม LINE แล้ว — จุดที่ไม่ใช้ปิดหรือลบได้ภายหลัง",
+    );
+  };
+
   const deleteLineRegistryGroup = (group: LineGroup) => {
     if (group.siteId) {
       setMessage("กลุ่มนี้ยังผูกกับจุดอยู่ กรุณายกเลิกการผูกก่อนลบ");
@@ -1428,7 +1437,10 @@ export default function Home() {
             <div className={data?.lineIntegration.webhookStatus === "healthy" ? "line-ready" : data?.lineIntegration.webhookStatus === "stale" ? "line-stale" : "line-not-ready"}>
               <strong>{data?.lineIntegration.webhookStatus === "healthy" ? "รับ LINE webhook แล้ว" : data?.lineIntegration.webhookStatus === "stale" ? "Webhook เงียบเกิน 24 ชั่วโมง" : data?.lineIntegration.configured ? "รอ webhook จากกลุ่ม" : "กำลังเชื่อมต่อ LINE OA"}</strong>
               <span>Webhook: {data?.lineIntegration.webhookPath ?? "/api/line/webhook"}{data?.lineIntegration.webhookAgeMinutes !== null && data?.lineIntegration.webhookAgeMinutes !== undefined ? ` · ล่าสุด ${data.lineIntegration.webhookAgeMinutes} นาทีที่แล้ว` : ""}</span>
-              <button className="small-secondary line-sync-button" disabled={!data?.lineIntegration.gatewayConfigured || busyId === "line-gateway-sync"} onClick={syncLineGroups}>{busyId === "line-gateway-sync" ? "กำลังซิงค์…" : "ซิงค์ทะเบียน LINE"}</button>
+              <div className="line-hero-actions">
+                <button className="small-secondary line-sync-button" disabled={!data?.lineIntegration.gatewayConfigured || busyId === "line-gateway-sync"} onClick={syncLineGroups}>{busyId === "line-gateway-sync" ? "กำลังซิงค์…" : "ซิงค์ทะเบียน LINE"}</button>
+                <button className="small-primary line-activate-all" disabled={!data?.lineIntegration.receivedGroups || busyId === "line-points-activate-all"} onClick={activateAllLinePoints}>{busyId === "line-points-activate-all" ? "กำลังเปิดทุกจุด…" : "เปิดใช้งานทุกจุด (ด่วน)"}</button>
+              </div>
             </div>
           </div>
 
