@@ -2426,6 +2426,10 @@ select:focus-visible {
 .line-overview-card.gray .line-overview-meta b { color: #687672; }
 .line-overview-meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .line-overview-empty { grid-column: 1 / -1; margin: 5px; color: var(--muted); font-size: 0.8rem; text-align: center; }
+.line-overview-empty-state { display: grid; justify-items: center; gap: 5px; padding: 22px 12px; }
+.line-overview-empty-state strong { color: #345c4b; font-size: 0.86rem; }
+.line-overview-empty-state span { max-width: 520px; color: #7a8982; font-size: 0.68rem; line-height: 1.5; }
+.line-overview-empty-state .small-secondary { margin-top: 5px; }
 
 .report-quick-stats {
   display: grid;

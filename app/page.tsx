@@ -352,8 +352,8 @@ function clientTime(value: number | null) {
 
 const DEFAULT_LINE_REPORT_CONFIG: LineReportConfig = {
   enabled: true,
-  morningTimes: ["06:00", "06:30", "07:15"],
-  eveningTimes: ["17:30", "18:00", "19:00"],
+  morningTimes: ["06:00", "07:00", "08:00"],
+  eveningTimes: ["17:00", "18:00", "19:00"],
 };
 
 function lineReportConfigFor(groupId: string, configs: Record<string, LineReportConfig> | undefined) {
@@ -1176,8 +1176,8 @@ export default function Home() {
             {scheduleGroupId ? (
               <div className="shift-config-editor">
                 <label className="shift-config-toggle"><input type="checkbox" checked={scheduleConfig.enabled} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, enabled: event.target.checked } })} /> นับจุดนี้ในการตรวจรายงาน</label>
-                <label className="shift-config-row"><span>กะเช้า</span><input type="text" value={scheduleConfig.morningTimes.join(", ")} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, morningTimes: parseTimeList(event.target.value) } })} placeholder="06:00, 06:30, 07:15" /><small>05:30–08:20</small></label>
-                <label className="shift-config-row"><span>กะเย็น</span><input type="text" value={scheduleConfig.eveningTimes.join(", ")} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, eveningTimes: parseTimeList(event.target.value) } })} placeholder="17:30, 18:00, 19:00" /><small>17:00–20:00</small></label>
+                <label className="shift-config-row"><span>กะเช้า</span><input type="text" value={scheduleConfig.morningTimes.join(", ")} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, morningTimes: parseTimeList(event.target.value) } })} placeholder="06:00, 07:00, 08:00" /><small>05:30–08:20 · ค่าเริ่มต้นรายชั่วโมง</small></label>
+                <label className="shift-config-row"><span>กะเย็น</span><input type="text" value={scheduleConfig.eveningTimes.join(", ")} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, eveningTimes: parseTimeList(event.target.value) } })} placeholder="17:00, 18:00, 19:00" /><small>17:00–20:00 · ค่าเริ่มต้นรายชั่วโมง</small></label>
                 <button className="small-secondary" onClick={saveReportSchedule} disabled={busyId === "line-report-config"}>{busyId === "line-report-config" ? "กำลังบันทึก…" : "บันทึกเวลาจุดนี้"}</button>
               </div>
             ) : <p className="shift-config-empty">ยังไม่มีจุดที่ผูกกลุ่ม LINE และเปิดใช้งานให้ตั้งค่า</p>}
@@ -1250,7 +1250,13 @@ export default function Home() {
                   </button>
                 );
               })}
-              {!reportVisibleGroups.length && <p className="line-overview-empty">ไม่พบกลุ่มตามตัวกรองนี้ ลองล้างคำค้นหรือเลือก “กลุ่มทั้งหมด”</p>}
+              {!reportVisibleGroups.length && (
+                <div className="line-overview-empty line-overview-empty-state">
+                  <strong>{trackedLineGroups.length ? "ไม่พบจุดตามตัวกรองนี้" : "ยังไม่มีจุดที่เปิดติดตาม"}</strong>
+                  <span>{trackedLineGroups.length ? "ลองล้างคำค้นหรือเลือกตัวกรองใหม่" : "ไปที่ LINE OA เพื่อผูกกลุ่มเข้ากับจุดปฏิบัติการ แล้วจุดนั้นจะเข้ามานับอัตโนมัติ"}</span>
+                  {!trackedLineGroups.length && <button className="small-secondary" onClick={() => setTab("line")}>ไปจัดการ LINE OA</button>}
+                </div>
+              )}
             </div>
           </section>
         </section>

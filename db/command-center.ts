@@ -74,8 +74,8 @@ export type LineReportConfig = {
 
 const DEFAULT_LINE_REPORT_CONFIG: LineReportConfig = {
   enabled: true,
-  morningTimes: ["06:00", "06:30", "07:15"],
-  eveningTimes: ["17:30", "18:00", "19:00"],
+  morningTimes: ["06:00", "07:00", "08:00"],
+  eveningTimes: ["17:00", "18:00", "19:00"],
 };
 
 export type TemplateImportRow = {
