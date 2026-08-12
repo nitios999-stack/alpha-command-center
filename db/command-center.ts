@@ -737,7 +737,7 @@ export async function setupLinePoint(input: LinePointSetupInput) {
   const active = input.active !== false;
   const now = bangkokNow().iso;
   const existingConfig = await db.prepare("SELECT value FROM system_settings WHERE key = ?").bind(`line_report_config:${groupId}`).first<D1Row>();
-  const reportConfig = safeLineReportConfig(value(existingConfig, "value"));
+  const reportConfig = safeLineReportConfig(existingConfig ? value(existingConfig, "value") : null);
   const operations = [
     db.prepare("INSERT INTO operational_sites (id, site_name, customer_name, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET site_name = excluded.site_name, customer_name = excluded.customer_name, active = excluded.active, updated_at = excluded.updated_at")
       .bind(siteId, groupName, customerName, active ? 1 : 0, now, now),
