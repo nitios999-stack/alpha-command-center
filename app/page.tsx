@@ -1434,8 +1434,8 @@ export default function Home() {
 
           <section className="line-kpis">
             <article><span>กลุ่มในทะเบียน</span><strong>{data?.lineIntegration.receivedGroups ?? 0}</strong><small>พบจาก webhook หรือเพิ่มด้วยผู้จัดการ</small></article>
-            <article><span>ผูกกับจุดแล้ว</span><strong>{data?.lineIntegration.mappedGroups ?? 0}</strong><small>กลุ่มละ 1 จุด เพื่อไม่ให้สับสน</small></article>
-            <article><span>ยังไม่ผูกจุด</span><strong>{Math.max(0, (data?.lineIntegration.receivedGroups ?? 0) - (data?.lineIntegration.mappedGroups ?? 0))}</strong><small>เลือกจุดจากตารางด้านล่าง</small></article>
+            <article><span>พร้อมตรวจแล้ว</span><strong>{data?.lineIntegration.mappedGroups ?? 0}</strong><small>เปิดใช้งานอยู่ในภาพรวม</small></article>
+            <article><span>รอเปิดใช้ / ตั้งค่า</span><strong>{Math.max(0, (data?.lineIntegration.receivedGroups ?? 0) - (data?.lineIntegration.mappedGroups ?? 0))}</strong><small>เติมข้อมูลจากบัตรกลุ่มด้านล่าง</small></article>
           </section>
 
           <section className="line-safety-note">
