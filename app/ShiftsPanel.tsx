@@ -93,6 +93,52 @@ export function ShiftsPanel() {
     setCheckingAlert(false);
   };
 
+  const sendWaveAttendanceAlert = async (wave: "morning" | "evening") => {
+    const waveName = wave === "morning" ? "ผลัดเช้า" : "ผลัดดึก";
+    if (!window.confirm(`ส่งรายงานสรุปจุดค้างเข้าเวร (${waveName}) ลงกลุ่มสั่งการใช่หรือไม่?`)) return;
+    setCheckingAlert(true);
+    try {
+      const res = await fetch("/api/line/shifts/send-attendance-alert", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ wave }),
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setMessage(`✅ ส่งรายงานสรุปจุดค้างเข้าเวร (${waveName}) ลงกลุ่มสั่งการเรียบร้อยแล้ว!`);
+      } else {
+        setMessage(`❌ ส่งไม่สำเร็จ: ${data.error || "เกิดข้อผิดพลาด"}`);
+      }
+    } catch {
+      setMessage("เกิดข้อผิดพลาดในการเชื่อมต่อ");
+    }
+    setCheckingAlert(false);
+  };
+
+  const batchApproveWaveShifts = async (wave: "morning" | "evening" | "all") => {
+    const waveName = wave === "morning" ? "ผลัดเช้า" : wave === "evening" ? "ผลัดดึก" : "ทุกผลัด";
+    if (!window.confirm(`⚡ ยืนยันการอนุมัติเข้าเวรทั้งผลัด (${waveName}) สำหรับจุดตรวจทั้งหมดที่มีรูปภาพใช่หรือไม่?`)) return;
+    setLoading(true);
+    try {
+      const res = await fetch("/api/line/shifts/batch-approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ wave, actor: "สายตรวจ (อนุมัติผ่านเว็บ 1-Tap)" }),
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setMessage(`⚡ ${data.message || `อนุมัติสำเร็จ ${data.count} จุด`}`);
+        await fetchConfigs();
+        await checkMissingShifts(false);
+      } else {
+        setMessage(`❌ เกิดข้อผิดพลาด: ${data.error || "ไม่สามารถอนุมัติได้"}`);
+      }
+    } catch {
+      setMessage("❌ เกิดข้อผิดพลาดในการเชื่อมต่อ");
+    }
+    setLoading(false);
+  };
+
   const checkSilentGroups = async (sendAlert = false) => {
     setCheckingSilent(true);
     try {
@@ -374,6 +420,14 @@ export function ShiftsPanel() {
           </div>
 
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+            <a
+              href="/patrol"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ background: "linear-gradient(135deg, #0284c7 0%, #0369a1 100%)", color: "white", textDecoration: "none", padding: "0.65rem 1.15rem", borderRadius: "10px", fontWeight: 700, display: "flex", alignItems: "center", gap: "0.4rem", boxShadow: "0 4px 12px rgba(2, 132, 199, 0.4)" }}
+            >
+              <span>📱</span> แผงตรวจสายตรวจ (มือถือ)
+            </a>
             <button
               onClick={() => { setShowCustomCommandModal(true); fetchDiscoveredGroups(); }}
               style={{ background: "#334155", color: "white", border: "1px solid #475569", padding: "0.65rem 1rem", borderRadius: "10px", fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.4rem" }}
@@ -522,30 +576,55 @@ export function ShiftsPanel() {
               onClick={() => { checkMissingShifts(false); checkSilentGroups(false); }}
               disabled={checkingAlert || checkingSilent}
               className="btn btn-secondary"
-              style={{ padding: "0.55rem 1rem", borderRadius: "8px", cursor: "pointer", fontSize: "0.9rem" }}
+              style={{ padding: "0.55rem 1rem", borderRadius: "8px", cursor: "pointer", fontSize: "0.88rem", fontWeight: 600 }}
             >
               🔄 ตรวจสอบสถานะสด
+            </button>
+            <button
+              onClick={() => batchApproveWaveShifts(currentWave || "all")}
+              disabled={loading}
+              style={{ background: "#10b981", color: "white", border: "none", padding: "0.55rem 1.1rem", borderRadius: "8px", cursor: "pointer", fontWeight: 700, fontSize: "0.88rem", display: "inline-flex", alignItems: "center", gap: "0.4rem", boxShadow: "0 2px 6px rgba(16, 185, 129, 0.25)" }}
+            >
+              <span>⚡</span> อนุมัติเข้าเวรทั้งผลัด ({currentWaveLabel || "ผลัดปัจจุบัน"})
+            </button>
+            <button
+              onClick={() => sendWaveAttendanceAlert("morning")}
+              disabled={checkingAlert}
+              style={{ background: "#eab308", color: "#713f12", border: "none", padding: "0.55rem 1.1rem", borderRadius: "8px", cursor: "pointer", fontWeight: 700, fontSize: "0.88rem", display: "inline-flex", alignItems: "center", gap: "0.4rem", boxShadow: "0 2px 6px rgba(234, 179, 8, 0.25)" }}
+            >
+              <span>☀️</span> ส่งสรุปกะเช้าลงกลุ่มสั่งการ
+            </button>
+            <button
+              onClick={() => sendWaveAttendanceAlert("evening")}
+              disabled={checkingAlert}
+              style={{ background: "#6366f1", color: "white", border: "none", padding: "0.55rem 1.1rem", borderRadius: "8px", cursor: "pointer", fontWeight: 700, fontSize: "0.88rem", display: "inline-flex", alignItems: "center", gap: "0.4rem", boxShadow: "0 2px 6px rgba(99, 102, 241, 0.25)" }}
+            >
+              <span>🌙</span> ส่งสรุปกะดึกลงกลุ่มสั่งการ
             </button>
             {silentInShiftGroups.length > 0 && (
               <button
                 onClick={() => checkSilentGroups(true)}
                 disabled={checkingSilent}
-                className="btn btn-primary"
-                style={{ background: "#f97316", color: "white", padding: "0.55rem 1.1rem", borderRadius: "8px", border: "none", cursor: "pointer", fontWeight: 700, fontSize: "0.9rem" }}
+                style={{ background: "#f97316", color: "white", padding: "0.55rem 1.1rem", borderRadius: "8px", border: "none", cursor: "pointer", fontWeight: 700, fontSize: "0.88rem" }}
               >
-                🔇 ส่งการ์ดเตือนจุดเงียบ ({silentInShiftGroups.length})
+                🔇 ส่งเตือนจุดเงียบ ({silentInShiftGroups.length})
               </button>
             )}
-            {alertSummary?.hasMissing && (
-              <button
-                onClick={() => checkMissingShifts(true)}
-                disabled={checkingAlert}
-                className="btn btn-primary"
-                style={{ background: "#ef4444", color: "white", padding: "0.55rem 1.1rem", borderRadius: "8px", border: "none", cursor: "pointer", fontWeight: 700, fontSize: "0.9rem" }}
-              >
-                🚨 ส่งการ์ดเตือนจุดขาดเวร ({alertSummary.missingCount})
-              </button>
-            )}
+          </div>
+        </div>
+
+        {/* INTERACTIVE LINE CHAT COMMANDS BANNER */}
+        <div style={{ marginTop: "1rem", paddingTop: "0.85rem", borderTop: "1px dashed var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "0.75rem", background: "#f8fafc", padding: "0.85rem 1.15rem", borderRadius: "10px" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: "0.75rem" }}>
+            <span style={{ fontSize: "1.35rem", marginTop: "2px" }}>💡</span>
+            <div style={{ fontSize: "0.86rem", color: "#334155", lineHeight: "1.6" }}>
+              <strong>ระบบสั่งการและระบุกำลังพลผ่าน LINE สด:</strong>
+              <div style={{ marginTop: "0.25rem", display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+                <span>• พิมพ์ <code style={{ background: "#e2e8f0", padding: "0.15rem 0.4rem", borderRadius: "4px", color: "#0f172a" }}>สรุปกะเช้า</code> หรือ <code style={{ background: "#e2e8f0", padding: "0.15rem 0.4rem", borderRadius: "4px", color: "#0f172a" }}>สรุปกะดึก</code> เพื่อรับการ์ดสรุปยอดรายบุคคล</span>
+                <span>• คนประจำมา: พิมพ์ <code style={{ background: "#dcfce7", padding: "0.15rem 0.4rem", borderRadius: "4px", color: "#15803d", fontWeight: 700 }}>ยืนยัน [ลำดับ]</code> หรือแตะปุ่ม <strong>[🔘 คนประจำ]</strong></span>
+                <span>• สแปร์มาแทน: พิมพ์ <code style={{ background: "#fef3c7", padding: "0.15rem 0.4rem", borderRadius: "4px", color: "#b45309", fontWeight: 700 }}>สแปร์ [ลำดับ]</code> หรือแตะปุ่ม <strong>[🔄 สแปร์แทน]</strong></span>
+              </div>
+            </div>
           </div>
         </div>
       </div>

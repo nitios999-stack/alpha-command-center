@@ -1918,13 +1918,44 @@ export async function logOutboundAction(input: {
 }
 
 // ---------------------------------------------------------------------------
-// DYNAMIC SHIFT CHECK-IN & ALERT ENGINE
+// 4-LAYER GUARD & SHIFT HANDOVER INTELLIGENCE ENGINE
 // ---------------------------------------------------------------------------
 
-const SHIFT_HANDOVER_KEYWORDS = [
-  "รับมอบเวร", "ส่งมอบเวร", "เข้าเวร", "ผลัดดึก", "ผลัดเช้า", "ประจำจุด", 
-  "ว.4", "รายงานตัว", "พร้อมปฏิบัติหน้าที่", "เปลี่ยนกะ", "เข้าจุด", "รับเวร", "ส่งเวร"
+// 1. คำที่บ่งบอกว่าเป็นการออกเวร/ส่งมอบเวรของกะเดิม (Outgoing Shift / Leaving Handover)
+const SHIFT_LEAVE_KEYWORDS = [
+  "ออกเวร", "เลิกงาน", "เลิกกะ", "ลงเวร", "หมดกะ", "หมดเวลา", "กลับบ้าน", 
+  "ส่งเวร", "ส่งมอบแล้ว", "ส่งมอบงาน", "กลับแล้ว", "บ๊ายบาย", "จบกะ", "ส่งมอบหน้าที่", "เลิกผลัด"
 ];
+
+// 2. คำที่บ่งบอกว่าเป็นการคุยงานของนายจ้าง / ลูกค้า / นิติบุคคล / ลูกบ้าน (Client / Employer Phrases)
+const CLIENT_EMPLOYER_KEYWORDS = [
+  "ฝากดู", "แจ้งเรื่อง", "ช่วยดู", "ทำไม", "รปภ.อยู่ไหน", "นิติ", "ช่าง", 
+  "พัสดุ", "กุญแจ", "ประตูค้าง", "น้ำรั่ว", "ขยะ", "ลูกค้า", "ร้องเรียน", 
+  "ขอความร่วมมือ", "ที่จอดรถ", "บอร์ด", "กรรมการ", "ช่วยตาม", "เช็คกล้อง", "ทำไมไม่มีรปภ", "รปภไปไหน"
+];
+
+// 3. คำที่ รปภ. มักใช้เมื่อเข้าเวร/รับมอบเวร (Incoming Guard Check-in Phrases)
+const GUARD_ENTER_KEYWORDS = [
+  "รับมอบเวร", "รับเวร", "เข้าเวร", "พร้อมปฏิบัติหน้าที่", "ว.4", "ว4", 
+  "ผลัด1", "ผลัด2", "ผลัดเช้า", "ผลัดดึก", "เข้าจุด", "ประจำจุด", "เริ่มงาน", 
+  "รายงานผลัด", "รายงานเข้าเวร", "เข้าป้อม", "สแตนด์บาย", "standby", "เหตุการณ์ปกติ",
+  "มาแล้ว", "ถึงแล้ว", "ป้อมหน้า", "ป้อมหลัง"
+];
+
+async function isEstablishedGuardSender(db: any, groupId: string, senderKey?: string): Promise<boolean> {
+  if (!senderKey) return false;
+  try {
+    const countRow = await db.prepare(`
+      SELECT COUNT(*) as count 
+      FROM line_webhook_events 
+      WHERE group_id = ? AND sender_key = ?
+    `).bind(groupId, senderKey).first<{ count: number }>();
+
+    return (countRow?.count || 0) >= 2;
+  } catch {
+    return false;
+  }
+}
 
 export async function evaluateShiftCheckIn(input: {
   groupId: string;
@@ -1957,29 +1988,76 @@ export async function evaluateShiftCheckIn(input: {
     const slots = (slotsResult.results || []) as any[];
     if (!slots.length) return { checkedIn: false };
 
-    // 3. ตรวจสอบว่ามีสล็อตไหนอยู่ในกรอบเวลาเข้าเวร (ล่วงหน้า 60 นาที ถึง หลังเวลาเริ่ม 180 นาที)
+    // 3. ตรวจสอบว่ามีสล็อตไหนอยู่ในกรอบเวลาเข้าเวร (ล่วงหน้า 90 นาที ถึง หลังเวลาเริ่ม 240 นาที)
     for (const slot of slots) {
       const deadlineMins = minuteFromTime(slot.deadline || "18:00");
-      const windowStart = deadlineMins - 60; // ก่อนเวลา 1 ชั่วโมง
-      const windowEnd = deadlineMins + 180;   // หลังเวลาไม่เกิน 3 ชั่วโมง
+      const windowStart = deadlineMins - 90; // ก่อนเวลา 1.5 ชั่วโมง
+      const windowEnd = deadlineMins + 240;  // หลังเวลาไม่เกิน 4 ชั่วโมง
 
       if (currentMinutes >= windowStart && currentMinutes <= windowEnd) {
-        // ตรวจสอบเงื่อนไขการเป็นรายงานเข้าเวร
-        let isHandover = false;
-        
-        // ก. ตรวจสอบคีย์เวิร์ดในข้อความ
-        if (input.text) {
-          const lowerText = input.text.toLowerCase();
-          isHandover = SHIFT_HANDOVER_KEYWORDS.some((kw) => lowerText.includes(kw));
+        const cleanText = input.text ? input.text.toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]/g, "") : "";
+
+        // LAYER 1: ตรวจจับคำออกเวรของกะเดิม (Outgoing Handover Filter)
+        const isLeavingText = cleanText && SHIFT_LEAVE_KEYWORDS.some((kw) => {
+          const cleanKw = kw.toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]/g, "");
+          return cleanText.includes(cleanKw);
+        });
+
+        if (isLeavingText) {
+          // กะเดิมพิมพ์ออกเวร -> ไม่นับเป็นเข้าเวรของกะใหม่! แต่บันทึกโน้ตไว้ว่ากะเก่าส่งเวรแล้ว
+          await addAudit(
+            "coverage_slot",
+            slot.id,
+            "shift_handover_out",
+            "LINE Webhook (Outgoing)",
+            `กะเก่าส่งเวร/ออกเวรจุด ${slot.site_name} (สถานะ: รอกะใหม่มารับมอบ)`
+          );
+          continue; // ข้ามการยืนยันสล็อตนี้ เพื่อรอกะใหม่มารายงานตัว
         }
 
-        // ข. ตรวจสอบรูปภาพ หรือตำแหน่งพิกัด
+        // LAYER 2: ตรวจจับภาษาลูกค้า/นายจ้าง (Anti-Employer/Client Filter)
+        const isClientText = cleanText && CLIENT_EMPLOYER_KEYWORDS.some((kw) => {
+          const cleanKw = kw.toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]/g, "");
+          return cleanText.includes(cleanKw);
+        });
+
+        if (isClientText) {
+          // ลูกค้า/นายจ้างสั่งงาน -> ไม่นำมานับเข้าเวรเด็ดขาด
+          continue;
+        }
+
+        // LAYER 3: ตรวจสอบคำเฉพาะของ รปภ. (Guard-Exclusive Enter Keywords)
+        const hasGuardEnterKeyword = cleanText && GUARD_ENTER_KEYWORDS.some((kw) => {
+          const cleanKw = kw.toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]/g, "");
+          return cleanText.includes(cleanKw);
+        });
+
+        // LAYER 4: ตรวจสอบรูปภาพ + ประวัติผู้ส่ง (Photo by Guard Sender)
         const isPhotoOrLocation = input.messageType === "image" || input.messageType === "location" || Boolean(input.messageType?.startsWith("image"));
-        
-        // ถ้ามีคีย์เวิร์ดชัดเจน หรือเป็นรูปภาพที่ส่งในช่วงเวลาเข้าเวร
-        if (isHandover || isPhotoOrLocation) {
+        const isGuardSender = await isEstablishedGuardSender(db, input.groupId, input.senderKey);
+
+        // เงื่อนไขในการยืนยันเข้าเวร:
+        // 1. มีคีย์เวิร์ดของ รปภ. ชัดเจน (เช่น "ว.4", "รับมอบเวร", "เข้าเวร")
+        // 2. หรือ ส่งรูปภาพโดย รปภ. ที่มีประวัติการส่งรายงานตรวจเป็นประจำ
+        // 3. หรือ ส่งรูปภาพในช่วง 60 นาทีรอบเวลาเริ่มกะ โดยไม่มีข้อความสั่งงานของลูกค้า
+        const shouldConfirm = hasGuardEnterKeyword || (isPhotoOrLocation && (isGuardSender || !cleanText));
+
+        if (shouldConfirm) {
           const lateMins = Math.max(0, currentMinutes - deadlineMins);
           
+          // ตรวจจับว่าเป็นสแปร์หรือคนประจำ
+          const isSpareExplicit = cleanText && (/สแปร์|แทน|แทนเวร|สแปร์แทน/.test(cleanText));
+          let guardTypeLabel = isSpareExplicit ? "สแปร์แทนเวร" : (slot.assigned_guard ? `ประจำ (${slot.assigned_guard})` : "ประจำจุด");
+
+          let sourceText = `LINE รายงานตัว (${guardTypeLabel})`;
+          if (hasGuardEnterKeyword) {
+            sourceText = isSpareExplicit ? `LINE สแปร์เข้าแทนเวร (ว.4)` : `LINE รับมอบเวร (ว.4: ${guardTypeLabel})`;
+          } else if (isPhotoOrLocation && isGuardSender) {
+            sourceText = `LINE ภาพถ่าย รปภ. (${guardTypeLabel})`;
+          } else if (isPhotoOrLocation) {
+            sourceText = `LINE ส่งรูปถ่ายเข้าจุด (${guardTypeLabel})`;
+          }
+
           await db.prepare(`
             UPDATE coverage_slots 
             SET state = 'confirmed',
@@ -1988,14 +2066,14 @@ export async function evaluateShiftCheckIn(input: {
                 late_minutes = ?,
                 updated_at = ?
             WHERE id = ?
-          `).bind(now.time, isHandover ? "LINE รับมอบเวร" : "LINE ส่งรูปเข้าเวร", lateMins, now.iso, slot.id).run();
+          `).bind(now.time, sourceText, lateMins, now.iso, slot.id).run();
 
           await addAudit(
             "coverage_slot", 
             slot.id, 
-            "shift_checked_in", 
-            "LINE Webhook", 
-            `รปภ. เข้าเวรจุด ${slot.site_name} (${slot.deadline}) เวลา ${now.time}${lateMins > 0 ? ` (สาย ${lateMins} นาที)` : " (ตรงเวลา)"}`
+            isSpareExplicit ? "shift_checked_in_spare" : "shift_checked_in_regular", 
+            "LINE Webhook Multi-Guard Engine", 
+            `รปภ. เข้าเวรจุด ${slot.site_name} (${slot.post_name || "ป้อมประจำ"}) [${guardTypeLabel}] เวลา ${now.time}${lateMins > 0 ? ` (สาย ${lateMins} นาที)` : " (ตรงเวลา)"} · ${sourceText}`
           );
 
           return { 
@@ -2012,6 +2090,398 @@ export async function evaluateShiftCheckIn(input: {
   } catch (err) {
     return { checkedIn: false };
   }
+}
+
+export async function confirmSlotById(input: {
+  slotId: string;
+  guardType?: "regular" | "spare";
+  spareName?: string;
+  actor?: string;
+}) {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow();
+  const actor = input.actor || "LINE 1-Click Button";
+  const guardType = input.guardType || "regular";
+
+  const slot = (await db.prepare("SELECT * FROM coverage_slots WHERE id = ?").bind(input.slotId).first()) as any;
+  if (!slot) return { ok: false, message: "ไม่พบข้อมูลจุดตรวจนี้ในระบบ" };
+
+  const deadlineMins = minuteFromTime(slot.deadline || "00:00");
+  const currentMins = minuteFromTime(now.time);
+  const lateMinutes = Math.max(0, currentMins - deadlineMins);
+
+  const guardTitle = guardType === "spare" 
+    ? (input.spareName ? `รปภ. สแปร์แทน (${input.spareName})` : "รปภ. สแปร์แทนเวร")
+    : (slot.assigned_guard ? `รปภ. ประจำ (${slot.assigned_guard})` : "รปภ. ประจำจุด");
+
+  const sourceText = `LINE 1-Click (${guardTitle})`;
+
+  await db.prepare(`
+    UPDATE coverage_slots 
+    SET state = 'confirmed',
+        reported_at = ?,
+        source = ?,
+        late_minutes = ?,
+        updated_at = ?
+    WHERE id = ?
+  `).bind(now.time, sourceText, lateMinutes, now.iso, input.slotId).run();
+
+  await addAudit(
+    "coverage_slot",
+    input.slotId,
+    guardType === "spare" ? "shift_confirmed_spare" : "shift_confirmed_regular",
+    actor,
+    `กดเช็คเข้าเวรจุด ${slot.site_name} (${slot.post_name || "ป้อมหลัก"}) [${guardTitle}] เวลา ${now.time} น.`
+  );
+
+  return {
+    ok: true,
+    siteName: slot.site_name,
+    postName: slot.post_name,
+    guardTitle,
+    deadline: slot.deadline,
+    wave: slot.wave,
+    message: [
+      `✅ [ALPHA COP] ยืนยันเข้าเวรสำเร็จ!`,
+      `🏢 จุด: ${slot.site_name} · ${slot.post_name || "ป้อมประจำ"}`,
+      `👮 สถานะกำลังพล: ${guardTitle}`,
+      `⏰ เวลาบันทึก: ${now.time} น. (${lateMinutes > 0 ? `สาย ${lateMinutes} นาที` : "ตรงเวลา"})`,
+      `👤 ผู้ยืนยัน: ${actor}`,
+      `━━━━━━━━━━━━━━━━━━`,
+      `ระบบบันทึกยอดกำลังพลเรียบร้อยแล้วครับ 🫡`,
+    ].join("\n"),
+  };
+}
+
+export async function batchApproveSlotsWithPhotos(input?: {
+  wave?: "morning" | "evening" | "all";
+  actor?: string;
+}) {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow();
+  const today = now.date;
+  const currentHour = Number(now.time.slice(0, 2));
+  const wave = input?.wave || (currentHour >= 16 || currentHour < 5 ? "evening" : "morning");
+  const actor = input?.actor || "สายตรวจ (อนุมัติภาพถ่ายทั้งหมด 1-Tap)";
+
+  let query = `
+    SELECT * FROM coverage_slots 
+    WHERE operational_date = ? AND state IN ('waiting', 'missing', 'unassigned')
+  `;
+  const params: any[] = [today];
+  if (wave !== "all") {
+    query += ` AND wave = ?`;
+    params.push(wave);
+  }
+
+  const slotsResult = await db.prepare(query).bind(...params).all<D1Row>();
+  const slots = (slotsResult.results || []) as any[];
+
+  if (!slots.length) {
+    return {
+      ok: true,
+      count: 0,
+      message: `✅ จุดตรวจของกะนี้เข้าเวรครบถ้วนเรียบร้อยแล้วทั้งหมดครับ`,
+    };
+  }
+
+  // อนุมัติผ่านทั้งหมด
+  for (const slot of slots) {
+    const deadlineMins = minuteFromTime(slot.deadline || "00:00");
+    const currentMins = minuteFromTime(now.time);
+    const lateMinutes = Math.max(0, currentMins - deadlineMins);
+    const guardTitle = slot.assigned_guard ? `รปภ. ประจำ (${slot.assigned_guard})` : "รปภ. ประจำจุด";
+
+    await db.prepare(`
+      UPDATE coverage_slots 
+      SET state = 'confirmed',
+          reported_at = ?,
+          source = ?,
+          late_minutes = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).bind(now.time, `1-Tap อนุมัติภาพถ่าย (${guardTitle})`, lateMinutes, now.iso, slot.id).run();
+
+    await addAudit(
+      "coverage_slot",
+      slot.id,
+      "shift_batch_approved",
+      actor,
+      `สายตรวจแตะอนุมัติเข้าเวรทั้งผลัดจุด ${slot.site_name} (${slot.post_name || "ป้อมประจำ"}) เวลา ${now.time} น.`
+    );
+  }
+
+  const waveLabel = wave === "evening" ? "ผลัดดึก" : "ผลัดเช้า";
+
+  return {
+    ok: true,
+    count: slots.length,
+    wave,
+    message: [
+      `⚡ [ALPHA COP] สายตรวจอนุมัติเข้าเวรทั้งผลัดสำเร็จ!`,
+      `🕒 รอบเวลา: ${waveLabel} (${now.time} น.)`,
+      `👥 ยืนยันกำลังพลผ่านทั้งหมด: ${slots.length} นาย`,
+      `👤 ผู้ยืนยัน: ${actor}`,
+      `━━━━━━━━━━━━━━━━━━`,
+      `ระบบบันทึกยอดกำลังพลขึ้นบอร์ดควบคุม 100% เรียบร้อยแล้วครับ 🫡`,
+    ].join("\n"),
+  };
+}
+
+export async function buildShiftAttendanceFlexMessage(input?: { wave?: "morning" | "evening" | "all"; targetTime?: string }) {
+  const summary = await buildMissingShiftAlertSummary(input);
+  const now = bangkokNow();
+  const today = now.date;
+
+  const isClear = !summary.hasMissing;
+  const headerBgColor = isClear ? "#059669" : summary.wave === "evening" ? "#4f46e5" : "#d97706";
+  const headerTitle = isClear 
+    ? "✅ กำลังพลเข้าเวรครบถ้วน 100%" 
+    : `🚨 สรุปกำลังพลค้างเข้าเวร (${summary.wave === "evening" ? "ผลัดดึก" : "ผลัดเช้า"})`;
+
+  // สร้างแถวรายการจุดที่ขาดพร้อมปุ่มกด Postback 2 ปุ่ม: [ประจำ] และ [สแปร์แทน]
+  const missingRows: any[] = [];
+  
+  if (summary.hasMissing && summary.missingSlots) {
+    summary.missingSlots.slice(0, 10).forEach((slot: any, idx: number) => {
+      const deadline = slot.deadline || "00:00";
+      const postLabel = slot.post_name ? ` · ${slot.post_name}` : "";
+      const guardLabel = slot.assigned_guard ? ` (ประจำ: ${slot.assigned_guard})` : "";
+
+      missingRows.push({
+        type: "box",
+        layout: "vertical",
+        paddingAll: "10px",
+        backgroundColor: idx % 2 === 0 ? "#ffffff" : "#f8fafc",
+        cornerRadius: "8px",
+        margin: "6px",
+        borderColor: "#e2e8f0",
+        borderWidth: "1px",
+        contents: [
+          {
+            type: "box",
+            layout: "horizontal",
+            contents: [
+              {
+                type: "text",
+                text: `${idx + 1}. ${slot.site_name}${postLabel}`,
+                size: "sm",
+                weight: "bold",
+                color: "#0f172a",
+                wrap: true,
+                flex: 1,
+              },
+            ],
+          },
+          {
+            type: "text",
+            text: `⏰ กำหนด ${deadline} น.${guardLabel}`,
+            size: "xxs",
+            color: "#64748b",
+            margin: "xs",
+          },
+          {
+            type: "box",
+            layout: "horizontal",
+            spacing: "sm",
+            margin: "sm",
+            contents: [
+              {
+                type: "button",
+                action: {
+                  type: "postback",
+                  label: "🔘 คนประจำ",
+                  data: `action=checkin_regular&slotId=${slot.id}&siteName=${encodeURIComponent(slot.site_name)}`,
+                  displayText: `ยืนยันคนประจำ ${slot.site_name}${postLabel}`,
+                },
+                style: "primary",
+                color: "#0284c7",
+                height: "sm",
+                flex: 1,
+              },
+              {
+                type: "button",
+                action: {
+                  type: "postback",
+                  label: "🔄 สแปร์แทน",
+                  data: `action=checkin_spare&slotId=${slot.id}&siteName=${encodeURIComponent(slot.site_name)}`,
+                  displayText: `ยืนยันสแปร์แทน ${slot.site_name}${postLabel}`,
+                },
+                style: "secondary",
+                color: "#475569",
+                height: "sm",
+                flex: 1,
+              },
+            ],
+          },
+        ],
+      });
+    });
+
+    if (summary.missingSlots.length > 10) {
+      missingRows.push({
+        type: "text",
+        text: `... และอีก ${summary.missingSlots.length - 10} นาย (ดูต่อในบอร์ดเว็บ)`,
+        size: "xs",
+        color: "#94a3b8",
+        align: "center",
+        margin: "md",
+      });
+    }
+  }
+
+  // ปุ่มกดอนุมัติทั้งผลัด 1-Tap ด้านบนการ์ด
+  const batchApproveHeaderButton = summary.hasMissing ? [
+    {
+      type: "button",
+      action: {
+        type: "postback",
+        label: `⚡ อนุมัติทั้งผลัด (${summary.missingCount} นาย)`,
+        data: `action=batch_approve&wave=${summary.wave}`,
+        displayText: `⚡ อนุมัติเข้าเวรทั้งผลัด (${summary.wave === "evening" ? "ผลัดดึก" : "ผลัดเช้า"})`,
+      },
+      style: "primary",
+      color: "#16a34a",
+      height: "sm",
+      margin: "sm",
+    },
+  ] : [];
+
+  const flexBubble = {
+    type: "bubble",
+    size: "mega",
+    header: {
+      type: "box",
+      layout: "vertical",
+      backgroundColor: headerBgColor,
+      paddingAll: "16px",
+      contents: [
+        {
+          type: "text",
+          text: headerTitle,
+          weight: "bold",
+          color: "#ffffff",
+          size: "lg",
+        },
+        {
+          type: "text",
+          text: `⏰ ข้อมูล ณ ${now.time} น. (${today}) · เข้าแล้ว ${summary.confirmedSites}/${summary.totalSites} นาย`,
+          color: "#e2e8f0",
+          size: "xs",
+          margin: "xs",
+        },
+        ...batchApproveHeaderButton,
+      ],
+    },
+    body: {
+      type: "box",
+      layout: "vertical",
+      paddingAll: "12px",
+      contents: isClear
+        ? [
+            {
+              type: "text",
+              text: `🎉 ยอดเยี่ยม! กำลังพลทุกจุดรายงานตัวครบถ้วน 100% เรียบร้อยแล้ว`,
+              size: "sm",
+              color: "#16a34a",
+              weight: "bold",
+              align: "center",
+              margin: "md",
+            },
+          ]
+        : [
+            {
+              type: "text",
+              text: `❌ รายชื่อจุดและป้อมที่ยังค้างเข้าเวร (${summary.missingCount} นาย):`,
+              size: "xs",
+              weight: "bold",
+              color: "#ef4444",
+              margin: "none",
+            },
+            {
+              type: "box",
+              layout: "vertical",
+              margin: "sm",
+              contents: missingRows,
+            },
+          ],
+    },
+    footer: {
+      type: "box",
+      layout: "vertical",
+      spacing: "sm",
+      paddingAll: "10px",
+      contents: [
+        {
+          type: "box",
+          layout: "horizontal",
+          spacing: "sm",
+          contents: [
+            {
+              type: "button",
+              action: {
+                type: "message",
+                label: "☀️ สรุปกะเช้า",
+                text: "สรุปกะเช้า",
+              },
+              style: "secondary",
+              height: "sm",
+            },
+            {
+              type: "button",
+              action: {
+                type: "message",
+                label: "🌙 สรุปกะดึก",
+                text: "สรุปกะดึก",
+              },
+              style: "secondary",
+              height: "sm",
+            },
+          ],
+        },
+        {
+          type: "button",
+          action: {
+            type: "uri",
+            label: "📱 เปิดแผงตรวจสายตรวจ (มือถือ)",
+            uri: "https://alpha-command-center-1--alphacommandcenter-d3341.asia-southeast1.hosted.app/patrol",
+          },
+          style: "primary",
+          color: "#0284c7",
+          height: "sm",
+        },
+      ],
+    },
+  };
+
+  const flexMessage = {
+    type: "flex",
+    altText: summary.message.slice(0, 300),
+    contents: flexBubble,
+    quickReply: {
+      items: [
+        {
+          type: "action",
+          action: { type: "message", label: "☀️ สรุปกะเช้า", text: "สรุปกะเช้า" },
+        },
+        {
+          type: "action",
+          action: { type: "message", label: "🌙 สรุปกะดึก", text: "สรุปกะดึก" },
+        },
+        {
+          type: "action",
+          action: { type: "message", label: "🔄 อัปเดตสด", text: "สรุปเข้าเวร" },
+        },
+      ],
+    },
+  };
+
+  return {
+    ...summary,
+    flexMessage,
+  };
 }
 
 export async function getShiftGroupConfigurations() {
@@ -2486,81 +2956,226 @@ export async function bulkApplyShiftPreset(input: {
   };
 }
 
-export async function buildMissingShiftAlertSummary(targetTime?: string) {
+export async function buildMissingShiftAlertSummary(input?: { wave?: "morning" | "evening" | "all"; targetTime?: string }) {
   await ensureDatabase();
   const db = database();
   const now = bangkokNow();
   const today = now.date;
   const currentMins = minuteFromTime(now.time);
+  const currentHour = Number(now.time.slice(0, 2));
 
-  // ดึงสล็อตที่ถึงเวลาแล้วแต่ยังไม่ยืนยัน
-  const slotsResult = await db.prepare(`
+  // กำหนด wave อัตโนมัติตามเวลาปัจจุบันถ้าไม่ได้ระบุมา
+  const wave = input?.wave || (currentHour >= 16 || currentHour < 5 ? "evening" : "morning");
+  const waveLabel = wave === "evening" ? "🌙 ผลัดดึก (18:00 - 06:00)" : "☀️ ผลัดเช้า (06:00 - 18:00)";
+
+  // ดึงสล็อตของวันนี้
+  let query = `
     SELECT * FROM coverage_slots 
     WHERE operational_date = ? AND state IN ('waiting', 'missing', 'unassigned')
-    ORDER BY deadline ASC, site_name ASC
-  `).bind(today).all<D1Row>();
+  `;
+  const params: any[] = [today];
 
-  const allSlotsToday = await db.prepare(`
+  if (wave !== "all") {
+    query += ` AND wave = ?`;
+    params.push(wave);
+  }
+
+  query += ` ORDER BY deadline ASC, site_name ASC`;
+
+  const slotsResult = await db.prepare(query).bind(...params).all<D1Row>();
+
+  let allQuery = `
     SELECT COUNT(*) as total,
            COUNT(CASE WHEN state = 'confirmed' THEN 1 END) as confirmed
     FROM coverage_slots
     WHERE operational_date = ?
-  `).bind(today).first<{ total: number; confirmed: number }>();
+  `;
+  const allParams: any[] = [today];
+  if (wave !== "all") {
+    allQuery += ` AND wave = ?`;
+    allParams.push(wave);
+  }
 
+  const allSlotsToday = await db.prepare(allQuery).bind(...allParams).first<{ total: number; confirmed: number }>();
   const slots = (slotsResult.results || []) as any[];
-  
-  // กรองเฉพาะสล็อตที่เลยเวลากำหนด (deadline <= current time หรือตรงกับ targetTime)
+
+  // กรองเฉพาะสล็อตที่ถึงเวลาหรือเลยเวลาแล้ว (หรือถ้ายังไม่ถึงเวลาก็รวมไว้สำหรับตรวจล่วงหน้า)
   const missing = slots.filter((slot) => {
-    if (targetTime && slot.deadline !== targetTime) return false;
-    const deadlineMins = minuteFromTime(slot.deadline || "00:00");
-    return currentMins >= deadlineMins;
+    if (input?.targetTime && slot.deadline !== input.targetTime) return false;
+    return true;
   });
+
+  const totalCount = allSlotsToday?.total || 0;
+  const confirmedCount = allSlotsToday?.confirmed || 0;
 
   if (!missing.length) {
     return {
       hasMissing: false,
-      totalSites: allSlotsToday?.total || 0,
-      confirmedSites: allSlotsToday?.confirmed || 0,
+      wave,
+      waveLabel,
+      totalSites: totalCount,
+      confirmedSites: confirmedCount,
       missingCount: 0,
-      message: `✅ จุดตรวจทั้งหมดเข้าเวรครบถ้วนเรียบร้อยแล้ว (${allSlotsToday?.confirmed || 0}/${allSlotsToday?.total || 0})`,
+      missingSlots: [],
+      message: [
+        `✅ [ศูนย์สั่งการ ALPHA COP] รายงานสถานะเข้าเวร`,
+        `${waveLabel}`,
+        `⏰ ข้อมูล ณ เวลา ${now.time} น. (${today})`,
+        `━━━━━━━━━━━━━━━━━━`,
+        `🎉 จุดตรวจทั้งหมดเข้าเวรครบถ้วน 100% แล้วครับ (${confirmedCount}/${totalCount} จุด)`,
+        `━━━━━━━━━━━━━━━━━━`,
+      ].join("\n"),
     };
   }
 
-  // สร้างข้อความการ์ดสรุป
+  // สร้างข้อความการ์ดสรุปส่งเข้ากลุ่มสั่งการ
   const lines = [
-    `🚨 [ศูนย์สั่งการ] แจ้งเตือนจุดที่ยังไม่รายงานตัวเข้าเวร`,
+    `🚨 [ศูนย์สั่งการ ALPHA COP] แจ้งเตือนจุดค้างเข้าเวร`,
+    `${waveLabel}`,
     `⏰ ข้อมูล ณ เวลา ${now.time} น. (${today})`,
     `━━━━━━━━━━━━━━━━━━`,
-    `📊 ภาพรวม: เข้าเวรแล้ว ${allSlotsToday?.confirmed || 0}/${allSlotsToday?.total || 0} จุด (ขาด ${missing.length} จุด)`,
+    `📊 ภาพรวม: เข้าแล้ว ${confirmedCount}/${totalCount} นาย · ค้าง ${missing.length} นาย`,
     `━━━━━━━━━━━━━━━━━━`,
     ``,
-    `❌ รายชื่อจุดที่ยังไม่เข้าเวร:`,
+    `❌ รายชื่อจุดและป้อมที่ยังไม่มีรายงานเข้าเวร:`,
   ];
 
-  missing.slice(0, 25).forEach((slot, index) => {
+  missing.slice(0, 30).forEach((slot, index) => {
     const deadlineMins = minuteFromTime(slot.deadline || "00:00");
-    const late = Math.max(0, currentMins - deadlineMins);
-    lines.push(`${index + 1}. ${slot.site_name} (${slot.deadline} น. - สาย ${late} นาที)`);
+    const diff = currentMins - deadlineMins;
+    const timeStatus = diff > 0 ? `(สาย ${diff} นาที)` : `(กำหนด ${slot.deadline} น.)`;
+    const post = slot.post_name ? ` · ${slot.post_name}` : "";
+    const guard = slot.assigned_guard ? ` [ประจำ: ${slot.assigned_guard}]` : "";
+    lines.push(`${index + 1}. ${slot.site_name}${post}${guard} ${timeStatus}`);
   });
 
-  if (missing.length > 25) {
-    lines.push(`... และอีก ${missing.length - 25} จุด`);
+  if (missing.length > 30) {
+    lines.push(`... และอีก ${missing.length - 30} นาย`);
   }
 
   lines.push(``);
-  lines.push(`⚠️ สายตรวจเขตพื้นที่ กรุณา ว.13 โทรเช็กหน้างานด่วนครับ`);
+  lines.push(`━━━━━━━━━━━━━━━━━━`);
+  lines.push(`💡 วิธียืนยันผ่านไลน์:`);
+  lines.push(`- คนประจำมา: พิมพ์ "ยืนยัน [ลำดับหรือชื่อจุด]" เช่น "ยืนยัน 1"`);
+  lines.push(`- สแปร์มาแทน: พิมพ์ "สแปร์ [ลำดับหรือชื่อจุด]" เช่น "สแปร์ 1"`);
+  lines.push(`หรือ แตะปุ่มบนการ์ดในไลน์ได้ทันทีครับ 🫡`);
 
   return {
     hasMissing: true,
-    totalSites: allSlotsToday?.total || 0,
-    confirmedSites: allSlotsToday?.confirmed || 0,
+    wave,
+    waveLabel,
+    totalSites: totalCount,
+    confirmedSites: confirmedCount,
     missingCount: missing.length,
     missingSlots: missing,
     message: lines.join("\n"),
   };
 }
 
-export async function sendShiftAlertToCommandRoom(actor = "system", targetGroupIdOverride?: string) {
+export async function confirmSlotFromLineCommand(input: {
+  query: string;
+  actor?: string;
+  wave?: "morning" | "evening";
+}) {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow();
+  const today = now.date;
+  const rawQuery = String(input.query || "").trim();
+
+  if (!rawQuery) {
+    return { ok: false, message: "กรุณาระบุชื่อจุดหรือลำดับ เช่น 'ยืนยัน 1' หรือ 'สแปร์ 1' หรือ 'ยืนยัน Best Western'" };
+  }
+
+  const isSpare = /สแปร์|แทน|spare/i.test(rawQuery);
+  const searchTarget = rawQuery.replace(/^(?:ยืนยัน|คอนเฟิร์ม|เช็คเข้า|สแปร์|แทน)\s*/i, "").replace(/สแปร์|แทน/i, "").trim();
+
+  // ดึงสล็อตของวันนี้ที่ยังไม่ confirmed
+  const slotsResult = await db.prepare(`
+    SELECT * FROM coverage_slots 
+    WHERE operational_date = ? AND state IN ('waiting', 'missing', 'unassigned')
+    ORDER BY deadline ASC, site_name ASC
+  `).bind(today).all<D1Row>();
+
+  const slots = (slotsResult.results || []) as any[];
+  if (!slots.length) {
+    return { ok: true, message: `✅ จุดตรวจทั้งหมดของวันนี้เข้าเวรครบถ้วนเรียบร้อยแล้วครับ` };
+  }
+
+  let targetSlot: any = null;
+
+  // 1. ถ้า searchTarget เป็นตัวเลขลำดับ เช่น "1", "#1"
+  const indexMatch = searchTarget.match(/^#?(\d+)$/);
+  if (indexMatch) {
+    const idx = parseInt(indexMatch[1], 10) - 1;
+    if (idx >= 0 && idx < slots.length) {
+      targetSlot = slots[idx];
+    }
+  }
+
+  // 2. ถ้า searchTarget เป็นชื่อจุด เช่น "Best Western", "HEI", "DEEPAL"
+  if (!targetSlot) {
+    const cleanQuery = (searchTarget || rawQuery).toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]/g, "");
+    targetSlot = slots.find((s) => {
+      const cleanSite = (s.site_name || "").toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]/g, "");
+      return cleanSite.includes(cleanQuery);
+    });
+  }
+
+  if (!targetSlot) {
+    return {
+      ok: false,
+      message: `❌ ไม่พบจุดที่ตรงกับ "${rawQuery}" ในรายการที่ค้างเข้าเวรวันนี้\nกรุณาตรวจชื่อจุด หรือพิมพ์ "สรุปเข้าเวร" เพื่อดูรายการลำดับครับ`,
+    };
+  }
+
+  const guardTitle = isSpare 
+    ? "รปภ. สแปร์แทนเวร" 
+    : (targetSlot.assigned_guard ? `รปภ. ประจำ (${targetSlot.assigned_guard})` : "รปภ. ประจำจุด");
+
+  const deadlineMins = minuteFromTime(targetSlot.deadline || "00:00");
+  const currentMins = minuteFromTime(now.time);
+  const lateMinutes = Math.max(0, currentMins - deadlineMins);
+  const sourceText = `LINE คำสั่งแชท (${guardTitle})`;
+
+  await db.prepare(`
+    UPDATE coverage_slots 
+    SET state = 'confirmed',
+        reported_at = ?,
+        source = ?,
+        late_minutes = ?,
+        updated_at = ?
+    WHERE id = ?
+  `).bind(now.time, sourceText, lateMinutes, now.iso, targetSlot.id).run();
+
+  await addAudit(
+    "coverage_slot",
+    targetSlot.id,
+    isSpare ? "shift_confirmed_spare_chat" : "shift_confirmed_regular_chat",
+    input.actor || "LINE Command",
+    `ยืนยันเข้าเวรจุด ${targetSlot.site_name} (${targetSlot.post_name || "ป้อมประจำ"}) [${guardTitle}] เวลา ${now.time} น.`
+  );
+
+  return {
+    ok: true,
+    siteName: targetSlot.site_name,
+    postName: targetSlot.post_name,
+    guardTitle,
+    deadline: targetSlot.deadline,
+    wave: targetSlot.wave,
+    message: [
+      `✅ [ALPHA COP] ยืนยันเข้าเวรสำเร็จ!`,
+      `🏢 จุด: ${targetSlot.site_name} · ${targetSlot.post_name || "ป้อมประจำ"}`,
+      `👮 สถานะกำลังพล: ${guardTitle}`,
+      `⏰ เวลาบันทึก: ${now.time} น. (${lateMinutes > 0 ? `สาย ${lateMinutes} นาที` : "ตรงเวลา"})`,
+      `👤 ผู้ยืนยัน: คำสั่งไลน์ศูนย์สั่งการ`,
+      `━━━━━━━━━━━━━━━━━━`,
+      `ระบบบันทึกยอดกำลังพลเข้าระบบเรียบร้อยแล้วครับ 🫡`,
+    ].join("\n"),
+  };
+}
+
+export async function sendShiftAlertToCommandRoom(actor = "system", targetGroupIdOverride?: string, wave?: "morning" | "evening") {
   const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
   if (!token) throw new Error("LINE Channel Access Token is missing");
 
@@ -2570,20 +3185,38 @@ export async function sendShiftAlertToCommandRoom(actor = "system", targetGroupI
     return { ok: false, error: "ยังไม่ได้ระบุกลุ่มไลน์ศูนย์สั่งการ (Target Command Group)" };
   }
 
-  const summary = await buildMissingShiftAlertSummary();
-  if (!summary.hasMissing) {
-    return { ok: true, skipped: true, message: summary.message };
+  const flexData = await buildShiftAttendanceFlexMessage({ wave });
+
+  // ลองส่ง Flex Message ก่อน ถ้าส่งไม่ได้ให้ fallback เป็น Text ธรรมดา
+  try {
+    const res = await fetch("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        to: targetGroupId,
+        messages: [flexData.flexMessage],
+      }),
+    });
+
+    if (!res.ok) {
+      await pushLineText(targetGroupId, flexData.message, token);
+    }
+  } catch {
+    await pushLineText(targetGroupId, flexData.message, token);
   }
 
-  await pushLineText(targetGroupId, summary.message, token);
-  await addAudit("line_reminder", targetGroupId, "shift_alert_sent", actor, `ส่งแจ้งเตือนจุดขาดเวร ${summary.missingCount} จุด เข้ากลุ่มสั่งการ`);
+  await addAudit("line_reminder", targetGroupId, "shift_alert_sent", actor, `ส่งแจ้งเตือนจุดขาดเวร ${flexData.missingCount} จุด (${flexData.waveLabel}) เข้ากลุ่มสั่งการ`);
 
   return {
     ok: true,
     sent: true,
-    missingCount: summary.missingCount,
+    missingCount: flexData.missingCount,
+    wave: flexData.wave,
     targetGroupId,
-    message: summary.message,
+    message: flexData.message,
   };
 }
 

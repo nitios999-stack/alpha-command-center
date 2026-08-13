@@ -1,4 +1,4 @@
-import { recordLineWebhookCallback, saveLineWebhookEvent, updateLineGroupProfile, consumeAutoReplyQuota, consumeQueuedSticker, logOutboundAction, evaluateShiftCheckIn } from "../db/command-center";
+import { recordLineWebhookCallback, saveLineWebhookEvent, updateLineGroupProfile, consumeAutoReplyQuota, consumeQueuedSticker, logOutboundAction, evaluateShiftCheckIn, buildMissingShiftAlertSummary, buildShiftAttendanceFlexMessage, confirmSlotFromLineCommand, confirmSlotById, batchApproveSlotsWithPhotos } from "../db/command-center";
 
 type LineEnv = { LINE_CHANNEL_ACCESS_TOKEN?: string; LINE_CHANNEL_SECRET?: string; LINE_REPORT_SENDER_SALT?: string };
 type LineEvent = {
@@ -9,9 +9,10 @@ type LineEvent = {
   source?: { type?: string; groupId?: string; roomId?: string; userId?: string };
   replyToken?: string;
   deliveryContext?: { isRedelivery?: boolean };
+  postback?: { data?: string; params?: Record<string, string> };
 };
 type LineWebhook = { events?: LineEvent[] };
-type GroupEvent = { eventId: string; eventType: string; groupId: string; messageType?: string; text?: string; senderKey?: string; replyToken?: string; isRedelivery?: boolean };
+type GroupEvent = { eventId: string; eventType: string; groupId: string; messageType?: string; text?: string; senderKey?: string; replyToken?: string; isRedelivery?: boolean; postbackData?: string };
 
 function base64(bytes: ArrayBuffer) {
   const data = new Uint8Array(bytes);
@@ -121,12 +122,15 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
     const text = eventType === "message" && event.message?.type === "text"
       ? event.message.text?.trim()
       : undefined;
+    const postbackData = eventType === "postback" ? event.postback?.data : undefined;
+
     return {
       groupId,
       eventId: event.webhookEventId?.trim() || fallbackEventId(event, index),
       eventType,
       messageType,
       text,
+      postbackData,
       senderKey: eventType === "message" ? await senderFingerprint(event.source?.userId, senderSalt) : undefined,
       replyToken: event.replyToken?.trim(),
       isRedelivery: event.deliveryContext?.isRedelivery,
@@ -136,7 +140,7 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
 
   // Store the verified event before any optional profile lookup.
   const saved = await Promise.all(groupEvents.map(async (group) => {
-    // Real-time Shift Check-in Evaluation
+    // Real-time Shift Check-in Evaluation (Photo / Location / Keyword Auto-Detect)
     evaluateShiftCheckIn({
       groupId: group.groupId,
       eventId: group.eventId,
@@ -172,10 +176,171 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
       const { group, idx } = items[itemIdx];
       const isLastInBatch = itemIdx === items.length - 1;
       const isSaved = saved[idx]?.saved;
-      if (group.eventType !== "message") continue; // only reply to messages
-      if (group.messageType?.startsWith("sticker")) continue; // Ignore stickers sent by guards to prevent infinite sticker loops
-      if (group.isRedelivery) continue; // prevent loop from redeliveries
+
       if (!group.replyToken) continue;
+
+      // -------------------------------------------------------------
+      // 1. ตรวจจับ POSTBACK EVENT (ปุ่มกด 1-Click บน Flex Message ใน LINE)
+      // -------------------------------------------------------------
+      if (group.eventType === "postback" && group.postbackData) {
+        const params = new URLSearchParams(group.postbackData);
+        const action = params.get("action");
+        const slotId = params.get("slotId");
+
+        // 1.1 ปุ่มอนุมัติเข้าเวรทั้งผลัด 1-Tap
+        if (action === "batch_approve") {
+          const wave = params.get("wave") as "morning" | "evening" | undefined;
+          const result = await batchApproveSlotsWithPhotos({
+            wave,
+            actor: "สายตรวจ (แตะอนุมัติทั้งผลัดใน LINE)",
+          });
+          await fetch("https://api.line.me/v2/bot/message/reply", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${accessToken}`,
+            },
+            body: JSON.stringify({
+              replyToken: group.replyToken,
+              messages: [{
+                type: "text",
+                text: result.message,
+                quickReply: {
+                  items: [
+                    { type: "action", action: { type: "message", label: "☀️ สรุปกะเช้า", text: "สรุปกะเช้า" } },
+                    { type: "action", action: { type: "message", label: "🌙 สรุปกะดึก", text: "สรุปกะดึก" } },
+                    { type: "action", action: { type: "message", label: "🔄 อัปเดตสด", text: "สรุปเข้าเวร" } },
+                  ],
+                },
+              }],
+            }),
+          }).catch(() => {});
+          continue;
+        }
+
+        // 1.2 ปุ่มเช็คเข้าเวรรายป้อม (คนประจำ / สแปร์)
+        if ((action === "checkin" || action === "checkin_regular" || action === "checkin_spare") && slotId) {
+          const guardType = action === "checkin_spare" ? "spare" : "regular";
+          const actor = action === "checkin_spare" ? "LINE ปุ่มกด (สแปร์แทน)" : "LINE ปุ่มกด (คนประจำ)";
+
+          const confirmResult = await confirmSlotById({
+            slotId,
+            guardType,
+            actor,
+          });
+
+          await fetch("https://api.line.me/v2/bot/message/reply", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${accessToken}`,
+            },
+            body: JSON.stringify({
+              replyToken: group.replyToken,
+              messages: [{
+                type: "text",
+                text: confirmResult.message,
+                quickReply: {
+                  items: [
+                    { type: "action", action: { type: "message", label: "☀️ สรุปกะเช้า", text: "สรุปกะเช้า" } },
+                    { type: "action", action: { type: "message", label: "🌙 สรุปกะดึก", text: "สรุปกะดึก" } },
+                    { type: "action", action: { type: "message", label: "🔄 อัปเดตสด", text: "สรุปเข้าเวร" } },
+                  ],
+                },
+              }],
+            }),
+          }).catch(() => {});
+          continue;
+        }
+      }
+
+      if (group.eventType !== "message") continue; // below logic is for message events only
+      if (group.messageType?.startsWith("sticker")) continue; // Ignore stickers sent by guards
+      if (group.isRedelivery) continue; // prevent loop from redeliveries
+
+      const trimmedText = (group.text || "").trim();
+
+      // -------------------------------------------------------------
+      // 2. ตรวจจับคำสั่งขอดูสรุปจุดเข้าเวร (ส่งการ์ด Flex Message พร้อมปุ่มกด)
+      // -------------------------------------------------------------
+      const isSummaryCommand = /^(?:@\S+\s*)?(?:สรุป|เช็ค|ดู|สถานะ|รายงาน|ขาด)(?:กะเช้า|กะดึก|ผลัดเช้า|ผลัดดึก|เข้าเวร|เวร|ชื่อ|จุดที่ยังไม่เข้า)/i.test(trimmedText)
+        || /^(?:@\S+\s*)?(?:สรุปเข้าเวร|สรุปกะ|เช็คชื่อ|เช็คเข้าเวร|ขาดกะ|สถานะ|เวร)$/i.test(trimmedText);
+
+      // -------------------------------------------------------------
+      // 3. ตรวจจับคำสั่งพิมพ์ยืนยันเข้าเวรผ่านไลน์ (เช่น "ยืนยัน 1", "สแปร์ 1", "ยืนยัน Best Western")
+      // -------------------------------------------------------------
+      const confirmMatch = trimmedText.match(/^(?:@\S+\s*)?(?:ยืนยัน|เช็คเข้า|เข้าเวรแล้ว|ว\.?4แล้ว|คอนเฟิร์ม|สแปร์|แทน|สแปร์แทน)\s+(.+)/i);
+
+      if (isSummaryCommand) {
+        let wave: "morning" | "evening" | undefined = undefined;
+        if (/เช้า|morning/i.test(trimmedText)) wave = "morning";
+        if (/ดึก|เย็น|night|evening/i.test(trimmedText)) wave = "evening";
+
+        const flexData = await buildShiftAttendanceFlexMessage({ wave });
+
+        // ลองตอบกลับด้วย Flex Message สวยหรู
+        const flexReplyRes = await fetch("https://api.line.me/v2/bot/message/reply", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            replyToken: group.replyToken,
+            messages: [flexData.flexMessage],
+          }),
+        }).catch(() => null);
+
+        // Fallback to text message if Flex fails
+        if (!flexReplyRes || !flexReplyRes.ok) {
+          await fetch("https://api.line.me/v2/bot/message/reply", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${accessToken}`,
+            },
+            body: JSON.stringify({
+              replyToken: group.replyToken,
+              messages: [{
+                type: "text",
+                text: flexData.message,
+                quickReply: flexData.flexMessage.quickReply,
+              }],
+            }),
+          }).catch(() => {});
+        }
+
+        continue;
+      }
+
+      if (confirmMatch) {
+        const query = confirmMatch[1].trim();
+        const confirmResult = await confirmSlotFromLineCommand({ query, actor: "LINE Chat Command" });
+
+        await fetch("https://api.line.me/v2/bot/message/reply", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            replyToken: group.replyToken,
+            messages: [{
+              type: "text",
+              text: confirmResult.message,
+              quickReply: {
+                items: [
+                  { type: "action", action: { type: "message", label: "☀️ สรุปกะเช้า", text: "สรุปกะเช้า" } },
+                  { type: "action", action: { type: "message", label: "🌙 สรุปกะดึก", text: "สรุปกะดึก" } },
+                  { type: "action", action: { type: "message", label: "🔄 อัปเดตสด", text: "สรุปเข้าเวร" } },
+                ],
+              },
+            }],
+          }),
+        }).catch(() => {});
+
+        continue;
+      }
 
       const actionId = `auto-${Date.now()}-${idx}`;
       const queuedSticker = await consumeQueuedSticker(group.groupId);

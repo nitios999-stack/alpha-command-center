@@ -1496,6 +1496,22 @@ export default function Home() {
             <span className="tab-icon">💳</span>
             <span>วางบิล</span>
           </button>
+          <a
+            href="/patrol"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="command-tab"
+            style={{
+              background: "linear-gradient(135deg, #0284c7, #0369a1)",
+              color: "#ffffff",
+              fontWeight: 800,
+              boxShadow: "0 2px 8px rgba(2, 132, 199, 0.3)",
+              textDecoration: "none",
+            }}
+          >
+            <span className="tab-icon">📱</span>
+            <span>แผงตรวจมือถือ</span>
+          </a>
         </div>
 
         <button
