@@ -1,4 +1,4 @@
-import { batchApproveSlotsWithPhotos } from "../../../../db/command-center";
+import { batchApproveSlotsWithPhotos } from "../../../../../db/command-center";
 
 export const runtime = "nodejs";
 
