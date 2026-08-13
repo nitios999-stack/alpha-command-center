@@ -2006,6 +2006,11 @@ export async function getShiftGroupConfigurations() {
     WHERE active = 1
   `).all<D1Row>();
 
+  const targetGroupSetting = await db.prepare(
+    "SELECT value FROM system_settings WHERE key = 'line_reminder_target_group_id'"
+  ).first<{ value: string }>();
+  const commandTargetGroupId = targetGroupSetting?.value || null;
+
   const templatesBySite = new Map<string, any[]>();
   (templatesResult.results || []).forEach((t: any) => {
     const list = templatesBySite.get(t.site_id) || [];
@@ -2013,28 +2018,92 @@ export async function getShiftGroupConfigurations() {
     templatesBySite.set(t.site_id, list);
   });
 
-  const configs = ((groupsResult.results || []) as any[]).map((g) => {
+  const allRows = (groupsResult.results || []) as any[];
+
+  const configs: any[] = [];
+  const unmanagedGroups: any[] = [];
+
+  allRows.forEach((g) => {
     const templates = g.site_id ? templatesBySite.get(g.site_id) || [] : [];
     const morningShift = templates.find((t) => t.wave === "morning");
     const eveningShift = templates.find((t) => t.wave === "evening");
+    const isConfigured = Boolean(g.site_id && g.site_active === 1 && (morningShift || eveningShift));
 
-    return {
+    const item = {
       groupId: g.group_id,
-      groupName: g.group_name,
+      groupName: g.group_name || `กลุ่ม ${g.group_id.slice(-6)}`,
       pictureUrl: g.picture_url,
       lastSeenAt: g.last_seen_at,
       siteId: g.site_id,
-      customerName: g.customer_name || "ยังไม่ระบุ",
+      customerName: g.customer_name || "ยังไม่ระบุลูกค้า",
       hasMorningShift: Boolean(morningShift),
       morningDeadline: morningShift?.deadline || "07:00",
       morningGuard: morningShift?.assigned_guard || "",
       hasEveningShift: Boolean(eveningShift),
       eveningDeadline: eveningShift?.deadline || "19:00",
       eveningGuard: eveningShift?.assigned_guard || "",
+      isConfigured,
     };
+
+    configs.push(item);
+    if (!isConfigured) {
+      unmanagedGroups.push(item);
+    }
   });
 
-  return configs;
+  const commandTargetGroup = allRows.find((r) => r.group_id === commandTargetGroupId);
+
+  return {
+    configs,
+    unmanagedGroups,
+    commandTargetGroupId,
+    commandTargetGroupName: commandTargetGroup ? commandTargetGroup.group_name : null,
+    allGroups: allRows.map((r) => ({
+      id: r.group_id,
+      name: r.group_name || `กลุ่ม ${r.group_id.slice(-6)}`,
+      pictureUrl: r.picture_url,
+    })),
+  };
+}
+
+export async function setCommandTargetGroupId(groupId: string, actor = "admin") {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow().iso;
+
+  await db.prepare(`
+    INSERT INTO system_settings (key, value, updated_at)
+    VALUES ('line_reminder_target_group_id', ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `).bind(groupId, now).run();
+
+  const group = (await db.prepare("SELECT group_name FROM line_group_registry WHERE id = ?").bind(groupId).first()) as any;
+  const groupName = group?.group_name || groupId;
+
+  await addAudit("line_reminder", groupId, "command_group_selected", actor, `ตั้งกลุ่มสั่งการเป็น: ${groupName}`);
+  return { ok: true, groupId, groupName, message: `ตั้งกลุ่มสั่งการเป็น "${groupName}" เรียบร้อยแล้ว` };
+}
+
+export async function importSelectedLineGroups(groupIds: string[], actor = "admin") {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow().iso;
+
+  let count = 0;
+  for (const groupId of groupIds) {
+    await updateGroupShiftConfiguration({
+      groupId,
+      hasMorningShift: true,
+      morningDeadline: "07:00",
+      hasEveningShift: true,
+      eveningDeadline: "19:00",
+      actor,
+    });
+    count++;
+  }
+
+  await generateTodayFromTemplatesInternal(actor);
+  return { ok: true, count, message: `นำเข้ากลุ่ม LINE เข้าสู่ระบบตรวจเวรแล้ว ${count} กลุ่ม` };
 }
 
 export async function updateGroupShiftConfiguration(input: {
