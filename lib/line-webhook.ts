@@ -5,7 +5,7 @@ type LineEvent = {
   webhookEventId?: string;
   type?: string;
   timestamp?: number;
-  message?: { type?: string; packageId?: string; stickerId?: string; text?: string };
+  message?: { type?: string; packageId?: string; stickerId?: string; [key: string]: unknown };
   source?: { type?: string; groupId?: string; roomId?: string; userId?: string };
   replyToken?: string;
   deliveryContext?: { isRedelivery?: boolean };
@@ -119,9 +119,10 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
     if (eventType === "message" && event.message?.type === "sticker") {
       messageType = `sticker:${event.message.packageId}:${event.message.stickerId}`;
     }
-    const text = eventType === "message" && event.message?.type === "text"
-      ? event.message.text?.trim()
+    const rawTextVal = eventType === "message" && event.message?.type === "text"
+      ? (event.message as Record<string, unknown>)["text"]
       : undefined;
+    const text = typeof rawTextVal === "string" ? rawTextVal.trim() : undefined;
     const postbackData = eventType === "postback" ? event.postback?.data : undefined;
 
     return {
