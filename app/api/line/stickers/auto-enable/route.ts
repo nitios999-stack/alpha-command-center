@@ -22,9 +22,11 @@ export async function GET(request: Request) {
       VALUES (?, 'reply_on_new_report', ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET 
         mode = 'reply_on_new_report',
+        sticker_package_id = ?,
+        sticker_id = ?,
         cooldown_minutes = ?,
         updated_at = ?
-    `).bind(group.id, defaultPkg, defaultStk, cooldown, now, cooldown, now).run();
+    `).bind(group.id, defaultPkg, defaultStk, cooldown, now, defaultPkg, defaultStk, cooldown, now).run();
     enabledCount++;
   }
 
