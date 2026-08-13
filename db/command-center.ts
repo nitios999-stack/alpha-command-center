@@ -2446,7 +2446,7 @@ export async function buildShiftAttendanceFlexMessage(input?: { wave?: "morning"
           action: {
             type: "uri",
             label: "📱 เปิดแผงตรวจสายตรวจ (มือถือ)",
-            uri: "https://alpha-command-center-1--alphacommandcenter-d3341.asia-southeast1.hosted.app/patrol",
+            uri: "https://alpha-command-center-1--alphacommandcenter-d3341.asia-southeast1.hosted.app/?tab=patrol",
           },
           style: "primary",
           color: "#0284c7",
@@ -3570,7 +3570,7 @@ export async function sendIncidentAlertToCommandRoom(input: {
           action: {
             type: "uri",
             label: "📱 เปิดแผงตรวจมือถือ",
-            uri: "https://alpha-command-center-1--alphacommandcenter-d3341.asia-southeast1.hosted.app/patrol",
+            uri: "https://alpha-command-center-1--alphacommandcenter-d3341.asia-southeast1.hosted.app/?tab=patrol",
           },
           style: "primary",
           color: "#0284c7",

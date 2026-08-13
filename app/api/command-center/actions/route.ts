@@ -1,10 +1,10 @@
 import { apiAuthRequiredResponse, getChatGPTUser } from "../../../chatgpt-auth";
-import { activateAllLinePoints, addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, deleteLineGroup, deleteOperationalSite, generateTodayFromTemplates, importShiftTemplates, mapLineGroup, markLeave, previewLineReportReminder, refreshLineGroupProfiles, removeDemoData, replaceSlot, saveLineReminderSettings, saveLineReportConfig, sendLineConnectionTest, sendLineReportReminder, setupLinePoint, syncLineGroupsFromGateway, unmapLineGroup, updateOperationalSite, type LinePointSetupInput, type LineReportConfig, type TemplateImportRow } from "../../../../db/command-center";
+import { activateAllLinePoints, addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, deleteLineGroup, deleteOperationalSite, generateTodayFromTemplates, importShiftTemplates, mapLineGroup, markLeave, previewLineReportReminder, refreshLineGroupProfiles, removeDemoData, replaceSlot, saveLineReminderSettings, saveLineReportConfig, sendLineConnectionTest, sendLineReportReminder, setupLinePoint, syncLineGroupsFromGateway, unmapLineGroup, updateOperationalSite, batchApproveSlotsWithPhotos, type LinePointSetupInput, type LineReportConfig, type TemplateImportRow } from "../../../../db/command-center";
 
 export const runtime = "nodejs";
 
 type ActionPayload = {
-  type?: "confirm" | "replace" | "leave" | "site" | "site_update" | "site_delete" | "slot" | "billing" | "template_import" | "generate_today" | "remove_demo" | "line_group" | "line_point_setup" | "line_points_activate_all" | "line_unmap" | "line_delete" | "line_connection_test" | "line_gateway_sync" | "line_profile_refresh" | "line_reminder_settings" | "line_reminder_preview" | "line_reminder_send" | "line_report_config";
+  type?: "confirm" | "replace" | "leave" | "site" | "site_update" | "site_delete" | "slot" | "billing" | "template_import" | "generate_today" | "remove_demo" | "line_group" | "line_point_setup" | "line_points_activate_all" | "line_unmap" | "line_delete" | "line_connection_test" | "line_gateway_sync" | "line_profile_refresh" | "line_reminder_settings" | "line_reminder_preview" | "line_reminder_send" | "line_report_config" | "batch_approve";
   slotId?: string;
   siteId?: string;
   source?: string;
@@ -170,6 +170,8 @@ export async function POST(request: Request) {
         nextAction,
         ownerName,
       });
+    } else if (payload.type === "batch_approve") {
+      result = { ok: true, ...(await batchApproveSlotsWithPhotos({ wave: payload.wave as any, actor })) };
     } else {
       return Response.json({ error: "คำสั่งไม่ถูกต้อง" }, { status: 400 });
     }

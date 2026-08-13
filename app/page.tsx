@@ -3,6 +3,7 @@
 import { CSSProperties, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StickersPanel } from "./StickersPanel";
 import { ShiftsPanel } from "./ShiftsPanel";
+import PatrolPanel from "./PatrolPanel";
 
 type SlotState = "confirmed" | "self_reported" | "waiting" | "replacement_required" | "unassigned" | "missing";
 
@@ -819,7 +820,17 @@ function handleLocalAction(payload: Record<string, unknown>, currentData: Dashbo
 
 export default function Home() {
   const [data, setData] = useState<DashboardData | null>(null);
-  const [tab, setTab] = useState<"ops" | "billing" | "setup" | "line" | "reports" | "stickers" | "shifts">("reports");
+  const [tab, setTab] = useState<"ops" | "billing" | "setup" | "line" | "reports" | "stickers" | "shifts" | "patrol">("reports");
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const tabParam = params.get("tab");
+      if (tabParam === "patrol") {
+        setTab("patrol");
+      }
+    }
+  }, []);
   const [wave, setWave] = useState<"morning" | "evening">("morning");
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -1496,22 +1507,20 @@ export default function Home() {
             <span className="tab-icon">💳</span>
             <span>วางบิล</span>
           </button>
-          <a
-            href="/patrol"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="command-tab"
+          <button
+            type="button"
+            className={`command-tab ${tab === "patrol" ? "active" : ""}`}
+            onClick={() => setTab("patrol")}
             style={{
-              background: "linear-gradient(135deg, #0284c7, #0369a1)",
+              background: tab === "patrol" ? "#0284c7" : "linear-gradient(135deg, #0284c7, #0369a1)",
               color: "#ffffff",
               fontWeight: 800,
               boxShadow: "0 2px 8px rgba(2, 132, 199, 0.3)",
-              textDecoration: "none",
             }}
           >
             <span className="tab-icon">📱</span>
             <span>แผงตรวจมือถือ</span>
-          </a>
+          </button>
         </div>
 
         <button
@@ -1532,7 +1541,14 @@ export default function Home() {
         </div>
       )}
 
-      {tab === "ops" ? (
+      {tab === "patrol" ? (
+        <PatrolPanel
+          data={data}
+          loading={loading}
+          onRefresh={() => void loadDashboard()}
+          onAction={runAction}
+        />
+      ) : tab === "ops" ? (
         <>
           <section className="attendance-intro" aria-label="เช็คเข้าเวรตามแผน">
             <div>

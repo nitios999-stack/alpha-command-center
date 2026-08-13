@@ -421,9 +421,7 @@ export function ShiftsPanel() {
 
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
             <a
-              href="/patrol"
-              target="_blank"
-              rel="noopener noreferrer"
+              href="/?tab=patrol"
               style={{ background: "linear-gradient(135deg, #0284c7 0%, #0369a1 100%)", color: "white", textDecoration: "none", padding: "0.65rem 1.15rem", borderRadius: "10px", fontWeight: 700, display: "flex", alignItems: "center", gap: "0.4rem", boxShadow: "0 4px 12px rgba(2, 132, 199, 0.4)" }}
             >
               <span>📱</span> แผงตรวจสายตรวจ (มือถือ)
