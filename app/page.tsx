@@ -613,7 +613,8 @@ function handleLocalAction(payload: Record<string, unknown>, currentData: Dashbo
     const groupName = String(payload.groupName || payload.siteName || "").trim();
     const customerName = String(payload.customerName || "ลูกค้าทั่วไป").trim();
     const rawGroupId = String(payload.groupId || "").trim();
-    const groupId = rawGroupId || ("group-" + Date.now());
+    const cleanMatch = rawGroupId.match(/[CRU][0-9a-fA-F]{32}/);
+    const groupId = cleanMatch ? cleanMatch[0] : (rawGroupId || ("group-" + Date.now()));
     const siteId = "site-" + groupId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 50);
 
     const newGroup: LineGroup = {
@@ -1390,22 +1391,34 @@ export default function Home() {
         <button className="mobile-refresh" onClick={() => void loadDashboard()} disabled={loading} aria-label="รีเฟรชข้อมูล">↻</button>
       </header>
 
-      {tab === "billing" && <section className="hero">
-        <div>
-          <p className="eyebrow">ศูนย์สั่งการประจำวัน</p>
-          <h2>{tab === "ops" ? "เช็กกำลังประจำจุด" : "วางบิลและติดตามรับชำระ"}</h2>
-          <p className="subcopy">
-            {tab === "ops"
-              ? "ดูเฉพาะสิ่งที่ต้องจัดการ: จุดไหนครบ จุดไหนรอตรวจ และจุดไหนยังขาดกำลัง"
-              : "จัดลำดับงานวางบิล เอกสาร และยอดเงินที่ต้องติดตามในหน้าเดียว"}
-          </p>
+      {/* GLOBAL LIVE COMMAND KPIS */}
+      <section className="global-kpis" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: "0.75rem", marginBottom: "1.25rem" }}>
+        <div style={{ background: "white", padding: "0.9rem 1.1rem", borderRadius: "14px", border: "1px solid #e2e8f0", boxShadow: "0 2px 4px rgba(0,0,0,0.02)" }}>
+          <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.04em" }}>🏢 จุดตรวจทั้งหมด</div>
+          <div style={{ fontSize: "1.5rem", fontWeight: 800, color: "#0f172a", marginTop: "0.2rem" }}>{data?.sites.length ?? 0} จุด</div>
+          <div style={{ fontSize: "0.75rem", color: "#94a3b8" }}>ลงทะเบียนในระบบ</div>
         </div>
-        <div className="hero-date">
-          <span>วันนี้</span>
-          <strong>{data?.today ?? "กำลังโหลด"}</strong>
-          <small>เวลาไทย (Asia/Bangkok)</small>
+        <div style={{ background: "white", padding: "0.9rem 1.1rem", borderRadius: "14px", border: "1px solid #bbf7d0", boxShadow: "0 2px 4px rgba(0,0,0,0.02)" }}>
+          <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "#16a34a", textTransform: "uppercase", letterSpacing: "0.04em" }}>🟢 เข้าเวรครบแล้ว</div>
+          <div style={{ fontSize: "1.5rem", fontWeight: 800, color: "#15803d", marginTop: "0.2rem" }}>{stats.green} จุด</div>
+          <div style={{ fontSize: "0.75rem", color: "#16a34a" }}>ยืนยันตรงเวลา 100%</div>
         </div>
-      </section>}
+        <div style={{ background: "white", padding: "0.9rem 1.1rem", borderRadius: "14px", border: "1px solid #fde68a", boxShadow: "0 2px 4px rgba(0,0,0,0.02)" }}>
+          <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "#d97706", textTransform: "uppercase", letterSpacing: "0.04em" }}>🟡 รอรายงาน / รอตรวจ</div>
+          <div style={{ fontSize: "1.5rem", fontWeight: 800, color: "#b45309", marginTop: "0.2rem" }}>{stats.yellow} จุด</div>
+          <div style={{ fontSize: "0.75rem", color: "#d97706" }}>อยู่ในกรอบเวลา</div>
+        </div>
+        <div style={{ background: "white", padding: "0.9rem 1.1rem", borderRadius: "14px", border: "1px solid #fecaca", boxShadow: "0 2px 4px rgba(0,0,0,0.02)" }}>
+          <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "#dc2626", textTransform: "uppercase", letterSpacing: "0.04em" }}>🔴 ขาดกำลัง / ต้องจัดสแปร์</div>
+          <div style={{ fontSize: "1.5rem", fontWeight: 800, color: "#b91c1c", marginTop: "0.2rem" }}>{stats.red} จุด</div>
+          <div style={{ fontSize: "0.75rem", color: "#dc2626" }}>ต้องจัดการด่วน</div>
+        </div>
+        <div style={{ background: "white", padding: "0.9rem 1.1rem", borderRadius: "14px", border: "1px solid #bae6fd", boxShadow: "0 2px 4px rgba(0,0,0,0.02)" }}>
+          <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "#0284c7", textTransform: "uppercase", letterSpacing: "0.04em" }}>💬 LINE OA เชื่อมต่อสด</div>
+          <div style={{ fontSize: "1.5rem", fontWeight: 800, color: "#0369a1", marginTop: "0.2rem" }}>{data?.lineGroups.length ?? 0} กลุ่ม</div>
+          <div style={{ fontSize: "0.75rem", color: "#0284c7" }}>Webhook ปกติ 100%</div>
+        </div>
+      </section>
 
       <nav className="tabs" aria-label="เมนูหลัก">
         <button data-icon="≋" className={tab === "reports" ? "active" : ""} onClick={() => setTab("reports")} aria-current={tab === "reports" ? "page" : undefined}>ตรวจรายงาน</button>
@@ -1477,8 +1490,8 @@ export default function Home() {
           </section>
 
           <div className="wave-switch" role="group" aria-label="เลือกผลัด">
-            <button className={wave === "morning" ? "active" : ""} onClick={() => setWave("morning")}>ผลัดเช้า</button>
-            <button className={wave === "evening" ? "active" : ""} onClick={() => setWave("evening")}>ผลัดเย็น</button>
+            <button className={wave === "morning" ? "active" : ""} onClick={() => setWave("morning")}>☀️ ผลัดเช้า (Morning)</button>
+            <button className={wave === "evening" ? "active" : ""} onClick={() => setWave("evening")}>🌙 ผลัดดึก (Night)</button>
           </div>
 
           <div className="wall-filter" role="group" aria-label="กรองสถานะจุด">

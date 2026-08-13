@@ -1253,27 +1253,47 @@ async function recoverLineGroupsFromWebhookEvents() {
   // Profile refresh must not run the expensive bulk point activation before
   // contacting LINE.  This helper merely restores registry rows that are
   // missing; normal webhook handling already activates a newly received group.
-  return operations.length;
+export function sanitizeLineId(raw: string): string {
+  const trimmed = String(raw || "").trim();
+  // Extract C[32 hex], R[32 hex], U[32 hex] anywhere in the string/URL path
+  const match = trimmed.match(/[CRU][0-9a-fA-F]{32}/);
+  if (match) return match[0];
+  return trimmed;
 }
 
 export async function sendLineConnectionTest(input: { groupId: string; actor: string }) {
   await ensureDatabase();
-  const groupId = input.groupId.trim();
+  const rawGroupId = input.groupId.trim();
+  const cleanId = sanitizeLineId(rawGroupId);
   const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
-  if (!groupId) throw new Error("ไม่พบกลุ่ม LINE ที่ต้องการทดสอบ");
+  if (!cleanId) throw new Error("ไม่พบกลุ่ม LINE ที่ต้องการทดสอบ");
   if (!token) throw new Error("ยังไม่ได้ตั้งค่า Channel access token ในระบบที่ปลอดภัย");
-  const group = await database().prepare("SELECT group_name FROM line_group_registry WHERE id = ?").bind(groupId).first<D1Row>();
-  if (!group) throw new Error("กลุ่มนี้ยังไม่อยู่ในทะเบียน LINE");
+  
+  const group = await database().prepare("SELECT group_name FROM line_group_registry WHERE id = ? OR id = ?").bind(cleanId, rawGroupId).first<D1Row>();
+  const groupName = group ? String(group.group_name) : cleanId;
+
+  // Auto clean registry if id was dirty
+  if (cleanId !== rawGroupId) {
+    const db = database();
+    const now = bangkokNow().iso;
+    await db.prepare("INSERT INTO line_group_registry (id, group_name, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, updated_at = excluded.updated_at").bind(cleanId, groupName, now).run().catch(() => {});
+    await db.prepare("DELETE FROM line_group_registry WHERE id = ?").bind(rawGroupId).run().catch(() => {});
+  }
+
   const response = await fetch("https://api.line.me/v2/bot/message/push", {
     method: "POST",
     headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
-      to: groupId,
+      to: cleanId,
       messages: [{ type: "text", text: "ALPHA Command Center: ทดสอบการเชื่อมต่อกลุ่มสำเร็จ\nข้อความนี้ไม่แสดงสถานะกำลังหรือข้อมูลภายใน" }],
     }),
   });
-  if (!response.ok) throw new Error("LINE OA ไม่รับการส่งข้อความทดสอบ โปรดตรวจว่าบอตอยู่ในกลุ่มและสิทธิ์ Channel ถูกต้อง");
-  await addAudit("line_group", groupId, "connection_test_sent", input.actor, `ส่งข้อความทดสอบไปยัง ${String(group.group_name)} โดยไม่ส่งข้อมูลภายใน`);
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`LINE OA ไม่รับการส่งข้อความทดสอบ (${response.status}): ${errText}`);
+  }
+  await addAudit("line_group", cleanId, "connection_test_sent", input.actor, `ส่งข้อความทดสอบไปยัง ${groupName}`);
+  return { ok: true, groupId: cleanId, message: `ส่งข้อความทดสอบไปยัง "${groupName}" สำเร็จแล้ว` };
 }
 
 export async function saveLineReminderSettings(input: { targetGroupId: string; escalationTargetGroupId?: string; autoEnabled: boolean; autoEscalationEnabled?: boolean; actor: string }) {
@@ -1577,12 +1597,16 @@ function lineRetryKey(...parts: string[]) {
 }
 
 async function pushLineText(targetGroupId: string, message: string, token: string, retryKey?: string) {
+  const cleanId = sanitizeLineId(targetGroupId);
   const response = await fetch("https://api.line.me/v2/bot/message/push", {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(retryKey ? { "X-Line-Retry-Key": retryKey } : {}) },
-    body: JSON.stringify({ to: targetGroupId, messages: [{ type: "text", text: message }] }),
+    body: JSON.stringify({ to: cleanId, messages: [{ type: "text", text: message }] }),
   });
-  if (!response.ok) throw new Error("LINE OA ไม่รับการส่งแจ้งเตือน โปรดตรวจบอทและสิทธิ์ในกลุ่มปลายทาง");
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`LINE OA ไม่รับการส่งแจ้งเตือน (${response.status}): ${errText.slice(0, 200)}`);
+  }
 }
 
 export async function sendLineReportReminder(input: { targetGroupId: string; actor: string; force?: boolean; automatic?: boolean; roundTime?: string; sendEscalation?: boolean }) {
@@ -2050,6 +2074,23 @@ export async function getShiftGroupConfigurations() {
     autoReplyByGroup.set(r.group_id, r);
   });
 
+  // ดึงข้อความล่าสุดและ sender ของแต่ละกลุ่ม
+  const latestEventsResult = await db.prepare(`
+    SELECT group_id, MAX(received_at) AS last_report_at, sender_key, message_type
+    FROM line_webhook_events
+    WHERE event_type = 'message'
+    GROUP BY group_id
+  `).all<D1Row>().catch(() => ({ results: [] }));
+  const latestEventByGroup = new Map<string, any>();
+  (latestEventsResult.results || []).forEach((e: any) => {
+    latestEventByGroup.set(e.group_id, e);
+  });
+
+  const now = bangkokNow();
+  const currentNowMs = Date.parse(now.iso);
+  const currentHour = Number(now.time.slice(0, 2));
+  const isNightTime = currentHour >= 18 || currentHour < 6;
+
   const allRows = (groupsResult.results || []) as any[];
 
   const configs: any[] = [];
@@ -2064,14 +2105,48 @@ export async function getShiftGroupConfigurations() {
     const isCommandRoom = g.group_id === commandTargetGroupId;
     
     const replyConfig = autoReplyByGroup.get(g.group_id);
-    // ออโต้เปิดใช้งานเสมอเป็นค่าเริ่มต้น (ยกเว้นกลุ่มสั่งการ หรือผู้ใช้จงใจปิด)
     const autoReplyEnabled = isCommandRoom ? false : (replyConfig ? replyConfig.mode !== "disabled" : true);
+
+    const latestEvent = latestEventByGroup.get(g.group_id);
+    const lastReportAt = latestEvent?.last_report_at || g.last_seen_at || null;
+    const lastSender = latestEvent?.sender_key || null;
+
+    let silentMinutes = 0;
+    let silentHours = 0;
+    if (lastReportAt) {
+      const lastMs = Date.parse(lastReportAt);
+      if (!isNaN(lastMs)) {
+        silentMinutes = Math.max(0, Math.floor((currentNowMs - lastMs) / 60000));
+        silentHours = Math.floor(silentMinutes / 60);
+      }
+    }
+
+    const intervalHours = 2; // ค่าเริ่มต้นรอบตรวจ 2 ชม.
+
+    // คำนวณสถานะกะปัจจุบัน (Shift-Aware State)
+    let shiftState: "active_normal" | "active_silent" | "off_shift" = "active_normal";
+    const isInActiveShift = isNightTime ? Boolean(eveningShift) : Boolean(morningShift);
+
+    if (!isInActiveShift) {
+      shiftState = "off_shift"; // อยู่นอกเวลากะ ไม่นับว่าเงียบ
+    } else if (silentMinutes >= intervalHours * 60) {
+      shiftState = "active_silent"; // อยู่ในเวลากะ และขาดการส่งเกินรอบตรวจ
+    } else {
+      shiftState = "active_normal"; // อยู่ในเวลากะ ส่งรายงานปกติ
+    }
 
     const item = {
       groupId: g.group_id,
       groupName: g.group_name || `กลุ่ม ${g.group_id.slice(-6)}`,
       pictureUrl: g.picture_url,
-      lastSeenAt: g.last_seen_at,
+      lastSeenAt: lastReportAt,
+      lastSender,
+      silentMinutes,
+      silentHours,
+      intervalHours,
+      shiftState,
+      isInActiveShift,
+      currentWave: isNightTime ? "evening" : "morning",
       siteId: g.site_id,
       customerName: g.customer_name || "ยังไม่ระบุลูกค้า",
       hasMorningShift: Boolean(morningShift),
@@ -2098,12 +2173,87 @@ export async function getShiftGroupConfigurations() {
     unmanagedGroups,
     commandTargetGroupId,
     commandTargetGroupName: commandTargetGroup ? commandTargetGroup.group_name : null,
+    currentWave: isNightTime ? "evening" : "morning",
+    currentWaveLabel: isNightTime ? "ผลัดดึก (18:00 - 06:00)" : "ผลัดเช้า (06:00 - 18:00)",
     allGroups: allRows.map((r) => ({
       id: r.group_id,
       name: r.group_name || `กลุ่ม ${r.group_id.slice(-6)}`,
       pictureUrl: r.picture_url,
     })),
   };
+}
+
+export async function buildSilentGroupsAlertSummary(input?: { intervalHours?: number }) {
+  await ensureDatabase();
+  const db = database();
+  const shiftData = await getShiftGroupConfigurations();
+  const intervalHours = input?.intervalHours || 2;
+  const now = bangkokNow();
+
+  // กรองเฉพาะกลุ่มที่: อยู่ในเวลากะปฏิบัติงานจริง + ไม่ใช่กลุ่มสั่งการ + ขาดการรายงานเกินกำหนด
+  const silentGroups = shiftData.configs.filter(
+    (c) => c.isConfigured && !c.isCommandRoom && c.isInActiveShift && c.shiftState === "active_silent"
+  );
+
+  const waveName = shiftData.currentWave === "evening" ? "ผลัดดึก" : "ผลัดเช้า";
+
+  const messageLines = [
+    `🔇 แจ้งเตือนจุดที่ขาดการส่งรายงานเกินกำหนด (${waveName})`,
+    `🕒 ณ เวลา ${now.time} น. (เกณฑ์รอบตรวจ: ทุก ${intervalHours} ชม.)`,
+    `⚠️ พบจุดที่เงียบเกินกำหนด: ${silentGroups.length} จุด`,
+    "",
+    ...silentGroups.map((g, idx) => {
+      const hours = g.silentHours;
+      const mins = g.silentMinutes % 60;
+      const timeAgoText = hours > 0 ? `${hours} ชม. ${mins} นาที` : `${mins} นาที`;
+      return `${idx + 1}. ${g.groupName.slice(0, 45)} · ขาดส่งมาแล้ว ${timeAgoText}`;
+    }),
+    "",
+    "กรุณาสายตรวจเข้าตรวจสอบจุดที่เงียบผิดปกติ",
+    "— ALPHA Command Center",
+  ];
+
+  return {
+    hasSilent: silentGroups.length > 0,
+    silentCount: silentGroups.length,
+    silentGroups,
+    waveName,
+    message: messageLines.join("\n").slice(0, 4900),
+    commandTargetGroupId: shiftData.commandTargetGroupId,
+  };
+}
+
+export async function sendSilentAlertToCommandRoom(actor = "admin") {
+  const summary = await buildSilentGroupsAlertSummary();
+  if (!summary.hasSilent) {
+    return { ok: true, skipped: true, message: "ไม่มีจุดที่เงียบเกินกำหนดในรอบนี้" };
+  }
+  if (!summary.commandTargetGroupId) {
+    return { ok: false, error: "ยังไม่ได้ระบุกลุ่มสั่งการ กรุณาเลือกกลุ่มสั่งการก่อน" };
+  }
+
+  const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
+  if (!token) throw new Error("ไม่พบ LINE Channel Access Token");
+
+  const response = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      to: summary.commandTargetGroupId,
+      messages: [{ type: "text", text: summary.message }],
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`LINE Push Error: ${errText.slice(0, 200)}`);
+  }
+
+  await addAudit("line_reminder", summary.commandTargetGroupId, "silent_alert_sent", actor, `ส่งสรุปจุดเงียบ ${summary.silentCount} จุดเข้ากลุ่มสั่งการ`);
+  return { ok: true, sent: true, count: summary.silentCount, message: `ส่งแจ้งเตือนจุดเงียบ ${summary.silentCount} จุดเข้ากลุ่มสั่งการเรียบร้อยแล้ว` };
 }
 
 export async function setGroupAutoReply(input: { groupId: string; enabled: boolean; actor?: string }) {
@@ -2432,4 +2582,101 @@ export async function sendShiftAlertToCommandRoom(actor = "system", targetGroupI
     targetGroupId,
     message: summary.message,
   };
+}
+
+export async function discoverAndRecoverAllGroups() {
+  await ensureDatabase();
+  const db = database();
+  const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
+  const now = bangkokNow().iso;
+
+  // 1. ดึงกลุ่มทั้งหมดจาก line_webhook_events
+  const eventRows = await db.prepare(`
+    SELECT group_id, MAX(received_at) AS last_seen_at, COUNT(*) AS event_count
+    FROM line_webhook_events
+    WHERE group_id IS NOT NULL AND group_id != ''
+    GROUP BY group_id
+    ORDER BY last_seen_at DESC
+  `).all<D1Row>().catch(() => ({ results: [] }));
+
+  // 2. ดึงกลุ่มที่มีใน registry
+  const regRows = await db.prepare(`
+    SELECT id, group_name, picture_url, last_seen_at
+    FROM line_group_registry
+  `).all<D1Row>().catch(() => ({ results: [] }));
+  const regMap = new Map<string, any>();
+  (regRows.results || []).forEach((r: any) => regMap.set(r.id, r));
+
+  const allFoundGroups: Array<{
+    groupId: string;
+    groupName: string;
+    pictureUrl: string | null;
+    lastSeenAt: string | null;
+    eventCount: number;
+    isCommandCandidate: boolean;
+  }> = [];
+
+  const seenIds = new Set<string>();
+
+  // วนลูปกลุ่มจาก webhook events
+  for (const er of eventRows.results || []) {
+    const rawId = String(er.group_id || "").trim();
+    const cleanId = sanitizeLineId(rawId);
+    if (!cleanId || seenIds.has(cleanId)) continue;
+    seenIds.add(cleanId);
+
+    const reg = regMap.get(cleanId);
+    let groupName = reg?.group_name || `กลุ่ม ${cleanId.slice(-6)}`;
+    let pictureUrl = reg?.picture_url || null;
+
+    if (token && (!reg || isPlaceholderLineGroupName(groupName, cleanId))) {
+      try {
+        const profile = await fetchLineGroupProfile(cleanId, token);
+        if (profile?.groupName) {
+          groupName = profile.groupName;
+          pictureUrl = profile.pictureUrl || pictureUrl;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    await db.prepare(`
+      INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at)
+      VALUES (?, ?, ?, ?, 'webhook', ?)
+      ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), last_seen_at = excluded.last_seen_at, updated_at = excluded.updated_at
+    `).bind(cleanId, groupName, pictureUrl, er.last_seen_at || now, now).run().catch(() => {});
+
+    const isCommandCandidate = /สายตรวจ|สนง|สำนักงาน|COP|Command|ศูนย์/i.test(groupName);
+
+    allFoundGroups.push({
+      groupId: cleanId,
+      groupName,
+      pictureUrl,
+      lastSeenAt: er.last_seen_at ? String(er.last_seen_at) : null,
+      eventCount: Number(er.event_count || 0),
+      isCommandCandidate,
+    });
+  }
+
+  // วนลูปกลุ่มที่อยู่ใน registry แต่ไม่มีใน webhook events
+  for (const rr of regRows.results || []) {
+    const cleanId = sanitizeLineId(String(rr.id || ""));
+    if (!cleanId || seenIds.has(cleanId)) continue;
+    seenIds.add(cleanId);
+    const groupName = String(rr.group_name || `กลุ่ม ${cleanId.slice(-6)}`);
+    const isCommandCandidate = /สายตรวจ|สนง|สำนักงาน|COP|Command|ศูนย์/i.test(groupName);
+    allFoundGroups.push({
+      groupId: cleanId,
+      groupName,
+      pictureUrl: rr.picture_url ? String(rr.picture_url) : null,
+      lastSeenAt: rr.last_seen_at ? String(rr.last_seen_at) : null,
+      eventCount: 0,
+      isCommandCandidate,
+    });
+  }
+
+  allFoundGroups.sort((a, b) => Number(b.isCommandCandidate) - Number(a.isCommandCandidate) || String(b.lastSeenAt || "").localeCompare(String(a.lastSeenAt || "")));
+
+  return allFoundGroups;
 }

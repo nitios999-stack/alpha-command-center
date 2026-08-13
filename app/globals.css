@@ -190,32 +190,54 @@ button:disabled {
 }
 
 .tabs {
-  gap: 7px;
-  margin: 24px 0;
-  padding: 6px;
-  background: rgba(255, 255, 255, 0.7);
-  border: 1px solid rgba(223, 230, 226, 0.9);
-  border-radius: 15px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 20px 0;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(226, 232, 240, 0.95);
+  border-radius: 16px;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.03);
+  overflow-x: auto;
 }
 
 .tabs button {
   border: 0;
-  padding: 10px 14px;
-  color: var(--muted);
+  padding: 9px 16px;
+  color: #64748b;
   font-weight: 700;
+  font-size: 0.9rem;
   background: transparent;
   border-radius: 10px;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.tabs button:hover:not(.active) {
+  color: #0f172a;
+  background: rgba(241, 245, 249, 0.8);
 }
 
 .tabs button.active {
-  color: white;
-  background: var(--forest);
-  box-shadow: 0 5px 12px rgba(10, 91, 70, 0.18);
+  color: #ffffff;
+  background: linear-gradient(135deg, #0a5b46 0%, #073a2e 100%);
+  box-shadow: 0 4px 12px rgba(10, 91, 70, 0.25);
+  transform: translateY(-1px);
 }
 
 .tabs button.quiet {
   margin-left: auto;
-  color: var(--forest);
+  color: #0a5b46;
+  font-weight: 600;
+}
+
+.tabs button.quiet:hover {
+  background: rgba(10, 91, 70, 0.08);
 }
 
 .notice {

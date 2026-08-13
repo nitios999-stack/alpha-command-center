@@ -120,7 +120,7 @@ export async function POST(request: Request) {
     } else if (payload.type === "line_delete") {
       await deleteLineGroup(payload.groupId ?? "", actor);
     } else if (payload.type === "line_connection_test") {
-      await sendLineConnectionTest({ groupId: payload.groupId ?? "", actor });
+      result = await sendLineConnectionTest({ groupId: payload.groupId ?? "", actor });
     } else if (payload.type === "line_reminder_settings") {
       await saveLineReminderSettings({ targetGroupId: payload.targetGroupId ?? "", escalationTargetGroupId: payload.escalationTargetGroupId, autoEnabled: payload.autoEnabled === true, autoEscalationEnabled: payload.autoEscalationEnabled === true, actor });
     } else if (payload.type === "line_reminder_preview") {
