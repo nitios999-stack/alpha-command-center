@@ -1,17 +1,17 @@
-import { recordLineWebhookCallback, saveLineWebhookEvent, updateLineGroupProfile, consumeAutoReplyQuota, consumeQueuedSticker, logOutboundAction } from "../db/command-center";
+import { recordLineWebhookCallback, saveLineWebhookEvent, updateLineGroupProfile, consumeAutoReplyQuota, consumeQueuedSticker, logOutboundAction, evaluateShiftCheckIn } from "../db/command-center";
 
 type LineEnv = { LINE_CHANNEL_ACCESS_TOKEN?: string; LINE_CHANNEL_SECRET?: string; LINE_REPORT_SENDER_SALT?: string };
 type LineEvent = {
   webhookEventId?: string;
   type?: string;
   timestamp?: number;
-  message?: { type?: string; packageId?: string; stickerId?: string };
+  message?: { type?: string; packageId?: string; stickerId?: string; text?: string };
   source?: { type?: string; groupId?: string; roomId?: string; userId?: string };
   replyToken?: string;
   deliveryContext?: { isRedelivery?: boolean };
 };
 type LineWebhook = { events?: LineEvent[] };
-type GroupEvent = { eventId: string; eventType: string; groupId: string; messageType?: string; senderKey?: string; replyToken?: string; isRedelivery?: boolean };
+type GroupEvent = { eventId: string; eventType: string; groupId: string; messageType?: string; text?: string; senderKey?: string; replyToken?: string; isRedelivery?: boolean };
 
 function base64(bytes: ArrayBuffer) {
   const data = new Uint8Array(bytes);
@@ -118,11 +118,15 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
     if (eventType === "message" && event.message?.type === "sticker") {
       messageType = `sticker:${event.message.packageId}:${event.message.stickerId}`;
     }
+    const text = eventType === "message" && event.message?.type === "text"
+      ? event.message.text?.trim()
+      : undefined;
     return {
       groupId,
       eventId: event.webhookEventId?.trim() || fallbackEventId(event, index),
       eventType,
       messageType,
+      text,
       senderKey: eventType === "message" ? await senderFingerprint(event.source?.userId, senderSalt) : undefined,
       replyToken: event.replyToken?.trim(),
       isRedelivery: event.deliveryContext?.isRedelivery,
@@ -130,18 +134,27 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
   }));
   const groupEvents = groups.filter((group): group is GroupEvent => Boolean(group));
 
-  // Store the verified event before any optional profile lookup. The quick 200
-  // acknowledgement is what prevents LINE from cancelling or retrying a valid event.
-  const saved = await Promise.all(groupEvents.map((group) => saveLineWebhookEvent({
-    eventId: group.eventId,
-    groupId: group.groupId,
-    // The database stores only message kind and a non-reversible sender key;
-    // it never receives the chat text or the raw LINE user ID.
-    eventType: group.eventType,
-    messageType: group.messageType,
-    senderKey: group.senderKey,
-    groupName: placeholderName(group.groupId),
-  })));
+  // Store the verified event before any optional profile lookup.
+  const saved = await Promise.all(groupEvents.map(async (group) => {
+    // Real-time Shift Check-in Evaluation
+    evaluateShiftCheckIn({
+      groupId: group.groupId,
+      eventId: group.eventId,
+      messageType: group.messageType,
+      text: group.text,
+      senderKey: group.senderKey,
+      receivedAt: new Date().toISOString(),
+    }).catch(() => {});
+
+    return saveLineWebhookEvent({
+      eventId: group.eventId,
+      groupId: group.groupId,
+      eventType: group.eventType,
+      messageType: group.messageType,
+      senderKey: group.senderKey,
+      groupName: placeholderName(group.groupId),
+    });
+  }));
   // Auto-reply logic (Group by groupId to process sequentially and prevent race conditions)
   const eventsByGroup = new Map<string, { group: GroupEvent; idx: number }[]>();
   groupEvents.forEach((group, idx) => {
@@ -178,9 +191,7 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
         actionType = "manual-batch-queued";
         triggerEventId = queuedSticker.queuedId;
       } else {
-        const quota = await consumeAutoReplyQuota(group.groupId, group.eventId);
-        
-        // TRIGGER DEBOUNCER ONLY ON THE LAST MESSAGE OF THE BATCH
+        // TRIGGER DEBOUNCER ONLY ON THE LAST MESSAGE OF THE BATCH (30s after the last photo/message)
         if (isLastInBatch) {
           try {
             const receivedAt = new Date().toISOString();
@@ -199,80 +210,6 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
             // Ignore fetch errors
           }
         }
-
-        if (!quota.allowed) {
-          if (quota.reason !== "disabled" && quota.reason !== "no_new_event" && quota.reason !== "no_sticker_configured" && quota.reason !== "concurrent_update_failed") {
-            await logOutboundAction({
-              id: actionId,
-              groupId: group.groupId,
-              triggerEventId: group.eventId,
-              actionType: "auto-reply",
-              stickerPackageId: quota.stickerPackageId || "-",
-              stickerId: quota.stickerId || "-",
-              status: "skipped",
-              skipReason: quota.reason
-            });
-          }
-          continue;
-        }
-        stickerPackageId = quota.stickerPackageId!;
-        stickerId = quota.stickerId!;
-      }
-
-      // Call LINE API (Immediate Opening Reply)
-      try {
-        const response = await fetch("https://api.line.me/v2/bot/message/reply", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${accessToken}`
-          },
-          body: JSON.stringify({
-            replyToken: group.replyToken,
-            messages: [{
-              type: "sticker",
-              packageId: stickerPackageId,
-              stickerId: stickerId
-            }]
-          })
-        });
-
-        if (!response.ok) {
-          const errBody = await response.text();
-          await logOutboundAction({
-            id: actionId,
-            groupId: group.groupId,
-            triggerEventId: triggerEventId,
-            actionType: actionType as any,
-            stickerPackageId: stickerPackageId,
-            stickerId: stickerId,
-            status: "failed",
-            skipReason: `API Error: ${response.status} ${errBody.slice(0, 100)}`
-          });
-          continue;
-        }
-
-        await logOutboundAction({
-          id: actionId,
-          groupId: group.groupId,
-          triggerEventId: triggerEventId,
-          actionType: actionType as any,
-          stickerPackageId: stickerPackageId,
-          stickerId: stickerId,
-          status: "sent"
-        });
-
-      } catch (e) {
-        await logOutboundAction({
-          id: actionId,
-          groupId: group.groupId,
-          triggerEventId: triggerEventId,
-          actionType: actionType as any,
-          stickerPackageId: stickerPackageId,
-          stickerId: stickerId,
-          status: "failed",
-          skipReason: "Network error"
-        });
       }
     }
   }));

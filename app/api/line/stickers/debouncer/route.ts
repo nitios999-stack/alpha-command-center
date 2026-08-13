@@ -5,19 +5,19 @@ export const runtime = "nodejs";
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { groupId, eventId, replyToken, receivedAt, accessToken: passedToken } = body;
+    const { groupId, eventId, replyToken, accessToken: passedToken } = body;
     
     if (!groupId || !eventId || !replyToken) {
       return Response.json({ ok: false, error: "Missing required fields" }, { status: 400 });
     }
 
-    // หน่วงเวลารอ 20 วินาที เพื่อดูว่ามีข้อความ/รูปตามมาอีกหรือไม่ (ปลอดภัยภายใต้กรอบ 60 วิ ของ LINE Token)
-    await new Promise((resolve) => setTimeout(resolve, 20000));
+    // หน่วงเวลารอ 35 วินาที เพื่อดูว่ามีข้อความ/รูปตามมาอีกหรือไม่ (LINE Token อยู่ได้ 60 วิ ปลอดภัย 100%)
+    await new Promise((resolve) => setTimeout(resolve, 35000));
 
     await ensureDatabase();
     const db = database();
     
-    // 1. ค้นหา event ปัจจุบันในฐานข้อมูลเพื่อดึง rowid และ received_at
+    // 1. ค้นหา event ปัจจุบันในฐานข้อมูลเพื่อดึง rowid
     const currentEvent = (await db.prepare(
       "SELECT rowid, received_at FROM line_webhook_events WHERE id = ?"
     ).bind(eventId).first()) as { rowid: number; received_at: string } | null;
@@ -29,30 +29,28 @@ export async function POST(request: Request) {
       ).bind(groupId, currentEvent.rowid).first()) as { id: string } | null;
 
       if (newerEvent) {
-        // มีข้อความใหม่เข้ามา แปลว่ายังรายงานไม่เสร็จ ให้ข้ามตัวนี้ไป
+        // มีข้อความใหม่เข้ามา แปลว่ายังส่งรูปไม่เสร็จ ให้ข้ามตัวนี้ไป (ตัวใหม่จะนับ 30 วิ ต่อเอง)
         return Response.json({ ok: true, skipped: true, reason: "newer_message_exists" });
-      }
-
-      // 2. เช็กว่าในรอบ 5 นาทีก่อนหน้านี้ มีการส่งรายงานกี่ข้อความ
-      const eventTime = currentEvent.received_at || receivedAt || new Date().toISOString();
-      const fiveMinutesAgo = new Date(new Date(eventTime).getTime() - 5 * 60000).toISOString();
-      const burst = (await db.prepare(
-        "SELECT COUNT(*) as c FROM line_webhook_events WHERE group_id = ? AND event_type = 'message' AND received_at <= ? AND received_at >= ?"
-      ).bind(groupId, eventTime, fiveMinutesAgo).first()) as { c: number } | null;
-
-      if (!burst || burst.c <= 1) {
-        // ส่งมาแค่ข้อความเดียวเดี่ยวๆ ไม่เข้าข่ายการส่งหลายรูป/รายงานยาว ข้ามไป (มีบอตทักเปิดให้แล้ว)
-        return Response.json({ ok: true, skipped: true, reason: "single_message_burst" });
       }
     }
 
-    // 3. ดึงการตั้งค่าสติกเกอร์ของกลุ่ม
+    // 2. ดึงการตั้งค่าสติกเกอร์ของกลุ่ม
     const configData = (await db.prepare(
       "SELECT * FROM line_auto_reply_configs WHERE group_id = ? AND mode = 'reply_on_new_report'"
     ).bind(groupId).first()) as any;
     
     if (!configData || !configData.sticker_package_id || !configData.sticker_id) {
       return Response.json({ ok: true, skipped: true, reason: "no_config" });
+    }
+
+    // เช็ก Cooldown
+    const now = new Date();
+    if (configData.last_reply_at) {
+      const lastReplyDate = new Date(configData.last_reply_at);
+      const diffMinutes = (now.getTime() - lastReplyDate.getTime()) / 60000;
+      if (diffMinutes < (configData.cooldown_minutes || 3)) {
+        return Response.json({ ok: true, skipped: true, reason: "cooldown_active" });
+      }
     }
 
     const actionId = `debounce-${Date.now()}`;
@@ -62,7 +60,7 @@ export async function POST(request: Request) {
       return Response.json({ ok: false, error: "no token" }, { status: 500 });
     }
 
-    // 4. ส่งสติกเกอร์ปิดท้ายผ่าน Reply API (ฟรี 100% ไม่เสียโควต้าของ LINE)
+    // 3. ส่งสติกเกอร์ปิดท้าย 1 ตัว (30 วิ หลังรูปสุดท้าย) ผ่าน Reply API (ฟรี 100% ไม่เสียโควต้าของ LINE)
     const response = await fetch("https://api.line.me/v2/bot/message/reply", {
       method: "POST",
       headers: {
@@ -94,6 +92,15 @@ export async function POST(request: Request) {
       return Response.json({ ok: false, error: errBody });
     }
 
+    // บันทึกเวลาตอบกลับล่าสุดเพื่อกัน Cooldown
+    await db.prepare(`
+      UPDATE line_auto_reply_configs 
+      SET last_reply_at = ?,
+          last_inbound_event_id = ?,
+          updated_at = ?
+      WHERE group_id = ?
+    `).bind(now.toISOString(), eventId, now.toISOString(), groupId).run();
+
     await logOutboundAction({
       id: actionId,
       groupId: groupId,
@@ -102,7 +109,7 @@ export async function POST(request: Request) {
       stickerPackageId: configData.sticker_package_id,
       stickerId: configData.sticker_id,
       status: "sent",
-      skipReason: "จังหวะปิดจบ (reply ฟรี)"
+      skipReason: "จังหวะปิดจบ 30 วิ (reply ฟรี 100%)"
     });
 
     return Response.json({ ok: true, sent: true });

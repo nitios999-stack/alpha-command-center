@@ -1889,3 +1889,366 @@ export async function logOutboundAction(input: {
     input.stickerPackageId, input.stickerId, input.status, input.skipReason || null, bangkokNow().iso
   ).run();
 }
+
+// ---------------------------------------------------------------------------
+// DYNAMIC SHIFT CHECK-IN & ALERT ENGINE
+// ---------------------------------------------------------------------------
+
+const SHIFT_HANDOVER_KEYWORDS = [
+  "รับมอบเวร", "ส่งมอบเวร", "เข้าเวร", "ผลัดดึก", "ผลัดเช้า", "ประจำจุด", 
+  "ว.4", "รายงานตัว", "พร้อมปฏิบัติหน้าที่", "เปลี่ยนกะ", "เข้าจุด", "รับเวร", "ส่งเวร"
+];
+
+export async function evaluateShiftCheckIn(input: {
+  groupId: string;
+  eventId: string;
+  messageType?: string;
+  text?: string;
+  senderKey?: string;
+  receivedAt: string;
+}): Promise<{ checkedIn: boolean; siteName?: string; deadline?: string; lateMinutes?: number }> {
+  try {
+    await ensureDatabase();
+    const db = database();
+    
+    // 1. ค้นหา site_id ที่ผูกกับกลุ่มนี้
+    const group = (await db.prepare(
+      "SELECT site_id, group_name FROM line_groups WHERE id = ?"
+    ).bind(input.groupId).first()) as { site_id: string; group_name: string } | null;
+
+    if (!group || !group.site_id) return { checkedIn: false };
+
+    const now = bangkokNow();
+    const today = now.date;
+    const currentMinutes = minuteFromTime(now.time);
+
+    // 2. ดึงสล็อตของวันนี้สำหรับจุดนี้
+    const slotsResult = await db.prepare(
+      "SELECT * FROM coverage_slots WHERE site_id = ? AND operational_date = ? AND state IN ('waiting', 'missing', 'unassigned')"
+    ).bind(group.site_id, today).all<D1Row>();
+
+    const slots = (slotsResult.results || []) as any[];
+    if (!slots.length) return { checkedIn: false };
+
+    // 3. ตรวจสอบว่ามีสล็อตไหนอยู่ในกรอบเวลาเข้าเวร (ล่วงหน้า 60 นาที ถึง หลังเวลาเริ่ม 180 นาที)
+    for (const slot of slots) {
+      const deadlineMins = minuteFromTime(slot.deadline || "18:00");
+      const windowStart = deadlineMins - 60; // ก่อนเวลา 1 ชั่วโมง
+      const windowEnd = deadlineMins + 180;   // หลังเวลาไม่เกิน 3 ชั่วโมง
+
+      if (currentMinutes >= windowStart && currentMinutes <= windowEnd) {
+        // ตรวจสอบเงื่อนไขการเป็นรายงานเข้าเวร
+        let isHandover = false;
+        
+        // ก. ตรวจสอบคีย์เวิร์ดในข้อความ
+        if (input.text) {
+          const lowerText = input.text.toLowerCase();
+          isHandover = SHIFT_HANDOVER_KEYWORDS.some((kw) => lowerText.includes(kw));
+        }
+
+        // ข. ตรวจสอบรูปภาพ หรือตำแหน่งพิกัด
+        const isPhotoOrLocation = input.messageType === "image" || input.messageType === "location" || Boolean(input.messageType?.startsWith("image"));
+        
+        // ถ้ามีคีย์เวิร์ดชัดเจน หรือเป็นรูปภาพที่ส่งในช่วงเวลาเข้าเวร
+        if (isHandover || isPhotoOrLocation) {
+          const lateMins = Math.max(0, currentMinutes - deadlineMins);
+          
+          await db.prepare(`
+            UPDATE coverage_slots 
+            SET state = 'confirmed',
+                reported_at = ?,
+                source = ?,
+                late_minutes = ?,
+                updated_at = ?
+            WHERE id = ?
+          `).bind(now.time, isHandover ? "LINE รับมอบเวร" : "LINE ส่งรูปเข้าเวร", lateMins, now.iso, slot.id).run();
+
+          await addAudit(
+            "coverage_slot", 
+            slot.id, 
+            "shift_checked_in", 
+            "LINE Webhook", 
+            `รปภ. เข้าเวรจุด ${slot.site_name} (${slot.deadline}) เวลา ${now.time}${lateMins > 0 ? ` (สาย ${lateMins} นาที)` : " (ตรงเวลา)"}`
+          );
+
+          return { 
+            checkedIn: true, 
+            siteName: slot.site_name, 
+            deadline: slot.deadline, 
+            lateMinutes: lateMins 
+          };
+        }
+      }
+    }
+
+    return { checkedIn: false };
+  } catch (err) {
+    return { checkedIn: false };
+  }
+}
+
+export async function getShiftGroupConfigurations() {
+  await ensureDatabase();
+  const db = database();
+  
+  const groupsResult = await db.prepare(`
+    SELECT r.id AS group_id, r.group_name, r.picture_url, r.last_seen_at,
+           m.site_id, s.customer_name, s.active AS site_active
+    FROM line_group_registry r
+    LEFT JOIN line_groups m ON m.id = r.id
+    LEFT JOIN operational_sites s ON s.id = m.site_id
+    ORDER BY r.group_name ASC
+  `).all<D1Row>();
+
+  const templatesResult = await db.prepare(`
+    SELECT id, site_id, wave, post_name, slot_label, assigned_guard, deadline, active
+    FROM shift_templates
+    WHERE active = 1
+  `).all<D1Row>();
+
+  const templatesBySite = new Map<string, any[]>();
+  (templatesResult.results || []).forEach((t: any) => {
+    const list = templatesBySite.get(t.site_id) || [];
+    list.push(t);
+    templatesBySite.set(t.site_id, list);
+  });
+
+  const configs = ((groupsResult.results || []) as any[]).map((g) => {
+    const templates = g.site_id ? templatesBySite.get(g.site_id) || [] : [];
+    const morningShift = templates.find((t) => t.wave === "morning");
+    const eveningShift = templates.find((t) => t.wave === "evening");
+
+    return {
+      groupId: g.group_id,
+      groupName: g.group_name,
+      pictureUrl: g.picture_url,
+      lastSeenAt: g.last_seen_at,
+      siteId: g.site_id,
+      customerName: g.customer_name || "ยังไม่ระบุ",
+      hasMorningShift: Boolean(morningShift),
+      morningDeadline: morningShift?.deadline || "07:00",
+      morningGuard: morningShift?.assigned_guard || "",
+      hasEveningShift: Boolean(eveningShift),
+      eveningDeadline: eveningShift?.deadline || "19:00",
+      eveningGuard: eveningShift?.assigned_guard || "",
+    };
+  });
+
+  return configs;
+}
+
+export async function updateGroupShiftConfiguration(input: {
+  groupId: string;
+  hasMorningShift: boolean;
+  morningDeadline: string;
+  morningGuard?: string;
+  hasEveningShift: boolean;
+  eveningDeadline: string;
+  eveningGuard?: string;
+  actor: string;
+}) {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow().iso;
+
+  // หา site_id
+  let group = (await db.prepare("SELECT site_id, group_name FROM line_groups WHERE id = ?").bind(input.groupId).first()) as any;
+  if (!group || !group.site_id) {
+    const registry = (await db.prepare("SELECT group_name, picture_url FROM line_group_registry WHERE id = ?").bind(input.groupId).first()) as any;
+    const groupName = registry?.group_name || `กลุ่ม LINE ${input.groupId.slice(-6)}`;
+    const siteId = linePointSiteIdentifier(input.groupId);
+    
+    await db.batch([
+      db.prepare("INSERT OR IGNORE INTO operational_sites (id, site_name, customer_name, active, created_at, updated_at) VALUES (?, ?, 'ยังไม่ระบุลูกค้า', 1, ?, ?)").bind(siteId, groupName, now, now),
+      db.prepare("INSERT OR IGNORE INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, ?, ?)").bind(input.groupId, siteId, groupName, registry?.picture_url || null, now),
+    ]);
+    group = { site_id: siteId, group_name: groupName };
+  }
+
+  const siteId = group.site_id;
+  const morningTemplateId = templateIdentifier(siteId, "morning", "จุดประจำ", "ช่อง 1");
+  const eveningTemplateId = templateIdentifier(siteId, "evening", "จุดประจำ", "ช่อง 1");
+
+  const operations = [
+    // Morning shift
+    db.prepare(`
+      INSERT INTO shift_templates (id, site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, active, updated_at)
+      VALUES (?, ?, 'morning', 'จุดประจำ', 'ช่อง 1', ?, ?, 'standard', ?, ?)
+      ON CONFLICT(id) DO UPDATE SET 
+        deadline = excluded.deadline,
+        assigned_guard = excluded.assigned_guard,
+        active = excluded.active,
+        updated_at = excluded.updated_at
+    `).bind(morningTemplateId, siteId, input.morningGuard || null, input.morningDeadline || "07:00", input.hasMorningShift ? 1 : 0, now),
+
+    // Evening shift
+    db.prepare(`
+      INSERT INTO shift_templates (id, site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, active, updated_at)
+      VALUES (?, ?, 'evening', 'จุดประจำ', 'ช่อง 1', ?, ?, 'standard', ?, ?)
+      ON CONFLICT(id) DO UPDATE SET 
+        deadline = excluded.deadline,
+        assigned_guard = excluded.assigned_guard,
+        active = excluded.active,
+        updated_at = excluded.updated_at
+    `).bind(eveningTemplateId, siteId, input.eveningGuard || null, input.eveningDeadline || "19:00", input.hasEveningShift ? 1 : 0, now),
+  ];
+
+  await db.batch(operations);
+  await generateTodayFromTemplatesInternal(input.actor);
+  await addAudit("shift_template", siteId, "shift_updated", input.actor, `แก้ไขเวลากะของกลุ่ม ${group.group_name}`);
+
+  return { ok: true, message: `อัปเดตเวลากะของ ${group.group_name} สำเร็จแล้ว` };
+}
+
+export async function bulkApplyShiftPreset(input: {
+  preset: "24h_07_19" | "24h_06_18" | "night_only_18" | "night_only_19" | "custom";
+  morningDeadline?: string;
+  eveningDeadline?: string;
+  hasMorning?: boolean;
+  hasEvening?: boolean;
+  actor: string;
+}) {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow().iso;
+
+  let hasMorning = true;
+  let hasEvening = true;
+  let morningTime = "07:00";
+  let eveningTime = "19:00";
+
+  if (input.preset === "24h_07_19") {
+    hasMorning = true; hasEvening = true; morningTime = "07:00"; eveningTime = "19:00";
+  } else if (input.preset === "24h_06_18") {
+    hasMorning = true; hasEvening = true; morningTime = "06:00"; eveningTime = "18:00";
+  } else if (input.preset === "night_only_18") {
+    hasMorning = false; hasEvening = true; eveningTime = "18:00";
+  } else if (input.preset === "night_only_19") {
+    hasMorning = false; hasEvening = true; eveningTime = "19:00";
+  } else if (input.preset === "custom") {
+    hasMorning = input.hasMorning ?? true;
+    hasEvening = input.hasEvening ?? true;
+    morningTime = input.morningDeadline || "07:00";
+    eveningTime = input.eveningDeadline || "19:00";
+  }
+
+  const groupsResult = await db.prepare("SELECT id, group_name FROM line_group_registry").all<D1Row>();
+  const groups = (groupsResult.results || []) as any[];
+
+  for (const g of groups) {
+    await updateGroupShiftConfiguration({
+      groupId: g.id,
+      hasMorningShift: hasMorning,
+      morningDeadline: morningTime,
+      hasEveningShift: hasEvening,
+      eveningDeadline: eveningTime,
+      actor: input.actor,
+    });
+  }
+
+  return {
+    ok: true,
+    message: `ตั้งค่าเวลากะสำเร็จครบทั้ง ${groups.length} กลุ่มเรียบร้อยแล้ว`,
+  };
+}
+
+export async function buildMissingShiftAlertSummary(targetTime?: string) {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow();
+  const today = now.date;
+  const currentMins = minuteFromTime(now.time);
+
+  // ดึงสล็อตที่ถึงเวลาแล้วแต่ยังไม่ยืนยัน
+  const slotsResult = await db.prepare(`
+    SELECT * FROM coverage_slots 
+    WHERE operational_date = ? AND state IN ('waiting', 'missing', 'unassigned')
+    ORDER BY deadline ASC, site_name ASC
+  `).bind(today).all<D1Row>();
+
+  const allSlotsToday = await db.prepare(`
+    SELECT COUNT(*) as total,
+           COUNT(CASE WHEN state = 'confirmed' THEN 1 END) as confirmed
+    FROM coverage_slots
+    WHERE operational_date = ?
+  `).bind(today).first<{ total: number; confirmed: number }>();
+
+  const slots = (slotsResult.results || []) as any[];
+  
+  // กรองเฉพาะสล็อตที่เลยเวลากำหนด (deadline <= current time หรือตรงกับ targetTime)
+  const missing = slots.filter((slot) => {
+    if (targetTime && slot.deadline !== targetTime) return false;
+    const deadlineMins = minuteFromTime(slot.deadline || "00:00");
+    return currentMins >= deadlineMins;
+  });
+
+  if (!missing.length) {
+    return {
+      hasMissing: false,
+      totalSites: allSlotsToday?.total || 0,
+      confirmedSites: allSlotsToday?.confirmed || 0,
+      missingCount: 0,
+      message: `✅ จุดตรวจทั้งหมดเข้าเวรครบถ้วนเรียบร้อยแล้ว (${allSlotsToday?.confirmed || 0}/${allSlotsToday?.total || 0})`,
+    };
+  }
+
+  // สร้างข้อความการ์ดสรุป
+  const lines = [
+    `🚨 [ศูนย์สั่งการ] แจ้งเตือนจุดที่ยังไม่รายงานตัวเข้าเวร`,
+    `⏰ ข้อมูล ณ เวลา ${now.time} น. (${today})`,
+    `━━━━━━━━━━━━━━━━━━`,
+    `📊 ภาพรวม: เข้าเวรแล้ว ${allSlotsToday?.confirmed || 0}/${allSlotsToday?.total || 0} จุด (ขาด ${missing.length} จุด)`,
+    `━━━━━━━━━━━━━━━━━━`,
+    ``,
+    `❌ รายชื่อจุดที่ยังไม่เข้าเวร:`,
+  ];
+
+  missing.slice(0, 25).forEach((slot, index) => {
+    const deadlineMins = minuteFromTime(slot.deadline || "00:00");
+    const late = Math.max(0, currentMins - deadlineMins);
+    lines.push(`${index + 1}. ${slot.site_name} (${slot.deadline} น. - สาย ${late} นาที)`);
+  });
+
+  if (missing.length > 25) {
+    lines.push(`... และอีก ${missing.length - 25} จุด`);
+  }
+
+  lines.push(``);
+  lines.push(`⚠️ สายตรวจเขตพื้นที่ กรุณา ว.13 โทรเช็กหน้างานด่วนครับ`);
+
+  return {
+    hasMissing: true,
+    totalSites: allSlotsToday?.total || 0,
+    confirmedSites: allSlotsToday?.confirmed || 0,
+    missingCount: missing.length,
+    missingSlots: missing,
+    message: lines.join("\n"),
+  };
+}
+
+export async function sendShiftAlertToCommandRoom(actor = "system", targetGroupIdOverride?: string) {
+  const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
+  if (!token) throw new Error("LINE Channel Access Token is missing");
+
+  const settings = await getLineReminderSettings();
+  const targetGroupId = targetGroupIdOverride || settings.targetGroupId;
+  if (!targetGroupId) {
+    return { ok: false, error: "ยังไม่ได้ระบุกลุ่มไลน์ศูนย์สั่งการ (Target Command Group)" };
+  }
+
+  const summary = await buildMissingShiftAlertSummary();
+  if (!summary.hasMissing) {
+    return { ok: true, skipped: true, message: summary.message };
+  }
+
+  await pushLineText(targetGroupId, summary.message, token);
+  await addAudit("line_reminder", targetGroupId, "shift_alert_sent", actor, `ส่งแจ้งเตือนจุดขาดเวร ${summary.missingCount} จุด เข้ากลุ่มสั่งการ`);
+
+  return {
+    ok: true,
+    sent: true,
+    missingCount: summary.missingCount,
+    targetGroupId,
+    message: summary.message,
+  };
+}

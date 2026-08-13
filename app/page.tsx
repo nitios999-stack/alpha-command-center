@@ -2,6 +2,7 @@
 
 import { CSSProperties, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StickersPanel } from "./StickersPanel";
+import { ShiftsPanel } from "./ShiftsPanel";
 
 type SlotState = "confirmed" | "self_reported" | "waiting" | "replacement_required" | "unassigned" | "missing";
 
@@ -810,7 +811,7 @@ function handleLocalAction(payload: Record<string, unknown>, currentData: Dashbo
 
 export default function Home() {
   const [data, setData] = useState<DashboardData | null>(null);
-  const [tab, setTab] = useState<"ops" | "billing" | "setup" | "line" | "reports" | "stickers">("reports");
+  const [tab, setTab] = useState<"ops" | "billing" | "setup" | "line" | "reports" | "stickers" | "shifts">("reports");
   const [wave, setWave] = useState<"morning" | "evening">("morning");
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -1409,6 +1410,7 @@ export default function Home() {
       <nav className="tabs" aria-label="เมนูหลัก">
         <button data-icon="≋" className={tab === "reports" ? "active" : ""} onClick={() => setTab("reports")} aria-current={tab === "reports" ? "page" : undefined}>ตรวจรายงาน</button>
         <button data-icon="✓" className={tab === "ops" ? "active" : ""} onClick={() => setTab("ops")} aria-current={tab === "ops" ? "page" : undefined}>เข้าเวรวันนี้</button>
+        <button data-icon="⏰" className={tab === "shifts" ? "active" : ""} onClick={() => setTab("shifts")} aria-current={tab === "shifts" ? "page" : undefined}>จัดการเวลากะ</button>
         <details className={"utility-menu " + (["setup", "line", "stickers", "billing"].includes(tab) ? "active" : "")}>
           <summary data-icon="⚙">ตั้งค่า</summary>
           <div className="utility-menu-panel">
@@ -1911,6 +1913,8 @@ export default function Home() {
             ))}
           </section>
         </>
+      ) : tab === "shifts" ? (
+        <ShiftsPanel />
       ) : tab === "stickers" ? (
         <StickersPanel />
       ) : tab === "line" ? (
