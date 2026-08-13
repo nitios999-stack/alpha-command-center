@@ -1,6 +1,7 @@
 import { database, ensureDatabase, bangkokNow, minuteFromTime } from "../../../../db/command-center";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   try {
