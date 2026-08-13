@@ -1859,8 +1859,10 @@ export async function consumeAutoReplyQuota(groupId: string, eventId: string): P
         last_reply_at = ?,
         last_inbound_event_id = ?,
         updated_at = ?
-    WHERE group_id = ? AND mode = 'reply_on_new_report'
-  `).bind(todayStr, todayStr, now.iso, eventId, now.iso, groupId).run();
+    WHERE group_id = ? 
+      AND mode = 'reply_on_new_report'
+      AND (last_reply_at IS NULL OR last_reply_at = ?)
+  `).bind(todayStr, todayStr, now.iso, eventId, now.iso, groupId, config.last_reply_at || null).run();
 
   if (result.meta.changes === 0) return { allowed: false, reason: "concurrent_update_failed" };
 

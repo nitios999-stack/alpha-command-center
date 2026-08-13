@@ -142,91 +142,127 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
     senderKey: group.senderKey,
     groupName: placeholderName(group.groupId),
   })));
-  // Auto-reply logic
-  await Promise.all(groupEvents.map(async (group, idx) => {
-    const isSaved = saved[idx]?.saved;
-    if (!isSaved) return; // duplicate or invalid
-    if (group.eventType !== "message") return; // only reply to messages
-    if (group.isRedelivery) return; // prevent loop from redeliveries
-    if (!group.replyToken) return;
+  // Auto-reply logic (Group by groupId to process sequentially and prevent race conditions)
+  const eventsByGroup = new Map<string, { group: GroupEvent; idx: number }[]>();
+  groupEvents.forEach((group, idx) => {
+    const list = eventsByGroup.get(group.groupId) || [];
+    list.push({ group, idx });
+    eventsByGroup.set(group.groupId, list);
+  });
 
-    const actionId = `auto-${Date.now()}-${idx}`;
-    const queuedSticker = await consumeQueuedSticker(group.groupId);
-    
-    let stickerPackageId = "";
-    let stickerId = "";
-    let actionType = "auto-reply";
-    let triggerEventId = group.eventId;
+  const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || new URL(request.url).host;
+  const proto = request.headers.get("x-forwarded-proto") || (request.url.startsWith("https") ? "https" : "http");
+  const origin = `${proto}://${host}`;
 
-    if (queuedSticker) {
-      stickerPackageId = queuedSticker.stickerPackageId;
-      stickerId = queuedSticker.stickerId;
-      actionType = "manual-batch-queued";
-      triggerEventId = queuedSticker.queuedId;
-    } else {
-      const quota = await consumeAutoReplyQuota(group.groupId, group.eventId);
+  await Promise.all(Array.from(eventsByGroup.values()).map(async (items) => {
+    for (let itemIdx = 0; itemIdx < items.length; itemIdx++) {
+      const { group, idx } = items[itemIdx];
+      const isLastInBatch = itemIdx === items.length - 1;
+      const isSaved = saved[idx]?.saved;
+      if (group.eventType !== "message") continue; // only reply to messages
+      if (group.messageType?.startsWith("sticker")) continue; // Ignore stickers sent by guards to prevent infinite sticker loops
+      if (group.isRedelivery) continue; // prevent loop from redeliveries
+      if (!group.replyToken) continue;
+
+      const actionId = `auto-${Date.now()}-${idx}`;
+      const queuedSticker = await consumeQueuedSticker(group.groupId);
       
-      // TRIGGER THE DEBOUNCER FOR THE CLOSING STICKER (100% Free - uses Reply API with this message's replyToken)
-      try {
-        const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || new URL(request.url).host;
-        const proto = request.headers.get("x-forwarded-proto") || (request.url.startsWith("https") ? "https" : "http");
-        const origin = `${proto}://${host}`;
-        const receivedAt = new Date().toISOString();
-        fetch(`${origin}/api/line/stickers/debouncer`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            groupId: group.groupId,
-            eventId: group.eventId,
-            replyToken: group.replyToken,
-            receivedAt: receivedAt,
-            accessToken: accessToken
-          })
-        }).catch(() => {});
-      } catch (e) {
-        // Ignore fetch errors
+      let stickerPackageId = "";
+      let stickerId = "";
+      let actionType = "auto-reply";
+      let triggerEventId = group.eventId;
+
+      if (queuedSticker) {
+        stickerPackageId = queuedSticker.stickerPackageId;
+        stickerId = queuedSticker.stickerId;
+        actionType = "manual-batch-queued";
+        triggerEventId = queuedSticker.queuedId;
+      } else {
+        const quota = await consumeAutoReplyQuota(group.groupId, group.eventId);
+        
+        // TRIGGER DEBOUNCER ONLY ON THE LAST MESSAGE OF THE BATCH
+        if (isLastInBatch) {
+          try {
+            const receivedAt = new Date().toISOString();
+            fetch(`${origin}/api/line/stickers/debouncer`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                groupId: group.groupId,
+                eventId: group.eventId,
+                replyToken: group.replyToken,
+                receivedAt: receivedAt,
+                accessToken: accessToken
+              })
+            }).catch(() => {});
+          } catch (e) {
+            // Ignore fetch errors
+          }
+        }
+
+        if (!quota.allowed) {
+          if (quota.reason !== "disabled" && quota.reason !== "no_new_event" && quota.reason !== "no_sticker_configured" && quota.reason !== "concurrent_update_failed") {
+            await logOutboundAction({
+              id: actionId,
+              groupId: group.groupId,
+              triggerEventId: group.eventId,
+              actionType: "auto-reply",
+              stickerPackageId: quota.stickerPackageId || "-",
+              stickerId: quota.stickerId || "-",
+              status: "skipped",
+              skipReason: quota.reason
+            });
+          }
+          continue;
+        }
+        stickerPackageId = quota.stickerPackageId!;
+        stickerId = quota.stickerId!;
       }
 
-      if (!quota.allowed) {
-        if (quota.reason !== "disabled" && quota.reason !== "no_new_event" && quota.reason !== "no_sticker_configured") {
+      // Call LINE API (Immediate Opening Reply)
+      try {
+        const response = await fetch("https://api.line.me/v2/bot/message/reply", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${accessToken}`
+          },
+          body: JSON.stringify({
+            replyToken: group.replyToken,
+            messages: [{
+              type: "sticker",
+              packageId: stickerPackageId,
+              stickerId: stickerId
+            }]
+          })
+        });
+
+        if (!response.ok) {
+          const errBody = await response.text();
           await logOutboundAction({
             id: actionId,
             groupId: group.groupId,
-            triggerEventId: group.eventId,
-            actionType: "auto-reply",
-            stickerPackageId: quota.stickerPackageId || "-",
-            stickerId: quota.stickerId || "-",
-            status: "skipped",
-            skipReason: quota.reason
+            triggerEventId: triggerEventId,
+            actionType: actionType as any,
+            stickerPackageId: stickerPackageId,
+            stickerId: stickerId,
+            status: "failed",
+            skipReason: `API Error: ${response.status} ${errBody.slice(0, 100)}`
           });
+          continue;
         }
-        return;
-      }
-      stickerPackageId = quota.stickerPackageId!;
-      stickerId = quota.stickerId!;
-    }
 
+        await logOutboundAction({
+          id: actionId,
+          groupId: group.groupId,
+          triggerEventId: triggerEventId,
+          actionType: actionType as any,
+          stickerPackageId: stickerPackageId,
+          stickerId: stickerId,
+          status: "sent"
+        });
 
-    // Call LINE API
-    try {
-      const response = await fetch("https://api.line.me/v2/bot/message/reply", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${accessToken}`
-        },
-        body: JSON.stringify({
-          replyToken: group.replyToken,
-          messages: [{
-            type: "sticker",
-            packageId: stickerPackageId,
-            stickerId: stickerId
-          }]
-        })
-      });
-
-      if (!response.ok) {
-        const errBody = await response.text();
+      } catch (e) {
         await logOutboundAction({
           id: actionId,
           groupId: group.groupId,
@@ -235,32 +271,9 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
           stickerPackageId: stickerPackageId,
           stickerId: stickerId,
           status: "failed",
-          skipReason: `API Error: ${response.status} ${errBody.slice(0, 100)}`
+          skipReason: "Network error"
         });
-        return;
       }
-
-      await logOutboundAction({
-        id: actionId,
-        groupId: group.groupId,
-        triggerEventId: triggerEventId,
-        actionType: actionType as any,
-        stickerPackageId: stickerPackageId,
-        stickerId: stickerId,
-        status: "sent"
-      });
-
-    } catch (e) {
-      await logOutboundAction({
-        id: actionId,
-        groupId: group.groupId,
-        triggerEventId: triggerEventId,
-        actionType: actionType as any,
-        stickerPackageId: stickerPackageId,
-        stickerId: stickerId,
-        status: "failed",
-        skipReason: "Network error"
-      });
     }
   }));
 

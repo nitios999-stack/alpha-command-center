@@ -11,8 +11,8 @@ export async function POST(request: Request) {
       return Response.json({ ok: false, error: "Missing required fields" }, { status: 400 });
     }
 
-    // หน่วงเวลารอ 10 วินาที เพื่อดูว่ามีข้อความ/รูปตามมาอีกหรือไม่
-    await new Promise((resolve) => setTimeout(resolve, 10000));
+    // หน่วงเวลารอ 20 วินาที เพื่อดูว่ามีข้อความ/รูปตามมาอีกหรือไม่ (ปลอดภัยภายใต้กรอบ 60 วิ ของ LINE Token)
+    await new Promise((resolve) => setTimeout(resolve, 20000));
 
     await ensureDatabase();
     const db = database();
