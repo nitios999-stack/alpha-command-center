@@ -16,11 +16,11 @@ export async function GET(request: Request) {
   for (const group of groups) {
     await db.prepare(`
       INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, updated_at)
-      VALUES (?, 'reply_on_new_report', '11537', '52002735', ?, ?)
+      VALUES (?, 'reply_on_new_report', '11537', '52002739', ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET 
         mode = 'reply_on_new_report',
         sticker_package_id = '11537',
-        sticker_id = '52002735',
+        sticker_id = '52002739',
         cooldown_minutes = ?,
         updated_at = ?
     `).bind(group.id, cooldown, now, cooldown, now).run();

@@ -5,7 +5,7 @@ type LineEvent = {
   webhookEventId?: string;
   type?: string;
   timestamp?: number;
-  message?: { type?: string };
+  message?: { type?: string; packageId?: string; stickerId?: string };
   source?: { type?: string; groupId?: string; roomId?: string; userId?: string };
   replyToken?: string;
   deliveryContext?: { isRedelivery?: boolean };
@@ -74,6 +74,10 @@ async function enrichGroups(groups: GroupEvent[], accessToken: string) {
   }));
 }
 
+export function lineEnvironment(): Record<string, string | undefined> {
+  return (typeof process !== "undefined" ? process.env : {}) as Record<string, string | undefined>;
+}
+
 export async function receiveLineWebhook(request: Request, config: LineEnv, schedule?: (job: Promise<unknown>) => void) {
   const secret = config.LINE_CHANNEL_SECRET;
   const accessToken = config.LINE_CHANNEL_ACCESS_TOKEN;
@@ -108,9 +112,12 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
     const groupId = event.source?.type === "group" ? event.source.groupId?.trim() : "";
     if (!groupId) return null;
     const eventType = event.type?.trim() || "unknown";
-    const messageType = eventType === "message" && event.message?.type?.trim()
+    let messageType = eventType === "message" && event.message?.type?.trim()
       ? event.message.type.trim().slice(0, 32)
       : undefined;
+    if (eventType === "message" && event.message?.type === "sticker") {
+      messageType = `sticker:${event.message.packageId}:${event.message.stickerId}`;
+    }
     return {
       groupId,
       eventId: event.webhookEventId?.trim() || fallbackEventId(event, index),
