@@ -15,9 +15,9 @@ export async function GET(request: Request) {
   }
   
   // Find the group by name in the registry
-  const group = await db.prepare("SELECT id, group_name FROM line_group_registry WHERE group_name LIKE ?").bind(`%${name}%`).first<any>();
+  const group = (await db.prepare("SELECT id, group_name FROM line_group_registry WHERE group_name LIKE ?").bind(`%${name}%`).first()) as { id: string, group_name: string } | null;
   
-  if (!group) {
+  if (!group || !group.id) {
     return Response.json({
       ok: false,
       message: `❌ ไม่พบกลุ่มที่ชื่อคล้ายกับ "${name}" ในระบบเลยครับ`
