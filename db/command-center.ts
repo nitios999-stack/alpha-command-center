@@ -3316,3 +3316,309 @@ export async function discoverAndRecoverAllGroups() {
 
   return allFoundGroups;
 }
+
+// ============================================================================
+// SMART INCIDENT & LEAVE DETECTION ENGINE (ระบบตรวจจับการแจ้งลา เข้าสาย และเหตุผิดปกติ)
+// ============================================================================
+
+export type IncidentDetectionResult = {
+  detected: boolean;
+  category?: "leave" | "late" | "incident";
+  categoryLabel?: string;
+  title?: string;
+  matchedKeywords: string[];
+  severity: "critical" | "warning" | "info";
+};
+
+export function detectSpecialIncidentsAndLeave(rawText: string): IncidentDetectionResult {
+  if (!rawText) return { detected: false, matchedKeywords: [], severity: "info" };
+
+  const text = rawText.trim();
+
+  // -------------------------------------------------------------
+  // STEP 1: กรองคำที่กำกวมออกอย่างหมดจด (Anti-False-Positive Filter)
+  // ตัดคำว่า "เวลา", "วลา", "เว ลา", "ตรงเวลา", "ตามเวลา", "ลานจอด", "ศาลา", "ล่วงเวลา (OT)"
+  // -------------------------------------------------------------
+  const sanitizedText = text
+    .replace(/(?:ตรง|ตาม|ถึง|เกิน|หมด|ล่วง|เวลา|เว\s*ลา|วลา)\s*เวลา/gi, " ")
+    .replace(/เวลา|เว\s*ลา|วลา/gi, " ")
+    .replace(/ลาน(?:จอด|จอดรถ|หน้า|หลัง|กว้าง|ปูน|ดิน|อเนกประสงค์|เท|ตา)?/gi, " ")
+    .replace(/ศาลา|วิลล่า|พลาซ่า|พาลาเดียม|คลาสสิค|พลาสติก|พาสปอร์ต|ซาลาเปา|ดอลลาร์|สลาก|วาเลนไทน์|ลากูน|ลาวา|ลาบ|ลาเต้|ช็อกโกแลต|โคล่า|มิลลิลิตร|กิโลลิตร|กุหลาบ|กลาสี|เพลา|สลัก|สลัว/gi, " ");
+
+  // -------------------------------------------------------------
+  // STEP 2: ตรวจจับหมวด 1 - เหตุฉุกเฉิน / เหตุไม่ปกติ (Emergency & Incident)
+  // -------------------------------------------------------------
+  const incidentKeywords = [
+    // อัคคีภัย / ไฟฟ้า / สาธารณูปโภค
+    "เหตุฉุกเฉิน", "เพลิงไหม้", "ไฟไหม้", "ควันไฟ", "ได้กลิ่นไหม้", "มีกลิ่นไหม้",
+    "ไฟดับ", "ไฟฟ้าลัดวงจร", "ไฟช็อต", "แก๊สรั่ว", "น้ำท่วม", "น้ำรั่วหนัก", "ท่อแตก", "น้ำล้น",
+    // อาชญากรรม / ความปลอดภัย
+    "ขโมย", "คนร้าย", "โจร", "งัดแงะ", "ขโมยของ", "ของหาย", "ทรัพย์สินเสียหาย",
+    "มีปากเสียง", "ทะเลาะวิวาท", "ตีกัน", "ทำร้ายร่างกาย", "เมาอาละวาด", "คนเมา",
+    "มีคนบุกรุก", "ผู้บุกรุก", "คนแปลกหน้า", "ปีนรั้ว", "ลักลอบเข้า", "พกอาวุธ", "มีมีด", "มีปืน",
+    // การแพทย์ / กู้ภัย
+    "เรียกรถพยาบาล", "กู้ภัย", "พบผู้บาดเจ็บ", "ผู้บาดเจ็บ", "มีคนเป็นลม", "หมดสติ",
+    "หัวใจวาย", "เสียชีวิต", "พบศพ", "ชีพจรหยุด", "ขอ ว.8", "ขอกำลังเสริม", "ขอความช่วยเหลือด่วน", "แจ้งตำรวจ", "แจ้ง 191"
+  ];
+  const matchedIncidents = incidentKeywords.filter((k) => text.includes(k));
+  if (matchedIncidents.length > 0) {
+    return {
+      detected: true,
+      category: "incident",
+      categoryLabel: "🔥 แจ้งเหตุด่วน / ไม่ปกติ",
+      title: `เหตุด่วน: ${matchedIncidents.join(", ")}`,
+      matchedKeywords: matchedIncidents,
+      severity: "critical",
+    };
+  }
+
+  // -------------------------------------------------------------
+  // STEP 3: ตรวจจับหมวด 2 - แจ้งลาป่วย / ลากิจ / ยกเวร (Leave & Absence)
+  // -------------------------------------------------------------
+  const leavePatterns = [
+    // รูปแบบการลาชัดเจน
+    /ขอลา(?:ป่วย|กิจ|พักร้อน|ฉุกเฉิน|หยุด|งาน|บวช|คลอด|แต่งงาน|ตาย|ฌาปนกิจ|ดูแล(?:แม่|พ่อ|ลูก))?/i,
+    /ลา(?:ป่วย|กิจ|พักร้อน|ฉุกเฉิน|หยุด|งาน|บวช|คลอด|แต่งงาน|ตาย|ฌาปนกิจ|ดูแล(?:แม่|พ่อ|ลูก))/i,
+    /ขอยกเวร|ขอแลกเวร|ขอสลับเวร|แลกเวร|สลับเวร|ขอนอนเวร|ขอเปลี่ยนกะ|เปลี่ยนกะ/i,
+    /ขอหยุดงาน|ขอหยุด|หยุดงาน|หยุดกะนี้|หยุด\s*\d+\s*วัน/i,
+    // สุขภาพและการเจ็บป่วย
+    /ไม่สบาย(?:ขอลา|ไปไม่ไหว|เข้าเวรไม่ได้|มาไม่ได้|ขอนอนพัก)?/i,
+    /ป่วย(?:ขอลา|ไปไม่ไหว|เข้าเวรไม่ได้|มาไม่ได้)?/i,
+    /ไข้ขึ้น|ปวดหัวตัวร้อน|ปวดท้อง|ท้องเสีย|อาหารเป็นพิษ|เข้า\s*รพ|เข้าโรงพยาบาล|หาหมอ|พบแพทย์|หมอนัด/i,
+    /แอดมิท|admit|ให้น้ำเกลือ|ผ่าตัด|ติดโควิด|ตรวจ atk|ใบรับรองแพทย์/i,
+    // ธุระจำเป็นและเหตุสุดวิสัย
+    /ติดธุระ(?:ด่วน)?(?:ไปไม่ได้|เข้าเวรไม่ได้|มาไม่ได้)?/i,
+    /ติดงานศพ|ติดงานแต่ง|ติดธุระที่บ้าน|ติดธุระต่างจังหวัด|กลับต่างจังหวัด|กลับบ้านด่วน/i,
+    /น้ำท่วมบ้านมาไม่ได้|รถเสียมาไม่ได้|เกิดอุบัติเหตุมาไม่ได้/i,
+    // สภาพความไม่พร้อม
+    /ไปไม่ไหว|มาไม่ไหว|ไม่พร้อมทำงาน|ไม่ได้ไปเข้าเวร|เข้าเวรไม่ได้|ไปทำงานไม่ได้|ไม่สามารถไปได้|ขอตัวไม่เข้าเวร/i,
+    /ขอลา\s*(?:\d+|ครึ่ง|1)\s*วัน/i,
+  ];
+
+  const matchedLeave: string[] = [];
+  for (const pattern of leavePatterns) {
+    const match = sanitizedText.match(pattern);
+    if (match) {
+      matchedLeave.push(match[0]);
+    }
+  }
+
+  // ดักจับคำว่า "ลา" โดดๆ ที่เหลืออยู่ในข้อความหลังตัดคำกำกวมแล้ว
+  if (matchedLeave.length === 0 && /(?:^|\s|[^\u0E00-\u0E7F])ลา(?:[^\u0E00-\u0E7F]|\s|$)/i.test(sanitizedText)) {
+    matchedLeave.push("ลา");
+  }
+
+  if (matchedLeave.length > 0) {
+    return {
+      detected: true,
+      category: "leave",
+      categoryLabel: "🏥 แจ้งลาป่วย / ลากิจ (ต้องการสแปร์)",
+      title: `แจ้งลา: ${matchedLeave.join(", ")}`,
+      matchedKeywords: matchedLeave,
+      severity: "critical",
+    };
+  }
+
+  // -------------------------------------------------------------
+  // STEP 4: ตรวจจับหมวด 3 - แจ้งเข้าสาย / มาช้า (Late Notice)
+  // -------------------------------------------------------------
+  const latePatterns = [
+    /ขอเข้าสาย|ขอมาสาย|เข้าสาย|มาสาย|ขอสายหน่อย|สายหน่อย|สายแป๊บ|สายสักครู่/i,
+    /ขอเลท|เลทหน่อย|เลทสักครู่|ขอเข้าช้า|เข้าช้า|มาช้า|มาช้าหน่อย|ช้าหน่อย|ช้ากว่ากำหนด/i,
+    /รถติด|รถติดมาก|ติดฝน|ฝนตกหนักติดฝน|ยางแตก|น้ำมันหมด|รถล้ม|เกิดอุบัติเหตุระหว่างทาง|ตำรวจเรียก|เจอด่าน/i,
+    /เข้าสาย\s*\d+\s*นาที|มาช้า\s*\d+\s*นาที|เลท\s*\d+\s*นาที|เข้าช้า\s*\d+\s*นาที|สายครึ่งชั่วโมง/i,
+  ];
+
+  const matchedLate: string[] = [];
+  for (const pattern of latePatterns) {
+    const match = text.match(pattern);
+    if (match) {
+      matchedLate.push(match[0]);
+    }
+  }
+
+  if (matchedLate.length > 0) {
+    return {
+      detected: true,
+      category: "late",
+      categoryLabel: "⏳ แจ้งเข้าสาย / มาช้า",
+      title: `แจ้งเข้าสาย: ${matchedLate.join(", ")}`,
+      matchedKeywords: matchedLate,
+      severity: "warning",
+    };
+  }
+
+  return { detected: false, matchedKeywords: [], severity: "info" };
+}
+
+export async function sendIncidentAlertToCommandRoom(input: {
+  siteName: string;
+  postName?: string;
+  category: "leave" | "late" | "incident";
+  title: string;
+  senderText: string;
+  senderName?: string;
+  senderKey?: string;
+  groupId: string;
+}) {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow();
+  const today = now.date;
+  const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
+
+  const settings = await getLineReminderSettings();
+  const targetGroupId = settings.targetGroupId;
+  if (!targetGroupId || !token) return { ok: false, message: "No command group or token" };
+
+  const isEmergency = input.category === "incident";
+  const isLeave = input.category === "leave";
+
+  const headerBgColor = isEmergency ? "#dc2626" : isLeave ? "#ea580c" : "#d97706";
+  const headerIcon = isEmergency ? "🔥" : isLeave ? "🏥" : "⏳";
+  const headerTitle = isEmergency ? "แจ้งเหตุด่วน / ไม่ปกติ" : isLeave ? "แจ้งลาป่วย / ลากิจ (ต้องการสแปร์)" : "แจ้งเข้าสาย / มาช้า";
+
+  // If leave detected on active shift, mark today's slot as replacement_required
+  if (isLeave) {
+    const currentHour = Number(now.time.slice(0, 2));
+    const currentWave = currentHour >= 16 || currentHour < 5 ? "evening" : "morning";
+    await db.prepare(`
+      UPDATE coverage_slots 
+      SET state = 'replacement_required',
+          source = ?,
+          updated_at = ?
+      WHERE operational_date = ? AND site_name = ? AND wave = ?
+    `).bind(`แจ้งลาในกลุ่มไลน์: ${input.senderText.slice(0, 50)}`, now.iso, today, input.siteName, currentWave).run().catch(() => {});
+  }
+
+  // Build Flex Card Alert for Command Room
+  const flexCard = {
+    type: "bubble",
+    size: "mega",
+    header: {
+      type: "box",
+      layout: "vertical",
+      backgroundColor: headerBgColor,
+      paddingAll: "16px",
+      contents: [
+        {
+          type: "text",
+          text: `${headerIcon} [ศูนย์สั่งการ] ${headerTitle}`,
+          weight: "bold",
+          color: "#ffffff",
+          size: "md",
+        },
+        {
+          type: "text",
+          text: `🏢 จุดตรวจ: ${input.siteName}${input.postName ? ` (${input.postName})` : ""}`,
+          color: "#ffffff",
+          size: "sm",
+          weight: "bold",
+          margin: "xs",
+        },
+      ],
+    },
+    body: {
+      type: "box",
+      layout: "vertical",
+      paddingAll: "14px",
+      contents: [
+        {
+          type: "box",
+          layout: "vertical",
+          backgroundColor: "#f8fafc",
+          paddingAll: "10px",
+          cornerRadius: "8px",
+          borderColor: "#e2e8f0",
+          borderWidth: "1px",
+          contents: [
+            {
+              type: "text",
+              text: `👤 ผู้แจ้ง: ${input.senderName || "รปภ. ประจำจุด"}`,
+              size: "xs",
+              color: "#64748b",
+              weight: "bold",
+            },
+            {
+              type: "text",
+              text: `💬 "${input.senderText}"`,
+              size: "sm",
+              color: "#0f172a",
+              weight: "bold",
+              wrap: true,
+              margin: "xs",
+            },
+            {
+              type: "text",
+              text: `⏰ เวลาที่พิมพ์แจ้ง: ${now.time} น. (${today})`,
+              size: "xxs",
+              color: "#94a3b8",
+              margin: "xs",
+            },
+          ],
+        },
+      ],
+    },
+    footer: {
+      type: "box",
+      layout: "horizontal",
+      spacing: "sm",
+      paddingAll: "10px",
+      contents: [
+        {
+          type: "button",
+          action: {
+            type: "uri",
+            label: "📱 เปิดแผงตรวจมือถือ",
+            uri: "https://alpha-command-center-1--alphacommandcenter-d3341.asia-southeast1.hosted.app/patrol",
+          },
+          style: "primary",
+          color: "#0284c7",
+          height: "sm",
+        },
+      ],
+    },
+  };
+
+  const textSummary = [
+    `🚨 [ศูนย์สั่งการ] ${headerTitle}`,
+    `🏢 จุด: ${input.siteName}`,
+    `👤 ผู้แจ้ง: ${input.senderName || "รปภ. ประจำจุด"}`,
+    `💬 ข้อความ: "${input.senderText}"`,
+    `⏰ เวลา: ${now.time} น.`,
+  ].join("\n");
+
+  try {
+    const res = await fetch("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        to: targetGroupId,
+        messages: [{
+          type: "flex",
+          altText: textSummary,
+          contents: flexCard,
+        }],
+      }),
+    });
+
+    if (!res.ok) {
+      await pushLineText(targetGroupId, textSummary, token);
+    }
+  } catch {
+    await pushLineText(targetGroupId, textSummary, token);
+  }
+
+  await addAudit(
+    "incident_alert",
+    input.groupId,
+    `incident_detected_${input.category}`,
+    input.senderName || "LINE Webhook",
+    `ตรวจพบการแจ้ง ${input.title} จากจุด ${input.siteName} ข้อความ: "${input.senderText}"`
+  );
+
+  return { ok: true, sent: true };
+}

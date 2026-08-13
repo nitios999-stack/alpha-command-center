@@ -643,6 +643,21 @@ export default function PatrolDeckPage() {
                       }}>
                         {slot.isSpare ? "🔄 สแปร์แทน" : "✅ เข้าแล้ว (ประจำ)"}
                       </span>
+                    ) : slot.state === "replacement_required" || slot.source?.includes("แจ้งลา") ? (
+                      <span style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "0.25rem",
+                        background: "#7f1d1d",
+                        color: "#fecaca",
+                        padding: "0.25rem 0.6rem",
+                        borderRadius: "20px",
+                        fontSize: "0.72rem",
+                        fontWeight: 800,
+                        border: "1px solid #ef4444",
+                      }}>
+                        🏥 แจ้งลา (ต้องการสแปร์ด่วน)
+                      </span>
                     ) : slot.isLate ? (
                       <span style={{
                         display: "inline-flex",

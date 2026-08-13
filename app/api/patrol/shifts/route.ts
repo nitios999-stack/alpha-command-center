@@ -1,7 +1,6 @@
-import { NextResponse } from "next/server";
 import { database, ensureDatabase, bangkokNow, minuteFromTime } from "../../../../db/command-center";
 
-export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   try {
@@ -32,18 +31,6 @@ export async function GET(request: Request) {
     const slotsResult = await db.prepare(query).bind(...params).all<any>();
     const allSlots = (slotsResult.results || []) as any[];
 
-    // ดึงข้อมูลภาพถ่ายล่าสุดและกิจกรรมกลุ่ม LINE
-    const eventsResult = await db.prepare(`
-      SELECT group_id, site_id, last_seen_at, last_message_type, last_report_at, sender_key
-      FROM line_webhook_events
-      GROUP BY group_id
-      ORDER BY last_seen_at DESC
-    `).all<any>().catch(() => ({ results: [] }));
-    const recentEventsByGroup = new Map<string, any>();
-    ((eventsResult as any).results || []).forEach((e: any) => {
-      if (e.group_id) recentEventsByGroup.set(e.group_id, e);
-    });
-
     let totalSlots = allSlots.length;
     let confirmedRegular = 0;
     let confirmedSpare = 0;
@@ -55,7 +42,7 @@ export async function GET(request: Request) {
       const isLate = slot.state !== "confirmed" && diff > 0;
       const lateMinutes = isLate ? diff : (slot.late_minutes || 0);
 
-      const isSpare = slot.source?.includes("สแปร์") || slot.assignment_type === "spare";
+      const isSpare = Boolean(slot.source && slot.source.includes("สแปร์")) || slot.assignment_type === "spare";
       const isConfirmed = slot.state === "confirmed";
 
       if (isConfirmed) {
@@ -69,31 +56,31 @@ export async function GET(request: Request) {
       const hasReportedPhoto = Boolean(slot.reported_at || (slot.source && slot.source.includes("ภาพถ่าย")));
 
       return {
-        id: slot.id,
-        siteId: slot.site_id,
-        siteName: slot.site_name,
-        postName: slot.post_name || "ป้อมหลัก",
-        slotLabel: slot.slot_label || "ช่อง 1",
-        assignedGuard: slot.assigned_guard || "รปภ. ประจำจุด",
-        actualGuardName: slot.actual_guard_name || (isSpare ? "สแปร์แทนเวร" : slot.assigned_guard),
+        id: String(slot.id || ""),
+        siteId: String(slot.site_id || ""),
+        siteName: String(slot.site_name || "ไม่ระบุชื่อจุด"),
+        postName: String(slot.post_name || "ป้อมหลัก"),
+        slotLabel: String(slot.slot_label || "ช่อง 1"),
+        assignedGuard: String(slot.assigned_guard || "รปภ. ประจำจุด"),
+        actualGuardName: String(slot.actual_guard_name || (isSpare ? "สแปร์แทนเวร" : slot.assigned_guard || "")),
         isSpare,
-        state: slot.state,
+        state: String(slot.state || "waiting"),
         isConfirmed,
-        deadline: slot.deadline || "07:00",
-        reportedAt: slot.reported_at,
-        source: slot.source,
+        deadline: String(slot.deadline || "07:00"),
+        reportedAt: slot.reported_at ? String(slot.reported_at) : null,
+        source: slot.source ? String(slot.source) : null,
         isLate,
         lateMinutes,
-        wave: slot.wave,
+        wave: slot.wave === "evening" ? "evening" : "morning",
         hasReportedPhoto,
-        updatedAt: slot.updated_at,
+        updatedAt: String(slot.updated_at || now.iso),
       };
     });
 
     const confirmedCount = confirmedRegular + confirmedSpare;
     const progressPercent = totalSlots > 0 ? Math.round((confirmedCount / totalSlots) * 100) : 100;
 
-    return NextResponse.json({
+    return Response.json({
       ok: true,
       nowTime: now.time,
       today,
@@ -110,6 +97,6 @@ export async function GET(request: Request) {
       slots: formattedSlots,
     });
   } catch (error: any) {
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    return Response.json({ ok: false, error: error.message }, { status: 500 });
   }
 }

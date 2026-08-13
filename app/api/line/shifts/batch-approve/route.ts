@@ -1,7 +1,6 @@
-import { NextResponse } from "next/server";
 import { batchApproveSlotsWithPhotos } from "../../../../db/command-center";
 
-export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
@@ -10,9 +9,9 @@ export async function POST(request: Request) {
     const actor = body.actor || "สายตรวจ (อนุมัติทั้งผลัดผ่านเว็บบอร์ด)";
 
     const result = await batchApproveSlotsWithPhotos({ wave, actor });
-    return NextResponse.json(result);
+    return Response.json(result);
   } catch (error: any) {
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    return Response.json({ ok: false, error: error.message }, { status: 500 });
   }
 }
 
@@ -23,8 +22,8 @@ export async function GET(request: Request) {
     const actor = searchParams.get("actor") || "สายตรวจ (อนุมัติทั้งผลัดผ่านเว็บบอร์ด)";
 
     const result = await batchApproveSlotsWithPhotos({ wave, actor });
-    return NextResponse.json(result);
+    return Response.json(result);
   } catch (error: any) {
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    return Response.json({ ok: false, error: error.message }, { status: 500 });
   }
 }

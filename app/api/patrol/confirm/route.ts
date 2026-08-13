@@ -1,7 +1,6 @@
-import { NextResponse } from "next/server";
 import { confirmSlotById, batchApproveSlotsWithPhotos } from "../../../../db/command-center";
 
-export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
@@ -12,12 +11,12 @@ export async function POST(request: Request) {
       const wave = body.wave as "morning" | "evening" | "all" | undefined;
       const actor = body.actor || "สายตรวจ (อนุมัติทั้งผลัดผ่าน Patrol Deck)";
       const result = await batchApproveSlotsWithPhotos({ wave, actor });
-      return NextResponse.json(result);
+      return Response.json(result);
     }
 
-    const slotId = body.slotId;
+    const slotId = String(body.slotId || "");
     if (!slotId) {
-      return NextResponse.json({ ok: false, error: "Missing slotId" }, { status: 400 });
+      return Response.json({ ok: false, error: "Missing slotId" }, { status: 400 });
     }
 
     const guardType = body.guardType === "spare" ? "spare" : "regular";
@@ -31,8 +30,8 @@ export async function POST(request: Request) {
       actor,
     });
 
-    return NextResponse.json(result);
+    return Response.json(result);
   } catch (error: any) {
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    return Response.json({ ok: false, error: error.message }, { status: 500 });
   }
 }

@@ -1,4 +1,4 @@
-import { recordLineWebhookCallback, saveLineWebhookEvent, updateLineGroupProfile, consumeAutoReplyQuota, consumeQueuedSticker, logOutboundAction, evaluateShiftCheckIn, buildMissingShiftAlertSummary, buildShiftAttendanceFlexMessage, confirmSlotFromLineCommand, confirmSlotById, batchApproveSlotsWithPhotos } from "../db/command-center";
+import { recordLineWebhookCallback, saveLineWebhookEvent, updateLineGroupProfile, consumeAutoReplyQuota, consumeQueuedSticker, logOutboundAction, evaluateShiftCheckIn, buildMissingShiftAlertSummary, buildShiftAttendanceFlexMessage, confirmSlotFromLineCommand, confirmSlotById, batchApproveSlotsWithPhotos, detectSpecialIncidentsAndLeave, sendIncidentAlertToCommandRoom } from "../db/command-center";
 
 type LineEnv = { LINE_CHANNEL_ACCESS_TOKEN?: string; LINE_CHANNEL_SECRET?: string; LINE_REPORT_SENDER_SALT?: string };
 type LineEvent = {
@@ -261,13 +261,52 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
       const trimmedText = (group.text || "").trim();
 
       // -------------------------------------------------------------
-      // 2. ตรวจจับคำสั่งขอดูสรุปจุดเข้าเวร (ส่งการ์ด Flex Message พร้อมปุ่มกด)
+      // 2. ตรวจจับการแจ้งลา เข้าสาย และเหตุด่วนไม่ปกติ (Real-Time Incident & Leave Alert)
+      // -------------------------------------------------------------
+      if (trimmedText) {
+        const incidentCheck = detectSpecialIncidentsAndLeave(trimmedText);
+        if (incidentCheck.detected) {
+          const groupMeta = (saved[idx] as any)?.group;
+          const siteName = groupMeta?.groupName || `กลุ่ม ${group.groupId.slice(-6)}`;
+
+          await sendIncidentAlertToCommandRoom({
+            siteName,
+            category: incidentCheck.category || "incident",
+            title: incidentCheck.title || incidentCheck.categoryLabel || "เหตุการณ์",
+            senderText: trimmedText,
+            senderName: group.senderKey ? `รปภ. (รหัส ${group.senderKey.slice(0, 6)})` : "รปภ. ในกลุ่ม",
+            senderKey: group.senderKey,
+            groupId: group.groupId,
+          });
+
+          if (incidentCheck.category === "leave") {
+            await fetch("https://api.line.me/v2/bot/message/reply", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${accessToken}`,
+              },
+              body: JSON.stringify({
+                replyToken: group.replyToken,
+                messages: [{
+                  type: "text",
+                  text: `ศูนย์สั่งการได้รับแจ้งการลาของคุณแล้ว และได้ส่งเรื่องประสานงานจัดกำลังพลเรียบร้อยแล้วครับ 🫡`,
+                }],
+              }),
+            }).catch(() => {});
+            continue;
+          }
+        }
+      }
+
+      // -------------------------------------------------------------
+      // 3. ตรวจจับคำสั่งขอดูสรุปจุดเข้าเวร (ส่งการ์ด Flex Message พร้อมปุ่มกด)
       // -------------------------------------------------------------
       const isSummaryCommand = /^(?:@\S+\s*)?(?:สรุป|เช็ค|ดู|สถานะ|รายงาน|ขาด)(?:กะเช้า|กะดึก|ผลัดเช้า|ผลัดดึก|เข้าเวร|เวร|ชื่อ|จุดที่ยังไม่เข้า)/i.test(trimmedText)
         || /^(?:@\S+\s*)?(?:สรุปเข้าเวร|สรุปกะ|เช็คชื่อ|เช็คเข้าเวร|ขาดกะ|สถานะ|เวร)$/i.test(trimmedText);
 
       // -------------------------------------------------------------
-      // 3. ตรวจจับคำสั่งพิมพ์ยืนยันเข้าเวรผ่านไลน์ (เช่น "ยืนยัน 1", "สแปร์ 1", "ยืนยัน Best Western")
+      // 4. ตรวจจับคำสั่งพิมพ์ยืนยันเข้าเวรผ่านไลน์ (เช่น "ยืนยัน 1", "สแปร์ 1", "ยืนยัน Best Western")
       // -------------------------------------------------------------
       const confirmMatch = trimmedText.match(/^(?:@\S+\s*)?(?:ยืนยัน|เช็คเข้า|เข้าเวรแล้ว|ว\.?4แล้ว|คอนเฟิร์ม|สแปร์|แทน|สแปร์แทน)\s+(.+)/i);
 
