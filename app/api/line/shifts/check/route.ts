@@ -14,7 +14,7 @@ export async function GET(request: Request) {
       return Response.json(result);
     }
 
-    const summary = await buildMissingShiftAlertSummary(targetTime);
+    const summary = await buildMissingShiftAlertSummary({ targetTime });
     return Response.json({ ok: true, ...summary });
   } catch (error: any) {
     return Response.json({ ok: false, error: error.message }, { status: 500 });
