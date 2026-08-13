@@ -294,22 +294,29 @@ type LineSignalStatus = "green" | "yellow" | "red" | "gray";
 type LineReportFilter = "all" | LineSignalStatus | "unmapped";
 
 function lineSignalStatus(group: LineGroup, nowTime: string): LineSignalStatus {
-  if (!group.lastReportAt) return "gray";
-  const seenAt = Date.parse(group.lastReportAt);
+  // ประเมินสัญญาณจากทั้ง lastReportAt และ lastSeenAt (Webhook สด)
+  const timestamp = group.lastReportAt || group.lastSeenAt;
+  if (!timestamp) return "gray";
+  const seenAt = Date.parse(timestamp);
   if (!Number.isFinite(seenAt)) return "gray";
+  
   const ageMinutes = Math.max(0, Math.floor((Date.now() - seenAt) / 60_000));
-  if (ageMinutes <= 30) return "green";
-  if (ageMinutes <= 120) return "yellow";
-  const parts = nowTime.split(":").map(Number);
-  const minute = (parts[0] ?? 0) * 60 + (parts[1] ?? 0);
-  return (minute >= 330 && minute <= 500) || (minute >= 1020 && minute <= 1200) ? "red" : "gray";
+  
+  // 🟢 เขียวสด: ส่งรายงาน/สัญญาณสดไม่เกิน 2 ชั่วโมง
+  if (ageMinutes <= 120) return "green";
+  
+  // 🟡 เหลืองเฝ้าระวัง: เริ่มชะลอตัว (2 ถึง 4 ชั่วโมง)
+  if (ageMinutes <= 240) return "yellow";
+  
+  // 🔴 แดงวิกฤติ: เงียบเกิน 4 ชั่วโมงขึ้นไป
+  return "red";
 }
 
 function lineSignalLabel(status: LineSignalStatus) {
-  if (status === "green") return "มีสัญญาณล่าสุด";
-  if (status === "yellow") return "สัญญาณช้าลง";
-  if (status === "red") return "เงียบในช่วงเวร";
-  return "ยังไม่มีข้อมูล";
+  if (status === "green") return "🟢 ส่งสด/ปกติ (ไม่เกิน 2 ชม.)";
+  if (status === "yellow") return "🟡 เริ่มชะลอ (2-4 ชม.)";
+  if (status === "red") return "🔴 เงียบผิดปกติ (> 4 ชม.)";
+  return "⚪ ยังไม่มีสัญญาณ";
 }
 
 function lineIgnoredReason(group: LineGroup, sites: Map<string, OperationalSite>, configs: Record<string, LineReportConfig> | undefined) {
@@ -963,14 +970,24 @@ export default function Home() {
         .some((value) => String(value).toLocaleLowerCase("th").includes(search));
       return matchesFilter && matchesSearch;
     }).sort((left, right) => {
-      const priority: Record<LineSignalStatus, number> = { red: 0, yellow: 1, gray: 2, green: 3 };
+      // 🔴 แดง (เงียบวิกฤติ) -> 🟡 เหลือง (เริ่มชะลอ) -> 🟢 เขียว (ส่งสดปกติ) -> ⚪ เทา (ยังไม่มีประวัติ)
+      const priority: Record<LineSignalStatus, number> = { red: 0, yellow: 1, green: 2, gray: 3 };
       const leftSignal = lineSignalStatus(left, lineNowTime);
       const rightSignal = lineSignalStatus(right, lineNowTime);
-      const leftSeenAt = left.lastSeenAt ? Date.parse(left.lastSeenAt) : Number.NEGATIVE_INFINITY;
-      const rightSeenAt = right.lastSeenAt ? Date.parse(right.lastSeenAt) : Number.NEGATIVE_INFINITY;
-      return priority[leftSignal] - priority[rightSignal]
-        || leftSeenAt - rightSeenAt
-        || left.groupName.localeCompare(right.groupName, "th");
+      
+      if (priority[leftSignal] !== priority[rightSignal]) {
+        return priority[leftSignal] - priority[rightSignal];
+      }
+      
+      const leftTime = Date.parse(left.lastReportAt || left.lastSeenAt || "") || 0;
+      const rightTime = Date.parse(right.lastReportAt || right.lastSeenAt || "") || 0;
+      
+      // สำหรับกลุ่มแดง/เหลือง ให้เรียงกลุ่มที่เงียบหายไปนานที่สุดขึ้นก่อน
+      if (leftSignal === "red" || leftSignal === "yellow") {
+        return leftTime - rightTime || left.groupName.localeCompare(right.groupName, "th");
+      }
+      // สำหรับกลุ่มเขียว ให้เรียงกลุ่มที่เพิ่งส่งสดล่าสุดขึ้นก่อน
+      return rightTime - leftTime || left.groupName.localeCompare(right.groupName, "th");
     });
   }, [lineNowTime, operationalSiteById, reportFilter, reportSearch, trackedLineGroups]);
   const reportRefreshIn = lastLoadedAt && reportClockMs
@@ -1392,48 +1409,104 @@ export default function Home() {
       </header>
 
       {/* GLOBAL LIVE COMMAND KPIS */}
-      <section className="global-kpis" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: "0.75rem", marginBottom: "1.25rem" }}>
-        <div style={{ background: "white", padding: "0.9rem 1.1rem", borderRadius: "14px", border: "1px solid #e2e8f0", boxShadow: "0 2px 4px rgba(0,0,0,0.02)" }}>
-          <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.04em" }}>🏢 จุดตรวจทั้งหมด</div>
-          <div style={{ fontSize: "1.5rem", fontWeight: 800, color: "#0f172a", marginTop: "0.2rem" }}>{data?.sites.length ?? 0} จุด</div>
-          <div style={{ fontSize: "0.75rem", color: "#94a3b8" }}>ลงทะเบียนในระบบ</div>
+      <section className="command-kpi-grid" aria-label="สถิติภาพรวมสด">
+        <div className="kpi-card kpi-total">
+          <div className="kpi-label"><span>🏢</span> จุดตรวจทั้งหมด</div>
+          <div className="kpi-val">{data?.sites.length ?? 0} <small>จุด</small></div>
+          <div className="kpi-sub">ลงทะเบียนในระบบ</div>
         </div>
-        <div style={{ background: "white", padding: "0.9rem 1.1rem", borderRadius: "14px", border: "1px solid #bbf7d0", boxShadow: "0 2px 4px rgba(0,0,0,0.02)" }}>
-          <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "#16a34a", textTransform: "uppercase", letterSpacing: "0.04em" }}>🟢 เข้าเวรครบแล้ว</div>
-          <div style={{ fontSize: "1.5rem", fontWeight: 800, color: "#15803d", marginTop: "0.2rem" }}>{stats.green} จุด</div>
-          <div style={{ fontSize: "0.75rem", color: "#16a34a" }}>ยืนยันตรงเวลา 100%</div>
+        <div className="kpi-card kpi-green">
+          <div className="kpi-label"><span>🟢</span> เข้าเวรครบแล้ว</div>
+          <div className="kpi-val">{stats.green} <small>จุด</small></div>
+          <div className="kpi-sub">ยืนยันตรงเวลา 100%</div>
         </div>
-        <div style={{ background: "white", padding: "0.9rem 1.1rem", borderRadius: "14px", border: "1px solid #fde68a", boxShadow: "0 2px 4px rgba(0,0,0,0.02)" }}>
-          <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "#d97706", textTransform: "uppercase", letterSpacing: "0.04em" }}>🟡 รอรายงาน / รอตรวจ</div>
-          <div style={{ fontSize: "1.5rem", fontWeight: 800, color: "#b45309", marginTop: "0.2rem" }}>{stats.yellow} จุด</div>
-          <div style={{ fontSize: "0.75rem", color: "#d97706" }}>อยู่ในกรอบเวลา</div>
+        <div className="kpi-card kpi-yellow">
+          <div className="kpi-label"><span>🟡</span> รอรายงาน / รอตรวจ</div>
+          <div className="kpi-val">{stats.yellow} <small>จุด</small></div>
+          <div className="kpi-sub">อยู่ในกรอบเวลา</div>
         </div>
-        <div style={{ background: "white", padding: "0.9rem 1.1rem", borderRadius: "14px", border: "1px solid #fecaca", boxShadow: "0 2px 4px rgba(0,0,0,0.02)" }}>
-          <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "#dc2626", textTransform: "uppercase", letterSpacing: "0.04em" }}>🔴 ขาดกำลัง / ต้องจัดสแปร์</div>
-          <div style={{ fontSize: "1.5rem", fontWeight: 800, color: "#b91c1c", marginTop: "0.2rem" }}>{stats.red} จุด</div>
-          <div style={{ fontSize: "0.75rem", color: "#dc2626" }}>ต้องจัดการด่วน</div>
+        <div className="kpi-card kpi-red">
+          <div className="kpi-label"><span>🔴</span> ขาดกำลัง / ต้องจัดสแปร์</div>
+          <div className="kpi-val">{stats.red} <small>จุด</small></div>
+          <div className="kpi-sub">ต้องจัดการด่วน</div>
         </div>
-        <div style={{ background: "white", padding: "0.9rem 1.1rem", borderRadius: "14px", border: "1px solid #bae6fd", boxShadow: "0 2px 4px rgba(0,0,0,0.02)" }}>
-          <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "#0284c7", textTransform: "uppercase", letterSpacing: "0.04em" }}>💬 LINE OA เชื่อมต่อสด</div>
-          <div style={{ fontSize: "1.5rem", fontWeight: 800, color: "#0369a1", marginTop: "0.2rem" }}>{data?.lineGroups.length ?? 0} กลุ่ม</div>
-          <div style={{ fontSize: "0.75rem", color: "#0284c7" }}>Webhook ปกติ 100%</div>
+        <div className="kpi-card kpi-blue">
+          <div className="kpi-label"><span>💬</span> LINE OA เชื่อมต่อสด</div>
+          <div className="kpi-val">{data?.lineGroups.length ?? 0} <small>กลุ่ม</small></div>
+          <div className="kpi-sub">Webhook ปกติ 100%</div>
         </div>
       </section>
 
-      <nav className="tabs" aria-label="เมนูหลัก">
-        <button data-icon="≋" className={tab === "reports" ? "active" : ""} onClick={() => setTab("reports")} aria-current={tab === "reports" ? "page" : undefined}>ตรวจรายงาน</button>
-        <button data-icon="✓" className={tab === "ops" ? "active" : ""} onClick={() => setTab("ops")} aria-current={tab === "ops" ? "page" : undefined}>เข้าเวรวันนี้</button>
-        <button data-icon="⏰" className={tab === "shifts" ? "active" : ""} onClick={() => setTab("shifts")} aria-current={tab === "shifts" ? "page" : undefined}>จัดการเวลากะ</button>
-        <details className={"utility-menu " + (["setup", "line", "stickers", "billing"].includes(tab) ? "active" : "")}>
-          <summary data-icon="⚙">ตั้งค่า</summary>
-          <div className="utility-menu-panel">
-            <button className={tab === "setup" ? "active" : ""} onClick={() => setTab("setup")}>ตั้งค่าอัตรา</button>
-            <button className={tab === "line" ? "active" : ""} onClick={() => setTab("line")}>LINE OA</button>
-            <button className={tab === "stickers" ? "active" : ""} onClick={() => setTab("stickers")}>สติกเกอร์</button>
-            <button className={tab === "billing" ? "active" : ""} onClick={() => setTab("billing")}>วางบิล</button>
-          </div>
-        </details>
-        <button className="quiet refresh-control" onClick={() => void loadDashboard()} disabled={loading}>↻ รีเฟรช</button>
+      {/* COMMAND CENTER MASTER TABS NAVIGATION */}
+      <nav className="command-tabs-bar" aria-label="เมนูหลัก">
+        <div className="command-tabs-group">
+          <button
+            type="button"
+            className={`command-tab ${tab === "reports" ? "active" : ""}`}
+            onClick={() => setTab("reports")}
+          >
+            <span className="tab-icon">📋</span>
+            <span>ตรวจรายงาน</span>
+          </button>
+          <button
+            type="button"
+            className={`command-tab ${tab === "ops" ? "active" : ""}`}
+            onClick={() => setTab("ops")}
+          >
+            <span className="tab-icon">🛡️</span>
+            <span>เช็คเข้าเวร</span>
+          </button>
+          <button
+            type="button"
+            className={`command-tab ${tab === "shifts" ? "active" : ""}`}
+            onClick={() => setTab("shifts")}
+          >
+            <span className="tab-icon">⏰</span>
+            <span>จัดการเวลากะ</span>
+          </button>
+          <button
+            type="button"
+            className={`command-tab ${tab === "stickers" ? "active" : ""}`}
+            onClick={() => setTab("stickers")}
+          >
+            <span className="tab-icon">🤖</span>
+            <span>สติกเกอร์ตอบกลับ</span>
+          </button>
+          <button
+            type="button"
+            className={`command-tab ${tab === "line" ? "active" : ""}`}
+            onClick={() => setTab("line")}
+          >
+            <span className="tab-icon">💬</span>
+            <span>เชื่อมต่อ LINE OA</span>
+          </button>
+          <button
+            type="button"
+            className={`command-tab ${tab === "setup" ? "active" : ""}`}
+            onClick={() => setTab("setup")}
+          >
+            <span className="tab-icon">⚙️</span>
+            <span>ตั้งค่าอัตรา</span>
+          </button>
+          <button
+            type="button"
+            className={`command-tab ${tab === "billing" ? "active" : ""}`}
+            onClick={() => setTab("billing")}
+          >
+            <span className="tab-icon">💳</span>
+            <span>วางบิล</span>
+          </button>
+        </div>
+
+        <button
+          type="button"
+          className="command-refresh-btn"
+          onClick={() => void loadDashboard()}
+          disabled={loading}
+        >
+          <span className={loading ? "spin" : ""}>🔄</span>
+          <span>{loading ? "กำลังซิงค์..." : "รีเฟรชข้อมูล"}</span>
+        </button>
       </nav>
 
       {message && (
@@ -1837,8 +1910,8 @@ export default function Home() {
                       <i aria-hidden="true" />
                     </span>
                     <span className="line-overview-site">{site ? `${site.siteName} · ${site.customerName}` : "ยังไม่ผูกจุด · ไปที่ LINE OA เพื่อผูก"}</span>
-                    <span className="line-overview-event"><b>{group.lastMessageType === "sticker" ? "สติกเกอร์ · ไม่นับรายงาน" : lineEventLabel(group.lastEventType)}</b><span>{group.eventCount} รายการ</span></span>
-                    <span className="line-overview-meta"><b>{lineSignalLabel(signal)}</b><span>รายงานผ่าน {displayTime(reportAt)} · {lineAgeLabel(reportAt, reportNowMs)}</span></span>
+                    <span className="line-overview-event"><b>{group.lastMessageType?.startsWith("sticker") ? "สติกเกอร์ · ไม่นับรายงาน" : lineEventLabel(group.lastEventType)}</b><span>{group.eventCount} รายการ</span></span>
+                    <span className="line-overview-meta"><b>{lineSignalLabel(signal)}</b><span>{reportAt ? `รายงาน ${displayTime(reportAt)} · ${lineAgeLabel(reportAt, reportNowMs)}` : group.lastSeenAt ? `สัญญาณ ${displayTime(group.lastSeenAt)} · ${lineAgeLabel(group.lastSeenAt, reportNowMs)}` : "รอสัญญาณ"}</span></span>
                   </button>
                 );
               })}
