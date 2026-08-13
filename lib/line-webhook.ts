@@ -166,9 +166,11 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
     } else {
       const quota = await consumeAutoReplyQuota(group.groupId, group.eventId);
       
-      // TRIGGER THE DEBOUNCER FOR THE END STICKER
+      // TRIGGER THE DEBOUNCER FOR THE CLOSING STICKER (100% Free - uses Reply API with this message's replyToken)
       try {
-        const origin = new URL(request.url).origin;
+        const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || new URL(request.url).host;
+        const proto = request.headers.get("x-forwarded-proto") || (request.url.startsWith("https") ? "https" : "http");
+        const origin = `${proto}://${host}`;
         const receivedAt = new Date().toISOString();
         fetch(`${origin}/api/line/stickers/debouncer`, {
           method: "POST",
@@ -177,7 +179,8 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
             groupId: group.groupId,
             eventId: group.eventId,
             replyToken: group.replyToken,
-            receivedAt: receivedAt
+            receivedAt: receivedAt,
+            accessToken: accessToken
           })
         }).catch(() => {});
       } catch (e) {
