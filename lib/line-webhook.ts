@@ -159,6 +159,24 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
     } else {
       const quota = await consumeAutoReplyQuota(group.groupId, group.eventId);
       
+      // TRIGGER THE DEBOUNCER FOR THE END STICKER
+      try {
+        const origin = new URL(request.url).origin;
+        const receivedAt = new Date().toISOString();
+        fetch(`${origin}/api/line/stickers/debouncer`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            groupId: group.groupId,
+            eventId: group.eventId,
+            replyToken: group.replyToken,
+            receivedAt: receivedAt
+          })
+        }).catch(() => {});
+      } catch (e) {
+        // Ignore fetch errors
+      }
+
       if (!quota.allowed) {
         if (quota.reason !== "disabled" && quota.reason !== "no_new_event" && quota.reason !== "no_sticker_configured") {
           await logOutboundAction({
