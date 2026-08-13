@@ -1,4 +1,7 @@
-import { env } from "cloudflare:workers";
+import { getFirebaseD1Database } from "../lib/firebase-d1";
+import { createHash } from "node:crypto";
+
+const env = Object.assign({ DB: true }, (typeof process !== "undefined" ? process.env : {})) as Record<string, any>;
 
 export type CoverageState =
   | "confirmed"
@@ -43,6 +46,11 @@ export type LineGroup = {
   pictureUrl: string | null;
   lastSeenAt: string | null;
   lastEventType: string | null;
+  lastMessageType: string | null;
+  lastReportAt: string | null;
+  lastReportSenderKey: string | null;
+  lastCandidateAt: string | null;
+  lastCandidateSenderKey: string | null;
   eventCount: number;
   source: "manual" | "webhook";
 };
@@ -52,6 +60,7 @@ export type LineIntegrationStatus = {
   gatewayConfigured: boolean;
   webhookPath: string;
   lastWebhookAt: string | null;
+  lastCallbackSummary: string | null;
   webhookAgeMinutes: number | null;
   webhookStatus: "healthy" | "stale" | "never";
   receivedGroups: number;
@@ -60,7 +69,9 @@ export type LineIntegrationStatus = {
 
 export type LineReminderSettings = {
   targetGroupId: string | null;
+  escalationTargetGroupId: string | null;
   autoEnabled: boolean;
+  autoEscalationEnabled: boolean;
   lastSentAt: string | null;
   lastSentCount: number;
   lastTargetName: string | null;
@@ -68,14 +79,34 @@ export type LineReminderSettings = {
 
 export type LineReportConfig = {
   enabled: boolean;
+  // Kept for legacy clients during the rolling upgrade. New work uses
+  // expectedTimes, intervalHours, and mode below.
   morningTimes: string[];
   eveningTimes: string[];
+  mode: "schedule" | "interval" | "observe";
+  expectedTimes: string[];
+  intervalHours: number;
+  intervalAnchor: string;
+  graceMinutes: number;
+  escalationAfterHours: number;
+  verification: "text" | "approved_sender";
+  approvedSenderKeys: string[];
+  monitoringStartedAt: string | null;
 };
 
 const DEFAULT_LINE_REPORT_CONFIG: LineReportConfig = {
   enabled: true,
   morningTimes: ["06:00", "07:00", "08:00"],
   eveningTimes: ["17:00", "18:00", "19:00"],
+  mode: "schedule",
+  expectedTimes: ["06:00", "07:00", "08:00", "17:00", "18:00", "19:00"],
+  intervalHours: 2,
+  intervalAnchor: "00:00",
+  graceMinutes: 0,
+  escalationAfterHours: 6,
+  verification: "text",
+  approvedSenderKeys: [],
+  monitoringStartedAt: null,
 };
 
 export type TemplateImportRow = {
@@ -137,9 +168,9 @@ export type BillingCase = {
 
 type D1Row = Record<string, unknown>;
 
-function database() {
+export function database() {
   if (!env.DB) throw new Error("ฐานข้อมูลยังไม่พร้อมใช้งาน");
-  return env.DB;
+  return getFirebaseD1Database();
 }
 
 function value(row: D1Row, key: string) {
@@ -152,19 +183,24 @@ function numberValue(row: D1Row, key: string) {
 
 const LINE_REMINDER_SETTING_KEYS = [
   "line_reminder_target_group_id",
+  "line_reminder_escalation_target_group_id",
   "line_reminder_auto_enabled",
+  "line_reminder_auto_escalation_enabled",
   "line_reminder_last_sent_at",
   "line_reminder_last_sent_count",
   "line_reminder_last_target_name",
+  "line_reminder_last_round_key",
 ] as const;
 
 async function getLineReminderSettings(): Promise<LineReminderSettings> {
-  const result = await database().prepare("SELECT key, value FROM system_settings WHERE key IN (?, ?, ?, ?, ?)")
+  const result = await database().prepare("SELECT key, value FROM system_settings WHERE key IN (?, ?, ?, ?, ?, ?, ?, ?)")
     .bind(...LINE_REMINDER_SETTING_KEYS).all<D1Row>();
   const settings = new Map((result.results ?? []).map((row) => [String(row.key), String(row.value)]));
   return {
     targetGroupId: settings.get("line_reminder_target_group_id") || null,
+    escalationTargetGroupId: settings.get("line_reminder_escalation_target_group_id") || null,
     autoEnabled: settings.get("line_reminder_auto_enabled") === "1",
+    autoEscalationEnabled: settings.get("line_reminder_auto_escalation_enabled") === "1",
     lastSentAt: settings.get("line_reminder_last_sent_at") || null,
     lastSentCount: Number(settings.get("line_reminder_last_sent_count") ?? 0),
     lastTargetName: settings.get("line_reminder_last_target_name") || null,
@@ -182,12 +218,33 @@ function safeLineReportConfig(value: string | null | undefined): LineReportConfi
   try {
     const raw = JSON.parse(value) as Partial<LineReportConfig>;
     const times = (input: unknown, fallback: string[]) => Array.isArray(input)
-      ? [...new Set(input.filter((time): time is string => typeof time === "string" && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)).slice(0, 8))].sort()
+      ? [...new Set(input.filter((time): time is string => typeof time === "string" && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)).slice(0, 12))].sort()
       : fallback;
+    const legacyTimes = [
+      ...times((raw as { morningTimes?: unknown }).morningTimes, []),
+      ...times((raw as { eveningTimes?: unknown }).eveningTimes, []),
+    ];
+    const mode = raw.mode === "interval" || raw.mode === "observe" ? raw.mode : "schedule";
+    const intervalHours = Number(raw.intervalHours);
+    const graceMinutes = Number(raw.graceMinutes);
+    const escalationAfterHours = Number(raw.escalationAfterHours);
+    const approvedSenderKeys = Array.isArray(raw.approvedSenderKeys)
+      ? [...new Set(raw.approvedSenderKeys.filter((key): key is string => typeof key === "string" && /^U-[A-Z0-9]{8,24}$/.test(key)).slice(0, 12))]
+      : [];
+    const expectedTimes = times(raw.expectedTimes, legacyTimes.length ? [...new Set(legacyTimes)].sort() : DEFAULT_LINE_REPORT_CONFIG.expectedTimes);
     return {
       enabled: raw.enabled !== false,
-      morningTimes: times(raw.morningTimes, DEFAULT_LINE_REPORT_CONFIG.morningTimes),
-      eveningTimes: times(raw.eveningTimes, DEFAULT_LINE_REPORT_CONFIG.eveningTimes),
+      morningTimes: times((raw as { morningTimes?: unknown }).morningTimes, expectedTimes.filter((time) => time < "12:00")),
+      eveningTimes: times((raw as { eveningTimes?: unknown }).eveningTimes, expectedTimes.filter((time) => time >= "12:00")),
+      mode,
+      expectedTimes,
+      intervalHours: Number.isInteger(intervalHours) && intervalHours >= 1 && intervalHours <= 24 ? intervalHours : DEFAULT_LINE_REPORT_CONFIG.intervalHours,
+      intervalAnchor: /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(raw.intervalAnchor ?? "")) ? String(raw.intervalAnchor) : DEFAULT_LINE_REPORT_CONFIG.intervalAnchor,
+      graceMinutes: Number.isInteger(graceMinutes) && graceMinutes >= 0 && graceMinutes <= 60 ? graceMinutes : DEFAULT_LINE_REPORT_CONFIG.graceMinutes,
+      escalationAfterHours: Number.isInteger(escalationAfterHours) && escalationAfterHours >= 1 && escalationAfterHours <= 72 ? escalationAfterHours : DEFAULT_LINE_REPORT_CONFIG.escalationAfterHours,
+      verification: raw.verification === "approved_sender" ? "approved_sender" : "text",
+      approvedSenderKeys,
+      monitoringStartedAt: typeof raw.monitoringStartedAt === "string" && Number.isFinite(Date.parse(raw.monitoringStartedAt)) ? raw.monitoringStartedAt : null,
     };
   } catch {
     return { ...DEFAULT_LINE_REPORT_CONFIG };
@@ -275,21 +332,28 @@ function toLineGroup(row: D1Row): LineGroup {
     pictureUrl: value(row, "picture_url"),
     lastSeenAt: value(row, "last_seen_at"),
     lastEventType: value(row, "last_event_type"),
+    lastMessageType: value(row, "last_message_type"),
+    lastReportAt: value(row, "last_report_at"),
+    lastReportSenderKey: value(row, "last_report_sender_key"),
+    lastCandidateAt: value(row, "last_candidate_at"),
+    lastCandidateSenderKey: value(row, "last_candidate_sender_key"),
     eventCount: numberValue(row, "event_count"),
     source,
   };
 }
 
-type LineEnvironment = {
-  LINE_CHANNEL_ACCESS_TOKEN?: string;
-  LINE_CHANNEL_SECRET?: string;
-  LINE_GATEWAY_URL?: string;
-  LINE_GATEWAY_SYNC_TOKEN?: string;
-  COMMAND_CENTER_ENABLE_DEMO_SEED?: string;
-};
-
 function lineEnvironment() {
-  return env as typeof env & LineEnvironment;
+  const processEnv = (typeof process !== "undefined" ? process.env : {}) as Record<string, string | undefined>;
+  const channelAccessToken = (env as Record<string, string>).LINE_CHANNEL_ACCESS_TOKEN || processEnv.LINE_CHANNEL_ACCESS_TOKEN;
+  const channelSecret = (env as Record<string, string>).LINE_CHANNEL_SECRET || processEnv.LINE_CHANNEL_SECRET;
+  return {
+    ...env,
+    LINE_CHANNEL_ACCESS_TOKEN: channelAccessToken,
+    LINE_CHANNEL_SECRET: channelSecret,
+    LINE_GATEWAY_URL: (env as Record<string, string>).LINE_GATEWAY_URL || processEnv.LINE_GATEWAY_URL,
+    LINE_GATEWAY_SYNC_TOKEN: (env as Record<string, string>).LINE_GATEWAY_SYNC_TOKEN || processEnv.LINE_GATEWAY_SYNC_TOKEN,
+    COMMAND_CENTER_ENABLE_DEMO_SEED: (env as Record<string, string>).COMMAND_CENTER_ENABLE_DEMO_SEED || processEnv.COMMAND_CENTER_ENABLE_DEMO_SEED,
+  };
 }
 
 function siteIdentifier(siteName: string) {
@@ -363,18 +427,82 @@ function demoSeedEnabled() {
   return lineEnvironment().COMMAND_CENTER_ENABLE_DEMO_SEED?.trim().toLowerCase() === "true";
 }
 
-export async function ensureDatabase() {
+let ensureDatabasePromise: Promise<void> | null = null;
+
+export function ensureDatabase() {
+  if (!ensureDatabasePromise) {
+    ensureDatabasePromise = initializeDatabase().catch((error) => {
+      // A transient startup failure must not permanently poison this process.
+      ensureDatabasePromise = null;
+      throw error;
+    });
+  }
+  return ensureDatabasePromise;
+}
+
+async function initializeDatabase() {
   const db = database();
   await db.batch([
     db.prepare("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS line_groups (id TEXT PRIMARY KEY, site_id TEXT NOT NULL, group_name TEXT NOT NULL, picture_url TEXT, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS line_group_registry (id TEXT PRIMARY KEY, group_name TEXT NOT NULL, picture_url TEXT, last_seen_at TEXT, source TEXT NOT NULL DEFAULT 'manual', updated_at TEXT NOT NULL)"),
-    db.prepare("CREATE TABLE IF NOT EXISTS line_webhook_events (id TEXT PRIMARY KEY, group_id TEXT, event_type TEXT NOT NULL, received_at TEXT NOT NULL, summary TEXT NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS line_webhook_events (id TEXT PRIMARY KEY, group_id TEXT, event_type TEXT NOT NULL, message_type TEXT, sender_key TEXT, received_at TEXT NOT NULL, summary TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS operational_sites (id TEXT PRIMARY KEY, site_name TEXT NOT NULL, customer_name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS shift_templates (id TEXT PRIMARY KEY, site_id TEXT NOT NULL, wave TEXT NOT NULL, post_name TEXT NOT NULL, slot_label TEXT NOT NULL, assigned_guard TEXT, deadline TEXT NOT NULL, verification_policy TEXT NOT NULL DEFAULT 'standard', active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS coverage_slots (id TEXT PRIMARY KEY, operational_date TEXT NOT NULL, wave TEXT NOT NULL, site_id TEXT NOT NULL, site_name TEXT NOT NULL, customer_name TEXT NOT NULL, post_name TEXT NOT NULL, slot_label TEXT NOT NULL, assigned_guard TEXT, assignment_type TEXT NOT NULL DEFAULT 'regular', state TEXT NOT NULL, verification_policy TEXT NOT NULL DEFAULT 'standard', deadline TEXT NOT NULL, reported_at TEXT, source TEXT, late_minutes INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS billing_cases (id TEXT PRIMARY KEY, customer_name TEXT NOT NULL, service_period TEXT NOT NULL, amount_satang INTEGER NOT NULL, due_at TEXT NOT NULL, document_state TEXT NOT NULL DEFAULT 'incomplete', submission_state TEXT NOT NULL DEFAULT 'unscheduled', payment_state TEXT NOT NULL DEFAULT 'unpaid', next_action TEXT NOT NULL, owner_name TEXT NOT NULL, appointment_at TEXT, location TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, action TEXT NOT NULL, actor TEXT NOT NULL, summary TEXT NOT NULL, created_at TEXT NOT NULL)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS line_auto_reply_configs (
+      group_id TEXT PRIMARY KEY,
+      mode TEXT NOT NULL DEFAULT 'disabled',
+      sticker_package_id TEXT,
+      sticker_id TEXT,
+      daily_limit INTEGER NOT NULL DEFAULT 100,
+      daily_count INTEGER NOT NULL DEFAULT 0,
+      daily_count_date TEXT,
+      cooldown_minutes INTEGER NOT NULL DEFAULT 15,
+      active_hours_start TEXT NOT NULL DEFAULT '00:00',
+      active_hours_end TEXT NOT NULL DEFAULT '23:59',
+      last_reply_at TEXT,
+      last_inbound_event_id TEXT,
+      updated_at TEXT NOT NULL
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS line_sticker_presets (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      package_id TEXT NOT NULL,
+      sticker_id TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS line_outbound_audit (
+      id TEXT PRIMARY KEY,
+      group_id TEXT NOT NULL,
+      trigger_event_id TEXT,
+      action_type TEXT NOT NULL,
+      sticker_package_id TEXT,
+      sticker_id TEXT,
+      status TEXT NOT NULL,
+      skip_reason TEXT,
+      sent_at TEXT NOT NULL
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS line_queued_stickers (
+      id TEXT PRIMARY KEY,
+      group_id TEXT NOT NULL,
+      sticker_package_id TEXT NOT NULL,
+      sticker_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      sent_at TEXT,
+      status TEXT NOT NULL
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS line_manual_batch_jobs (
+      id TEXT PRIMARY KEY,
+      group_ids TEXT NOT NULL,
+      sticker_package_id TEXT NOT NULL,
+      sticker_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      created_by TEXT NOT NULL
+    )`),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_coverage_today ON coverage_slots(operational_date, wave, site_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_billing_due ON billing_cases(due_at, payment_state)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id, created_at)"),
@@ -384,10 +512,15 @@ export async function ensureDatabase() {
     db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS uq_line_groups_site ON line_groups(site_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_groups_name ON line_groups(group_name)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_registry_name ON line_group_registry(group_name)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_line_queued_stickers_group_status ON line_queued_stickers(group_id, status)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_registry_seen ON line_group_registry(last_seen_at)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_events_group_time ON line_webhook_events(group_id, received_at)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_events_type_time ON line_webhook_events(event_type, received_at)"),
+    db.prepare("ALTER TABLE line_webhook_events ADD COLUMN message_type TEXT"),
+    db.prepare("ALTER TABLE line_webhook_events ADD COLUMN sender_key TEXT"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_line_events_report_candidate ON line_webhook_events(group_id, message_type, received_at)"),
   ]);
+  await db.refreshIfStale();
 
   const seedSetting = await db.prepare("SELECT value FROM system_settings WHERE key = 'demo_seeded'").first<{ value: string }>();
   if (!seedSetting) {
@@ -402,6 +535,9 @@ export async function ensureDatabase() {
   if (demoSeedEnabled()) await seedDemoLineGroups();
   await syncLineRegistryFromMappings();
   await provisionLinePointRecords();
+  // Keep cold starts read-light.  Bulk activation scans every LINE group and
+  // belongs to the explicit manager action, not the request path for health
+  // checks, dashboard reads, or a profile refresh.
 }
 
 async function syncSiteRegistryFromSlots() {
@@ -432,7 +568,10 @@ async function seedDemoLineGroups() {
 
 async function syncLineRegistryFromMappings() {
   const now = bangkokNow().iso;
-  await database().prepare("INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at) SELECT id, group_name, picture_url, NULL, 'manual', ? FROM line_groups WHERE 1 = 1 ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), updated_at = excluded.updated_at")
+  // Startup runs for dashboard reads as well as webhooks.  Only touch a
+  // registry row when its mapping genuinely changed; otherwise each refresh
+  // rewrites all 69 groups to Firestore and can exhaust the write quota.
+  await database().prepare("INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at) SELECT id, group_name, picture_url, NULL, 'manual', ? FROM line_groups WHERE 1 = 1 ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), updated_at = excluded.updated_at WHERE excluded.group_name != line_group_registry.group_name OR (excluded.picture_url IS NOT NULL AND excluded.picture_url != COALESCE(line_group_registry.picture_url, ''))")
     .bind(now).run();
 }
 
@@ -442,7 +581,7 @@ async function syncLineRegistryFromMappings() {
 async function provisionLinePointRecords() {
   const db = database();
   const now = bangkokNow().iso;
-  const result = await db.prepare("SELECT r.id, r.group_name, r.picture_url FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id WHERE r.source = 'webhook' AND m.id IS NULL").all<D1Row>();
+  const result = await db.prepare("SELECT r.id, r.group_name, r.picture_url FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id WHERE m.id IS NULL").all<D1Row>();
   const rows = result.results ?? [];
   for (let offset = 0; offset < rows.length; offset += 80) {
     const operations = rows.slice(offset, offset + 80).flatMap((row) => {
@@ -451,7 +590,7 @@ async function provisionLinePointRecords() {
       if (!groupId || !groupName || isPlaceholderLineGroupName(groupName, groupId)) return [];
       const siteId = linePointSiteIdentifier(groupId);
       return [
-        db.prepare("INSERT OR IGNORE INTO operational_sites (id, site_name, customer_name, active, created_at, updated_at) VALUES (?, ?, 'ยังไม่ระบุลูกค้า', 0, ?, ?)")
+        db.prepare("INSERT OR IGNORE INTO operational_sites (id, site_name, customer_name, active, created_at, updated_at) VALUES (?, ?, 'ยังไม่ระบุลูกค้า', 1, ?, ?)")
           .bind(siteId, groupName, now, now),
         db.prepare("INSERT OR IGNORE INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, ?, ?)")
           .bind(groupId, siteId, groupName, value(row, "picture_url"), now),
@@ -487,6 +626,52 @@ async function seedDemoData() {
   }
 }
 
+type LineReportActivity = {
+  lastMessageType: string | null;
+  lastReportAt: string | null;
+  lastReportSenderKey: string | null;
+  lastCandidateAt: string | null;
+  lastCandidateSenderKey: string | null;
+};
+
+async function getLineReportActivity(configs: Record<string, LineReportConfig>) {
+  const rows = await database().prepare("SELECT group_id, message_type, sender_key, received_at FROM line_webhook_events WHERE group_id IS NOT NULL AND group_id != '' AND event_type = 'message' ORDER BY received_at DESC LIMIT 5000").all<D1Row>();
+  const activity = new Map<string, LineReportActivity>();
+  for (const row of rows.results ?? []) {
+    const groupId = String(row.group_id ?? "").trim();
+    if (!groupId) continue;
+    const messageType = value(row, "message_type");
+    const senderKey = value(row, "sender_key");
+    const receivedAt = value(row, "received_at");
+    if (!messageType || !receivedAt) continue;
+    const current = activity.get(groupId) ?? {
+      lastMessageType: null,
+      lastReportAt: null,
+      lastReportSenderKey: null,
+      lastCandidateAt: null,
+      lastCandidateSenderKey: null,
+    };
+    if (!current.lastMessageType) current.lastMessageType = messageType;
+    if (messageType !== "text") {
+      activity.set(groupId, current);
+      continue;
+    }
+    if (!current.lastCandidateAt) {
+      current.lastCandidateAt = receivedAt;
+      current.lastCandidateSenderKey = senderKey;
+    }
+    const config = configs[groupId] ?? DEFAULT_LINE_REPORT_CONFIG;
+    const accepted = config.verification === "text"
+      || Boolean(senderKey && config.approvedSenderKeys.includes(senderKey));
+    if (accepted && !current.lastReportAt) {
+      current.lastReportAt = receivedAt;
+      current.lastReportSenderKey = senderKey;
+    }
+    activity.set(groupId, current);
+  }
+  return activity;
+}
+
 export async function getDashboard() {
   await ensureDatabase();
   const db = database();
@@ -499,10 +684,18 @@ export async function getDashboard() {
   const demoCount = await db.prepare("SELECT COUNT(*) AS count FROM operational_sites WHERE id IN ('site-green', 'site-late', 'site-waiting', 'site-missing')").first<{ count: number }>();
   const billingResult = await db.prepare("SELECT * FROM billing_cases ORDER BY due_at ASC, updated_at DESC LIMIT 30").all<D1Row>();
   const lineCounts = await db.prepare("SELECT COUNT(*) AS received_groups, COUNT(CASE WHEN s.active = 1 THEN m.id END) AS mapped_groups, MAX(r.last_seen_at) AS last_webhook_at FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id LEFT JOIN operational_sites s ON s.id = m.site_id").first<{ received_groups: number; mapped_groups: number; last_webhook_at: string | null }>();
+  const callbackResult = await db.prepare("SELECT key, value FROM system_settings WHERE key IN (?, ?)")
+    .bind("line_callback_last_at", "line_callback_last_summary").all<D1Row>();
   const linePointDetailResult = await db.prepare("SELECT m.id AS group_id, s.customer_name, s.active, t.wave, t.post_name, t.slot_label, t.assigned_guard, t.deadline FROM line_groups m INNER JOIN operational_sites s ON s.id = m.site_id LEFT JOIN shift_templates t ON t.site_id = s.id AND t.active = 1 ORDER BY m.id, t.wave, t.updated_at DESC").all<D1Row>();
   const lineReminder = await getLineReminderSettings();
   const lineReportConfigs = await getLineReportConfigs();
-  const lastWebhookAt = lineCounts?.last_webhook_at ?? null;
+  const lineReportActivity = await getLineReportActivity(lineReportConfigs);
+  const callbackSettings = new Map((callbackResult.results ?? []).map((row) => [String(row.key), String(row.value)]));
+  const lastCallbackAt = callbackSettings.get("line_callback_last_at") || null;
+  const lastCallbackSummary = callbackSettings.get("line_callback_last_summary") || null;
+  // A verified callback is a more faithful connection signal than the latest
+  // saved group record. The latter is intentionally absent for non-group events.
+  const lastWebhookAt = lastCallbackAt ?? lineCounts?.last_webhook_at ?? null;
   const parsedWebhookTime = lastWebhookAt ? Date.parse(lastWebhookAt) : Number.NaN;
   const webhookAgeMinutes = Number.isFinite(parsedWebhookTime)
     ? Math.max(0, Math.floor((Date.parse(current.iso) - parsedWebhookTime) / 60_000))
@@ -538,12 +731,23 @@ export async function getDashboard() {
     now: current,
     slots: (slotResult.results ?? []).map((row) => toCoverageSlot(row, current.time)),
     sites: (siteResult.results ?? []).map(toOperationalSite),
-    lineGroups: (lineGroupResult.results ?? []).map(toLineGroup),
+    lineGroups: (lineGroupResult.results ?? []).map((row) => {
+      const activity = lineReportActivity.get(String(row.id ?? ""));
+      return toLineGroup({
+        ...row,
+        last_message_type: activity?.lastMessageType ?? null,
+        last_report_at: activity?.lastReportAt ?? null,
+        last_report_sender_key: activity?.lastReportSenderKey ?? null,
+        last_candidate_at: activity?.lastCandidateAt ?? null,
+        last_candidate_sender_key: activity?.lastCandidateSenderKey ?? null,
+      });
+    }),
     lineIntegration: {
       configured: Boolean(lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN && lineEnvironment().LINE_CHANNEL_SECRET),
       gatewayConfigured: Boolean(lineEnvironment().LINE_GATEWAY_URL && lineEnvironment().LINE_GATEWAY_SYNC_TOKEN),
       webhookPath: "/api/line/webhook",
       lastWebhookAt,
+      lastCallbackSummary,
       webhookAgeMinutes,
       webhookStatus: webhookAgeMinutes === null ? "never" : webhookAgeMinutes <= 24 * 60 ? "healthy" : "stale",
       receivedGroups: Number(lineCounts?.received_groups ?? 0),
@@ -673,12 +877,21 @@ export async function deleteOperationalSite(siteIdInput: string, actor: string) 
   const existing = await db.prepare("SELECT site_name FROM operational_sites WHERE id = ?").bind(siteId).first<D1Row>();
   if (!existing) throw new Error("ไม่พบจุดที่ต้องการลบ");
   const siteName = String(existing.site_name);
-  await db.batch([
+  const mappedGroups = await db.prepare("SELECT id FROM line_groups WHERE site_id = ?").bind(siteId).all<D1Row>();
+  const groupIds = (mappedGroups.results ?? []).map((row) => String(row.id));
+  const operations: ReturnType<typeof db.prepare>[] = [
     db.prepare("DELETE FROM line_groups WHERE site_id = ?").bind(siteId),
     db.prepare("DELETE FROM coverage_slots WHERE site_id = ?").bind(siteId),
     db.prepare("DELETE FROM shift_templates WHERE site_id = ?").bind(siteId),
     db.prepare("DELETE FROM operational_sites WHERE id = ?").bind(siteId),
-  ]);
+  ];
+  for (const gid of groupIds) {
+    operations.push(
+      db.prepare("DELETE FROM line_group_registry WHERE id = ?").bind(gid),
+      db.prepare("DELETE FROM system_settings WHERE key = ?").bind(`line_report_config:${gid}`),
+    );
+  }
+  await db.batch(operations);
   await addAudit("operational_site", siteId, "deleted", actor, "ลบจุดและอัตรากำลังของ " + siteName);
 }
 
@@ -693,7 +906,7 @@ export async function mapLineGroup(input: { siteId: string; groupId: string; act
   const registry = await db.prepare("SELECT group_name, picture_url, source FROM line_group_registry WHERE id = ?").bind(groupId).first<D1Row>();
   const groupName = String(registry?.group_name ?? "").trim();
   const source = String(registry?.source ?? "");
-  if (!registry || !groupName || source !== "webhook" || isPlaceholderLineGroupName(groupName, groupId)) {
+  if (!registry || !groupName || isPlaceholderLineGroupName(groupName, groupId)) {
     throw new Error("กลุ่มนี้ยังไม่มีชื่อจริงจาก LINE กรุณารอ webhook หรือกดรีเฟรชทะเบียนกลุ่มก่อน");
   }
   const existingMapping = await db.prepare("SELECT site_id, group_name FROM line_groups WHERE id = ?").bind(groupId).first<D1Row>();
@@ -718,7 +931,7 @@ export async function setupLinePoint(input: LinePointSetupInput) {
   const db = database();
   const registry = await db.prepare("SELECT group_name, picture_url, source FROM line_group_registry WHERE id = ?").bind(groupId).first<D1Row>();
   const groupName = String(registry?.group_name ?? "").trim();
-  if (!registry || !groupName || String(registry.source ?? "") !== "webhook" || isPlaceholderLineGroupName(groupName, groupId)) {
+  if (!registry || !groupName || isPlaceholderLineGroupName(groupName, groupId)) {
     throw new Error("กลุ่มนี้ยังไม่มีชื่อจริงจาก LINE จึงยังตั้งเป็นจุดไม่ได้");
   }
   const currentMapping = await db.prepare("SELECT site_id FROM line_groups WHERE id = ?").bind(groupId).first<D1Row>();
@@ -761,14 +974,15 @@ export async function setupLinePoint(input: LinePointSetupInput) {
   return { siteId, active, groupName };
 }
 
-// Fast onboarding path for the manager: every verified webhook group becomes
-// an active operational point. Existing point details and shift templates are
-// preserved; only records that are missing are filled with safe defaults.
 export async function activateAllLinePoints(actor: string) {
   await ensureDatabase();
+  return activateAllLinePointsInternal(actor);
+}
+
+async function activateAllLinePointsInternal(actor: string) {
   const db = database();
   const now = bangkokNow().iso;
-  const registryResult = await db.prepare("SELECT r.id, r.group_name, r.picture_url, m.site_id, s.customer_name, s.active AS site_active FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id LEFT JOIN operational_sites s ON s.id = m.site_id WHERE r.source = 'webhook' ORDER BY r.group_name").all<D1Row>();
+  const registryResult = await db.prepare("SELECT r.id, r.group_name, r.picture_url, m.site_id, s.customer_name, s.active AS site_active FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id LEFT JOIN operational_sites s ON s.id = m.site_id ORDER BY r.group_name").all<D1Row>();
   const groups = registryResult.results ?? [];
   let activated = 0;
   let alreadyActive = 0;
@@ -800,12 +1014,12 @@ export async function activateAllLinePoints(actor: string) {
     if (!waves.has("morning")) {
       initialized += 1;
       operations.push(db.prepare("INSERT INTO shift_templates (id, site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, active, updated_at) VALUES (?, ?, 'morning', 'จุดประจำ', 'ช่อง 1', NULL, '06:00', 'standard', 1, ?) ON CONFLICT(id) DO UPDATE SET active = 1, deadline = '06:00', updated_at = excluded.updated_at")
-        .bind(templateIdentifier(siteId, "morning", "จุดประจำ", "ช่อง 1"), now));
+        .bind(templateIdentifier(siteId, "morning", "จุดประจำ", "ช่อง 1"), siteId, now));
     }
     if (!waves.has("evening")) {
       initialized += 1;
       operations.push(db.prepare("INSERT INTO shift_templates (id, site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, active, updated_at) VALUES (?, ?, 'evening', 'จุดประจำ', 'ช่อง 1', NULL, '18:00', 'standard', 1, ?) ON CONFLICT(id) DO UPDATE SET active = 1, deadline = '18:00', updated_at = excluded.updated_at")
-        .bind(templateIdentifier(siteId, "evening", "จุดประจำ", "ช่อง 1"), now));
+        .bind(templateIdentifier(siteId, "evening", "จุดประจำ", "ช่อง 1"), siteId, now));
     }
     const existingConfig = await db.prepare("SELECT value FROM system_settings WHERE key = ?").bind(`line_report_config:${groupId}`).first<D1Row>();
     const reportConfig = safeLineReportConfig(existingConfig ? value(existingConfig, "value") : null);
@@ -815,8 +1029,11 @@ export async function activateAllLinePoints(actor: string) {
   for (let offset = 0; offset < operations.length; offset += 80) {
     await db.batch(operations.slice(offset, offset + 80));
   }
-  const generated = await generateTodayFromTemplates(actor);
-  await addAudit("line_point", "bulk", "enabled", actor, `เปิดใช้งานกลุ่ม LINE จาก webhook ${activated + alreadyActive} จุด · เติมกะ ${initialized} รายการ · ข้าม ${skipped} กลุ่ม`);
+  // Initialization already owns the process-level ensureDatabase promise.
+  // Calling the exported wrapper here would await that same promise and
+  // deadlock the first API request.
+  const generated = await generateTodayFromTemplatesInternal(actor);
+  await addAudit("line_point", "bulk", "enabled", actor, `เปิดใช้งานกลุ่ม LINE เป็นกลุ่มหลัก ${activated + alreadyActive} จุด · เติมกะ ${initialized} รายการ · ข้าม ${skipped} กลุ่ม`);
   return { activated, alreadyActive, initialized, skipped, generated: generated.created, total: activated + alreadyActive };
 }
 
@@ -849,18 +1066,33 @@ export async function deleteLineGroup(groupIdInput: string, actor: string) {
   const group = await db.prepare("SELECT r.group_name, m.site_id FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id WHERE r.id = ?")
     .bind(groupId).first<D1Row>();
   if (!group) return;
-  if (value(group, "site_id")) throw new Error("กลุ่มนี้ยังผูกกับจุดอยู่ กรุณายกเลิกการผูกก่อนลบ");
+  const siteId = value(group, "site_id") ? String(group.site_id) : null;
   const groupName = String(group.group_name ?? groupId);
-  await db.prepare("DELETE FROM line_group_registry WHERE id = ?").bind(groupId).run();
-  await addAudit("line_group", groupId, "deleted", actor, "ลบกลุ่ม LINE ที่ไม่ใช้งาน " + groupName);
+  const operations: ReturnType<typeof db.prepare>[] = [
+    db.prepare("DELETE FROM line_group_registry WHERE id = ?").bind(groupId),
+    db.prepare("DELETE FROM line_groups WHERE id = ?").bind(groupId),
+    db.prepare("DELETE FROM system_settings WHERE key = ?").bind(`line_report_config:${groupId}`),
+  ];
+  if (siteId) {
+    operations.push(
+      db.prepare("DELETE FROM coverage_slots WHERE site_id = ?").bind(siteId),
+      db.prepare("DELETE FROM shift_templates WHERE site_id = ?").bind(siteId),
+      db.prepare("DELETE FROM operational_sites WHERE id = ?").bind(siteId),
+    );
+  }
+  await db.batch(operations);
+  await addAudit("line_group", groupId, "deleted", actor, "ลบกลุ่ม LINE " + groupName);
 }
 
 export async function saveLineWebhookEvent(input: {
   eventId: string;
   groupId: string;
   eventType: string;
+  messageType?: string;
+  senderKey?: string;
   groupName?: string;
   pictureUrl?: string | null;
+  receivedAt?: string;
 }) {
   await ensureDatabase();
   const db = database();
@@ -871,15 +1103,50 @@ export async function saveLineWebhookEvent(input: {
   if (!eventId || eventId.length > 255) return { saved: false, duplicate: false };
   const prior = await db.prepare("SELECT id FROM line_webhook_events WHERE id = ?").bind(eventId).first<D1Row>();
   if (prior) return { saved: false, duplicate: true };
+  const suppliedReceivedAt = input.receivedAt?.trim() ?? "";
+  const receivedAt = suppliedReceivedAt && !Number.isNaN(Date.parse(suppliedReceivedAt))
+    ? new Date(suppliedReceivedAt).toISOString()
+    : now;
   const groupName = input.groupName?.trim() || `กลุ่ม LINE ${groupId.slice(-6)}`;
   const safePictureUrl = input.pictureUrl ? pictureUrl(input.pictureUrl) : null;
   await db.batch([
-    db.prepare("INSERT OR IGNORE INTO line_webhook_events (id, group_id, event_type, received_at, summary) VALUES (?, ?, ?, ?, ?)")
-      .bind(eventId, groupId, input.eventType.slice(0, 48), now, "Webhook ที่ตรวจสอบลายเซ็นแล้ว; ไม่เก็บข้อความในกลุ่ม"),
-    db.prepare("INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at) VALUES (?, ?, ?, ?, 'webhook', ?) ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), last_seen_at = excluded.last_seen_at, source = 'webhook', updated_at = excluded.updated_at")
-      .bind(groupId, groupName, safePictureUrl, now, now),
+    // Keep each field separate. SQLite's numbered placeholders were treated
+    // differently by the App Hosting runtime and caused a 500 for every LINE
+    // message after signature verification.
+    db.prepare("INSERT OR IGNORE INTO line_webhook_events (id, group_id, event_type, message_type, sender_key, received_at, summary) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .bind(eventId, groupId, input.eventType.slice(0, 48), input.messageType?.slice(0, 32) || null, input.senderKey?.slice(0, 32) || null, receivedAt, "Webhook ที่ตรวจสอบลายเซ็นแล้ว; ไม่เก็บข้อความในกลุ่ม"),
+    db.prepare("INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at) VALUES (?, ?, ?, ?, 'webhook', ?) ON CONFLICT(id) DO UPDATE SET group_name = CASE WHEN excluded.group_name LIKE 'LINE group %' AND line_group_registry.group_name NOT LIKE 'LINE group %' THEN line_group_registry.group_name ELSE excluded.group_name END, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), last_seen_at = excluded.last_seen_at, source = 'webhook', updated_at = excluded.updated_at")
+      .bind(groupId, groupName, safePictureUrl, receivedAt, now),
   ]);
+  // A message must never trigger bulk point activation. That operation writes
+  // every configured group and caused a single busy LINE chat to repeatedly
+  // rewrite the whole registry. Activation remains an explicit manager action.
   return { saved: true, duplicate: false };
+}
+
+// Records only aggregate metadata after the LINE signature has been verified.
+// This makes callback delivery visible without retaining chat text, LINE IDs,
+// group names, or any sender details for events that cannot be mapped to a group.
+export async function recordLineWebhookCallback(input: {
+  eventCount: number;
+  groupEvents: number;
+  roomEvents: number;
+  userEvents: number;
+  otherEvents: number;
+  messageEvents: number;
+}) {
+  await ensureDatabase();
+  const now = bangkokNow().iso;
+  const count = (value: number) => Math.max(0, Math.min(9_999, Math.floor(Number(value) || 0)));
+  const summary = `รับ ${count(input.eventCount)} เหตุการณ์ · กลุ่ม ${count(input.groupEvents)} · ห้องหลายคน ${count(input.roomEvents)} · ส่วนตัว ${count(input.userEvents)} · อื่นๆ ${count(input.otherEvents)} · ข้อความ ${count(input.messageEvents)}`;
+  const db = database();
+  await db.batch([
+    db.prepare("INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+      .bind("line_callback_last_at", now, now),
+    db.prepare("INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+      .bind("line_callback_last_summary", summary, now),
+  ]);
+  return { receivedAt: now, summary };
 }
 
 export async function updateLineGroupProfile(input: { groupId: string; groupName?: string; pictureUrl?: string }) {
@@ -892,6 +1159,101 @@ export async function updateLineGroupProfile(input: { groupId: string; groupName
   const now = bangkokNow().iso;
   await database().prepare("UPDATE line_group_registry SET group_name = COALESCE(?, group_name), picture_url = COALESCE(?, picture_url), source = 'webhook', updated_at = ? WHERE id = ?")
     .bind(groupName || null, avatar, now, groupId).run();
+}
+
+type LineGroupProfile = { groupName?: string; pictureUrl?: string };
+
+async function fetchLineGroupProfile(groupId: string, accessToken: string): Promise<LineGroupProfile | null> {
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const response = await Promise.race<Response | null>([
+      fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/summary`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: controller.signal,
+      }),
+      new Promise<null>((resolve) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          resolve(null);
+        }, 4_000);
+      }),
+    ]);
+    if (!response || !response.ok) return null;
+    const profile = await response.json() as LineGroupProfile;
+    return profile.groupName?.trim() ? profile : null;
+  } catch {
+    return null;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+// Repairs placeholder entries created during a cold start, and gives the
+// manager a safe one-tap way to refresh real names/logos without waiting for
+// another message in every group.
+export async function refreshLineGroupProfiles(actor: string, requestedGroupIds: string[] = []) {
+  await ensureDatabase();
+  const accessToken = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
+  if (!accessToken) throw new Error("ยังไม่ได้ตั้งค่า Channel access token");
+  // Webhook handling registers groups as they arrive. Replaying the full event
+  // history here makes a simple profile refresh wait on unrelated database
+  // writes, even when the registry is already complete.
+  const recovered = 0;
+  const db = database();
+  const registry = await db.prepare("SELECT id, group_name FROM line_group_registry ORDER BY last_seen_at DESC").all<D1Row>();
+  const requested = new Set(requestedGroupIds.map((id) => id.trim()).filter(Boolean));
+  const rows = (registry.results ?? []).filter((row) => !requested.size || requested.has(String(row.id ?? "").trim()));
+  const updates: Array<{ groupId: string; groupName: string; pictureUrl: string | null }> = [];
+
+  for (let index = 0; index < rows.length; index += 8) {
+    const batch = rows.slice(index, index + 8);
+    const results = await Promise.all(batch.map(async (row) => {
+      const groupId = String(row.id ?? "").trim();
+      if (!groupId) return null;
+      const profile = await fetchLineGroupProfile(groupId, accessToken);
+      const groupName = profile?.groupName?.trim() ?? "";
+      if (!profile || !groupName || isPlaceholderLineGroupName(groupName, groupId)) return null;
+      let safePictureUrl: string | null = null;
+      try { safePictureUrl = pictureUrl(profile.pictureUrl); } catch { safePictureUrl = null; }
+      return { groupId, groupName, pictureUrl: safePictureUrl };
+    }));
+    updates.push(...results.filter((result): result is { groupId: string; groupName: string; pictureUrl: string | null } => Boolean(result)));
+  }
+
+  // Persist all recovered names in one batch.  The old loop wrote the whole
+  // registry back to Firestore for every group and made the manager wait.
+  const now = bangkokNow().iso;
+  for (let index = 0; index < updates.length; index += 80) {
+    await db.batch(updates.slice(index, index + 80).map((update) =>
+      db.prepare("UPDATE line_group_registry SET group_name = ?, picture_url = COALESCE(?, picture_url), source = 'webhook', updated_at = ? WHERE id = ?")
+        .bind(update.groupName, update.pictureUrl, now, update.groupId),
+    ));
+  }
+  const resolved = updates.length;
+  const unavailable = Math.max(0, rows.length - resolved);
+  await addAudit("line_group", "registry", "profiles_refreshed", actor, `รีเฟรชชื่อและโลโก้จริงจาก LINE สำเร็จ ${resolved} กลุ่ม`);
+  return { total: rows.length, resolved, unavailable, recovered };
+}
+
+async function recoverLineGroupsFromWebhookEvents() {
+  const db = database();
+  const events = await db.prepare("SELECT group_id, MAX(received_at) AS last_seen_at FROM line_webhook_events WHERE group_id IS NOT NULL AND group_id != '' GROUP BY group_id ORDER BY last_seen_at DESC").all<D1Row>();
+  const rows = events.results ?? [];
+  const now = bangkokNow().iso;
+  const operations = rows.flatMap((row) => {
+    const groupId = String(row.group_id ?? "").trim();
+    if (!groupId) return [];
+    return [db.prepare("INSERT OR IGNORE INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at) VALUES (?, ?, NULL, ?, 'webhook', ?)")
+      .bind(groupId, `LINE group ${groupId.slice(-6)}`, String(row.last_seen_at ?? now), now)];
+  });
+  for (let index = 0; index < operations.length; index += 80) {
+    await db.batch(operations.slice(index, index + 80));
+  }
+  // Profile refresh must not run the expensive bulk point activation before
+  // contacting LINE.  This helper merely restores registry rows that are
+  // missing; normal webhook handling already activates a newly received group.
+  return operations.length;
 }
 
 export async function sendLineConnectionTest(input: { groupId: string; actor: string }) {
@@ -914,15 +1276,22 @@ export async function sendLineConnectionTest(input: { groupId: string; actor: st
   await addAudit("line_group", groupId, "connection_test_sent", input.actor, `ส่งข้อความทดสอบไปยัง ${String(group.group_name)} โดยไม่ส่งข้อมูลภายใน`);
 }
 
-export async function saveLineReminderSettings(input: { targetGroupId: string; autoEnabled: boolean; actor: string }) {
+export async function saveLineReminderSettings(input: { targetGroupId: string; escalationTargetGroupId?: string; autoEnabled: boolean; autoEscalationEnabled?: boolean; actor: string }) {
   await ensureDatabase();
   const targetGroupId = input.targetGroupId.trim();
   if (targetGroupId) {
     const group = await database().prepare("SELECT group_name FROM line_group_registry WHERE id = ?").bind(targetGroupId).first<D1Row>();
     if (!group) throw new Error("ยังไม่พบกลุ่มหลักในทะเบียน LINE กรุณาให้กลุ่มส่ง webhook ก่อน");
   }
+  const escalationTargetGroupId = input.escalationTargetGroupId?.trim() ?? "";
+  if (escalationTargetGroupId && escalationTargetGroupId !== targetGroupId) {
+    const escalation = await database().prepare("SELECT id FROM line_group_registry WHERE id = ?").bind(escalationTargetGroupId).first<D1Row>();
+    if (!escalation) throw new Error("ยังไม่พบกลุ่มสั่งการสำหรับติดตามด่วนในทะเบียน LINE");
+  }
   await setLineReminderSetting("line_reminder_target_group_id", targetGroupId);
+  await setLineReminderSetting("line_reminder_escalation_target_group_id", escalationTargetGroupId);
   await setLineReminderSetting("line_reminder_auto_enabled", input.autoEnabled ? "1" : "0");
+  await setLineReminderSetting("line_reminder_auto_escalation_enabled", input.autoEscalationEnabled ? "1" : "0");
   await addAudit("line_reminder", targetGroupId || "none", "settings_saved", input.actor, targetGroupId ? "ตั้งกลุ่มหลักสำหรับแจ้งเตือนรายงาน" : "ล้างกลุ่มหลักสำหรับแจ้งเตือนรายงาน");
 }
 
@@ -932,8 +1301,14 @@ export async function saveLineReportConfig(input: { groupId: string; config: Lin
   if (!groupId) throw new Error("กรุณาเลือกกลุ่ม LINE ที่ต้องการตั้งค่ากะ");
   const group = await database().prepare("SELECT r.group_name, m.site_id, s.active FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id LEFT JOIN operational_sites s ON s.id = m.site_id WHERE r.id = ?").bind(groupId).first<D1Row>();
   if (!group || !group.site_id || Number(group.active ?? 0) !== 1) throw new Error("กลุ่มนี้ยังไม่ได้ผูกกับจุดปฏิบัติการที่ใช้งานอยู่");
-  const config = safeLineReportConfig(JSON.stringify(input.config));
   const now = bangkokNow().iso;
+  const submitted = safeLineReportConfig(JSON.stringify(input.config));
+  const prior = await database().prepare("SELECT value FROM system_settings WHERE key = ?").bind(`line_report_config:${groupId}`).first<D1Row>();
+  const priorConfig = safeLineReportConfig(prior ? value(prior, "value") : null);
+  const config: LineReportConfig = {
+    ...submitted,
+    monitoringStartedAt: submitted.mode === "observe" ? null : submitted.monitoringStartedAt ?? priorConfig.monitoringStartedAt ?? now,
+  };
   await database().prepare("INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
     .bind(`line_report_config:${groupId}`, JSON.stringify(config), now).run();
   await addAudit("line_report_config", groupId, "settings_saved", input.actor, `${config.enabled ? "เปิด" : "ปิด"} การติดตามรายงานของ ${String(group.group_name)} · เช้า ${config.morningTimes.join(", ")} · เย็น ${config.eveningTimes.join(", ")}`);
@@ -961,7 +1336,7 @@ function reminderAgeLabel(minutes: number) {
   return remainder ? `${hours} ชม. ${remainder} นาที` : `${hours} ชม.`;
 }
 
-export async function sendLineReportReminder(input: { targetGroupId: string; wave: "morning" | "evening"; actor: string; force?: boolean; includeClear?: boolean }) {
+async function sendLegacyLineReportReminder(input: { targetGroupId: string; wave: "morning" | "evening"; actor: string; force?: boolean; includeClear?: boolean }) {
   await ensureDatabase();
   const targetGroupId = input.targetGroupId.trim();
   const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
@@ -1038,6 +1413,215 @@ export async function sendLineReportReminder(input: { targetGroupId: string; wav
   return { skipped: false, sentAt: current.iso, silentCount: silentGroups.length, trackedCount: trackedGroups.length, targetGroupName: String(target.group_name), message: "ส่งสรุปจุดที่ค้างรายงานแล้ว" };
 }
 
+type ReminderPreviewItem = {
+  groupId: string;
+  groupName: string;
+  siteName: string | null;
+  dueAt: string;
+  overdueRounds: number;
+  ageMinutes: number;
+  escalation: boolean;
+  verification: "text" | "approved_sender";
+  candidateSenderKey: string | null;
+};
+
+export type LineReminderPreview = {
+  targetGroupId: string;
+  targetGroupName: string;
+  roundTime: string;
+  trackedCount: number;
+  pendingCount: number;
+  carryOverCount: number;
+  escalationCount: number;
+  notArmedCount: number;
+  items: ReminderPreviewItem[];
+  message: string;
+  escalationMessage: string | null;
+};
+
+function timeAsMinutes(value: string) {
+  const [hour, minute] = value.split(":").map(Number);
+  return Number.isInteger(hour) && Number.isInteger(minute) ? hour * 60 + minute : 0;
+}
+
+function minutesAsTime(minutes: number) {
+  const safe = ((minutes % (24 * 60)) + (24 * 60)) % (24 * 60);
+  return `${String(Math.floor(safe / 60)).padStart(2, "0")}:${String(safe % 60).padStart(2, "0")}`;
+}
+
+function bangkokDateTimeMs(date: string, time: string) {
+  return Date.parse(`${date}T${time}:00+07:00`);
+}
+
+function overdueRoundsFor(config: LineReportConfig, nowTime: string) {
+  if (config.mode === "observe") return [];
+  const cutoff = Math.max(0, timeAsMinutes(nowTime) - config.graceMinutes);
+  if (config.mode === "interval") {
+    const anchor = timeAsMinutes(config.intervalAnchor);
+    const period = config.intervalHours * 60;
+    const rounds: string[] = [];
+    for (let minute = anchor; minute <= cutoff; minute += period) rounds.push(minutesAsTime(minute));
+    return rounds;
+  }
+  return config.expectedTimes.filter((time) => timeAsMinutes(time) <= cutoff);
+}
+
+function reminderAgeHoursLabel(minutes: number) {
+  if (!Number.isFinite(minutes)) return "ยังไม่เคยส่งรายงาน";
+  if (minutes < 60) return `${Math.max(1, minutes)} นาที`;
+  return `${Math.floor(minutes / 60)} ชม.`;
+}
+
+async function buildLineReminderPreview(input: { targetGroupId: string; roundTime?: string }): Promise<LineReminderPreview> {
+  await ensureDatabase();
+  const targetGroupId = input.targetGroupId.trim();
+  const db = database();
+  const target = await db.prepare("SELECT group_name FROM line_group_registry WHERE id = ?").bind(targetGroupId).first<D1Row>();
+  if (!target) throw new Error("ยังไม่พบกลุ่มปลายทางสำหรับแจ้งเตือนในทะเบียน LINE");
+  const current = bangkokNow();
+  const configs = await getLineReportConfigs();
+  const activity = await getLineReportActivity(configs);
+  const settings = await getLineReminderSettings();
+  const excluded = new Set([targetGroupId, settings.escalationTargetGroupId].filter((id): id is string => Boolean(id)));
+  const rows = await db.prepare("SELECT r.id, r.group_name, s.site_name FROM line_group_registry r INNER JOIN line_groups m ON m.id = r.id INNER JOIN operational_sites s ON s.id = m.site_id AND s.active = 1 ORDER BY r.group_name").all<D1Row>();
+  const items: ReminderPreviewItem[] = [];
+  let trackedCount = 0;
+  let notArmedCount = 0;
+  for (const row of rows.results ?? []) {
+    const groupId = String(row.id ?? "").trim();
+    if (!groupId || excluded.has(groupId)) continue;
+    const config = configs[groupId] ?? DEFAULT_LINE_REPORT_CONFIG;
+    if (!config.enabled || config.mode === "observe") continue;
+    if (!config.monitoringStartedAt) {
+      notArmedCount += 1;
+      continue;
+    }
+    trackedCount += 1;
+    const monitoringStartedMs = Date.parse(config.monitoringStartedAt);
+    const rounds = overdueRoundsFor(config, current.time).filter((round) => bangkokDateTimeMs(current.date, round) >= monitoringStartedMs);
+    if (!rounds.length) continue;
+    const latest = activity.get(groupId);
+    const lastReportAt = latest?.lastReportAt ?? null;
+    const lastReportMs = lastReportAt ? Date.parse(lastReportAt) : Number.NEGATIVE_INFINITY;
+    const missingRounds = rounds.filter((round) => bangkokDateTimeMs(current.date, round) > lastReportMs);
+    if (!missingRounds.length) continue;
+    const oldestRound = missingRounds[0];
+    const ageMinutes = Math.max(0, Math.floor((Date.parse(current.iso) - bangkokDateTimeMs(current.date, oldestRound)) / 60_000));
+    items.push({
+      groupId,
+      groupName: String(row.group_name ?? groupId),
+      siteName: value(row, "site_name"),
+      dueAt: missingRounds.at(-1) ?? oldestRound,
+      overdueRounds: missingRounds.length,
+      ageMinutes,
+      escalation: ageMinutes >= config.escalationAfterHours * 60,
+      verification: config.verification,
+      candidateSenderKey: latest?.lastCandidateSenderKey ?? null,
+    });
+  }
+  items.sort((left, right) => Number(right.escalation) - Number(left.escalation) || right.ageMinutes - left.ageMinutes || left.groupName.localeCompare(right.groupName, "th"));
+  const roundTime = input.roundTime && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(input.roundTime)
+    ? input.roundTime
+    : items.map((item) => item.dueAt).sort().at(-1) ?? current.time.slice(0, 5);
+  const messageItems = items.slice(0, 24).map((item, index) => {
+    const point = item.siteName && item.siteName !== item.groupName ? ` · ${item.siteName}` : "";
+    const carried = item.overdueRounds > 1 ? ` · ค้าง ${item.overdueRounds} รอบ` : "";
+    const sender = item.verification === "approved_sender" && item.candidateSenderKey ? " · ผู้ส่งยังไม่ยืนยัน" : "";
+    return `${index + 1}. ${item.groupName.slice(0, 58)}${point} · รอบ ${item.dueAt}${carried} · ${reminderAgeHoursLabel(item.ageMinutes)}${sender}`;
+  });
+  const overflow = items.length > messageItems.length ? `…และอีก ${items.length - messageItems.length} จุด` : "";
+  const summaryLine = trackedCount
+    ? `ยังไม่ผ่านการตรวจ ${items.length}/${trackedCount} จุด${items.filter((item) => item.overdueRounds > 1).length ? ` · ค้างข้ามรอบ ${items.filter((item) => item.overdueRounds > 1).length} จุด` : ""}`
+    : notArmedCount
+      ? `ยังไม่เริ่มนับ ${notArmedCount} จุด · บันทึกการตั้งค่ารายจุดเพื่อเริ่ม`
+      : "ยังไม่มีจุดที่เปิดตรวจในรอบนี้";
+  const message = [
+    `🚨 แจ้งติดตามรายงาน · รอบ ${roundTime}`,
+    summaryLine,
+    "",
+    ...messageItems,
+    overflow,
+    "",
+    "โปรดให้ รปภ. ผู้ปฏิบัติส่งรายงานจากบัญชีของตน · สติกเกอร์ไม่นับเป็นรายงาน",
+    "— ALPHA Command Center",
+  ].filter(Boolean).join("\n").slice(0, 4_900);
+  const escalationItems = items.filter((item) => item.escalation).slice(0, 18);
+  const escalationMessage = escalationItems.length ? [
+    `⚠️ ติดตามด่วน · ขาดรายงานนานเกินกำหนด`,
+    ...escalationItems.map((item, index) => `${index + 1}. ${item.groupName.slice(0, 58)} · รอบ ${item.dueAt} · ค้าง ${reminderAgeHoursLabel(item.ageMinutes)}`),
+    "กรุณาตรวจสอบผู้ปฏิบัติจริงและบันทึกผลในศูนย์สั่งการ",
+    "— ALPHA Command Center",
+  ].join("\n").slice(0, 4_900) : null;
+  return {
+    targetGroupId,
+    targetGroupName: String(target.group_name),
+    roundTime,
+    trackedCount,
+    pendingCount: items.length,
+    carryOverCount: items.filter((item) => item.overdueRounds > 1).length,
+    escalationCount: escalationItems.length,
+    notArmedCount,
+    items,
+    message,
+    escalationMessage,
+  };
+}
+
+export async function previewLineReportReminder(input: { targetGroupId: string; roundTime?: string }) {
+  return buildLineReminderPreview(input);
+}
+
+function lineRetryKey(...parts: string[]) {
+  const digest = createHash("sha256").update(parts.join("\u001f")).digest("hex");
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
+async function pushLineText(targetGroupId: string, message: string, token: string, retryKey?: string) {
+  const response = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(retryKey ? { "X-Line-Retry-Key": retryKey } : {}) },
+    body: JSON.stringify({ to: targetGroupId, messages: [{ type: "text", text: message }] }),
+  });
+  if (!response.ok) throw new Error("LINE OA ไม่รับการส่งแจ้งเตือน โปรดตรวจบอทและสิทธิ์ในกลุ่มปลายทาง");
+}
+
+export async function sendLineReportReminder(input: { targetGroupId: string; actor: string; force?: boolean; automatic?: boolean; roundTime?: string; sendEscalation?: boolean }) {
+  const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
+  if (!token) throw new Error("ยังไม่ได้ตั้งค่า Channel access token ในระบบที่ปลอดภัย");
+  const preview = await buildLineReminderPreview(input);
+  if (!preview.pendingCount) return { ...preview, skipped: true, message: "รอบนี้ไม่มีจุดค้างรายงานที่ต้องส่งเตือน" };
+  const settings = await getLineReminderSettings();
+  const current = bangkokNow();
+  const roundKey = `${current.date}|${preview.roundTime}`;
+  const previousRound = await database().prepare("SELECT value FROM system_settings WHERE key = 'line_reminder_last_round_key'").first<D1Row>();
+  if (!input.force && String(previousRound?.value ?? "") === roundKey) {
+    return { ...preview, skipped: true, message: "ระบบส่งแจ้งเตือนของรอบนี้แล้ว จึงไม่ส่งซ้ำ" };
+  }
+  await pushLineText(preview.targetGroupId, preview.message, token, input.automatic ? lineRetryKey("report", preview.targetGroupId, roundKey, preview.message) : undefined);
+  let escalationSent = false;
+  const escalationTarget = settings.escalationTargetGroupId;
+  const shouldEscalate = Boolean(preview.escalationMessage && escalationTarget && escalationTarget !== preview.targetGroupId && (input.sendEscalation || (input.automatic && settings.autoEscalationEnabled)));
+  if (shouldEscalate && escalationTarget && preview.escalationMessage) {
+    await pushLineText(escalationTarget, preview.escalationMessage, token, input.automatic ? lineRetryKey("escalation", escalationTarget, roundKey, preview.escalationMessage) : undefined);
+    escalationSent = true;
+  }
+  await Promise.all([
+    setLineReminderSetting("line_reminder_last_sent_at", current.iso),
+    setLineReminderSetting("line_reminder_last_sent_count", String(preview.pendingCount)),
+    setLineReminderSetting("line_reminder_last_target_name", preview.targetGroupName),
+    setLineReminderSetting("line_reminder_last_round_key", roundKey),
+  ]);
+  await addAudit("line_reminder", preview.targetGroupId, input.automatic ? "auto_report_reminder_sent" : "report_reminder_sent", input.actor, `ส่งแจ้งเตือนรอบ ${preview.roundTime} จำนวน ${preview.pendingCount} จุด${escalationSent ? " และส่งติดตามด่วน" : ""}`);
+  return { skipped: false, sentAt: current.iso, escalationSent, ...preview };
+}
+
+export async function runScheduledLineReminders(actor = "scheduler") {
+  await ensureDatabase();
+  const settings = await getLineReminderSettings();
+  if (!settings.autoEnabled || !settings.targetGroupId) return { skipped: true, message: "ยังไม่ได้เปิดส่งอัตโนมัติหรือยังไม่เลือกกลุ่มสั่งการ" };
+  return sendLineReportReminder({ targetGroupId: settings.targetGroupId, actor, force: false, automatic: true });
+}
+
 export async function syncLineGroupsFromGateway(actor?: string) {
   await ensureDatabase();
   const gatewayUrl = lineEnvironment().LINE_GATEWAY_URL?.trim();
@@ -1076,6 +1660,7 @@ export async function syncLineGroupsFromGateway(actor?: string) {
         .bind(group.id, group.groupName, group.pictureUrl, group.lastSeenAt, now),
     ));
   }
+  await activateAllLinePointsInternal(actor || "gateway-sync");
   if (actor) await addAudit("line_gateway", "registry", "synced", actor, `รับทะเบียนกลุ่ม LINE ${groups.length} กลุ่มจาก gateway ที่ยืนยันตัวตนแล้ว`);
   return { imported: groups.length };
 }
@@ -1139,7 +1724,7 @@ export async function importShiftTemplates(rows: TemplateImportRow[], actor: str
       db.prepare("INSERT INTO operational_sites (id, site_name, customer_name, active, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET site_name = excluded.site_name, customer_name = excluded.customer_name, active = 1, updated_at = excluded.updated_at")
         .bind(siteId, row.siteName, row.customerName, now, now),
       db.prepare("INSERT INTO shift_templates (id, site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, active, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(id) DO UPDATE SET assigned_guard = excluded.assigned_guard, deadline = excluded.deadline, verification_policy = excluded.verification_policy, active = 1, updated_at = excluded.updated_at")
-        .bind(templateId, siteId, row.wave, row.postName, row.slotLabel, row.assignedGuard || null, row.deadline, row.verificationPolicy, now),
+        .bind(templateId, siteId, row.wave, row.postName, row.slotLabel, row.assignedGuard || null, row.deadline, row.verificationPolicy ?? "standard", now),
     ];
   });
 
@@ -1160,8 +1745,11 @@ export async function importShiftTemplates(rows: TemplateImportRow[], actor: str
   return { imported: uniqueRows.size, lineGroups: lineGroupBySite.size };
 }
 
-export async function generateTodayFromTemplates(actor: string) {
-  await ensureDatabase();
+export function generateTodayFromTemplates(actor: string) {
+  return ensureDatabase().then(() => generateTodayFromTemplatesInternal(actor));
+}
+
+async function generateTodayFromTemplatesInternal(actor: string) {
   const db = database();
   const today = bangkokNow();
   const templates = await db.prepare("SELECT t.*, s.site_name, s.customer_name FROM shift_templates t INNER JOIN operational_sites s ON s.id = t.site_id WHERE t.active = 1 AND s.active = 1 ORDER BY t.wave, s.site_name, t.post_name, t.slot_label").all<D1Row>();
@@ -1212,4 +1800,90 @@ export async function addBillingCase(input: { customerName: string; amountBaht: 
   await database().prepare("INSERT INTO billing_cases (id, customer_name, service_period, amount_satang, due_at, document_state, submission_state, payment_state, next_action, owner_name, appointment_at, location, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'incomplete', 'unscheduled', 'unpaid', ?, ?, NULL, NULL, ?, ?)")
     .bind(id, input.customerName, "งวดใหม่", amountSatang, input.dueAt, input.nextAction, input.ownerName, now, now).run();
   await addAudit("billing_case", id, "created", input.ownerName, "สร้างงานวางบิล " + input.customerName);
+}
+
+export async function consumeQueuedSticker(groupId: string): Promise<{ stickerPackageId: string; stickerId: string; queuedId: string } | null> {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow();
+  const queued = await db.prepare("SELECT * FROM line_queued_stickers WHERE group_id = ? AND status = 'pending' ORDER BY created_at ASC LIMIT 1").bind(groupId).first<any>();
+  if (!queued) return null;
+
+  const result = await db.prepare("UPDATE line_queued_stickers SET status = 'sent', sent_at = ? WHERE id = ? AND status = 'pending'").bind(now.iso, queued.id).run();
+  if (result.meta.changes === 0) return null;
+
+  return { stickerPackageId: queued.sticker_package_id, stickerId: queued.sticker_id, queuedId: queued.id };
+}
+
+export async function consumeAutoReplyQuota(groupId: string, eventId: string): Promise<{ allowed: boolean; reason?: string; stickerPackageId?: string; stickerId?: string }> {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow();
+  const config = await db.prepare("SELECT * FROM line_auto_reply_configs WHERE group_id = ?").bind(groupId).first<any>();
+  if (!config) return { allowed: false, reason: "disabled" };
+  if (config.mode !== 'reply_on_new_report') return { allowed: false, reason: "disabled" };
+  if (!config.sticker_package_id || !config.sticker_id) return { allowed: false, reason: "no_sticker_configured" };
+
+  if (config.last_inbound_event_id === eventId) return { allowed: false, reason: "no_new_event" };
+
+  const currentHour = now.date.getHours();
+  const currentMinute = now.date.getMinutes();
+  const currentStr = `${currentHour.toString().padStart(2, '0')}:${currentMinute.toString().padStart(2, '0')}`;
+  
+  if (currentStr < config.active_hours_start || currentStr > config.active_hours_end) {
+    return { allowed: false, reason: "outside_active_hours" };
+  }
+
+  if (config.last_reply_at) {
+    const lastReplyDate = new Date(config.last_reply_at);
+    const diffMinutes = (now.date.getTime() - lastReplyDate.getTime()) / 60000;
+    if (diffMinutes < config.cooldown_minutes) {
+      return { allowed: false, reason: "cooldown" };
+    }
+  }
+
+  const todayStr = now.iso.split('T')[0];
+  let currentDailyCount = config.daily_count || 0;
+  if (config.daily_count_date !== todayStr) {
+    currentDailyCount = 0;
+  }
+
+  if (currentDailyCount >= config.daily_limit) {
+    return { allowed: false, reason: "daily_cap_reached" };
+  }
+
+  const result = await db.prepare(`
+    UPDATE line_auto_reply_configs 
+    SET daily_count = CASE WHEN daily_count_date = ? THEN daily_count + 1 ELSE 1 END,
+        daily_count_date = ?,
+        last_reply_at = ?,
+        last_inbound_event_id = ?,
+        updated_at = ?
+    WHERE group_id = ? AND mode = 'reply_on_new_report'
+  `).bind(todayStr, todayStr, now.iso, eventId, now.iso, groupId).run();
+
+  if (result.meta.changes === 0) return { allowed: false, reason: "concurrent_update_failed" };
+
+  return { allowed: true, stickerPackageId: config.sticker_package_id, stickerId: config.sticker_id };
+}
+
+export async function logOutboundAction(input: {
+  id: string;
+  groupId: string;
+  triggerEventId?: string;
+  actionType: string;
+  stickerPackageId: string;
+  stickerId: string;
+  status: string;
+  skipReason?: string;
+}) {
+  await ensureDatabase();
+  const db = database();
+  await db.prepare(`
+    INSERT INTO line_outbound_audit (id, group_id, trigger_event_id, action_type, sticker_package_id, sticker_id, status, skip_reason, sent_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    input.id, input.groupId, input.triggerEventId || null, input.actionType, 
+    input.stickerPackageId, input.stickerId, input.status, input.skipReason || null, bangkokNow().iso
+  ).run();
 }
