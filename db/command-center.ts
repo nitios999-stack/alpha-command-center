@@ -1253,6 +1253,9 @@ async function recoverLineGroupsFromWebhookEvents() {
   // Profile refresh must not run the expensive bulk point activation before
   // contacting LINE.  This helper merely restores registry rows that are
   // missing; normal webhook handling already activates a newly received group.
+  return operations.length;
+}
+
 export function sanitizeLineId(raw: string): string {
   const trimmed = String(raw || "").trim();
   // Extract C[32 hex], R[32 hex], U[32 hex] anywhere in the string/URL path
