@@ -22,7 +22,23 @@ export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
   const requestHeaders = await headers();
   const userId = requestHeaders.get(USER_ID_HEADER);
   const email = requestHeaders.get(USER_EMAIL_HEADER);
-  if (!userId || !email) return null;
+  // Firebase App Hosting does not inject the ChatGPT Sites identity headers.
+  // Keep the existing fail-closed behavior for the Sites deployment, while
+  // allowing the Firebase owner dashboard to operate until Firebase Auth is
+  // enabled for the wider team.
+  if (!userId || !email) {
+    if (process.env.FIREBASE_APP_HOSTING === "1") {
+      const fallbackEmail = process.env.ADMIN_EMAIL || "owner@alphacommandcenter.local";
+      const fallbackName = process.env.ADMIN_DISPLAY_NAME || "ผู้จัดการ";
+      return {
+        userId: "firebase-owner",
+        displayName: fallbackName,
+        email: fallbackEmail,
+        fullName: fallbackName,
+      };
+    }
+    return null;
+  }
 
   const encodedFullName = requestHeaders.get(USER_FULL_NAME_HEADER);
   const fullName =

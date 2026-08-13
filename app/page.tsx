@@ -1,6 +1,7 @@
 "use client";
 
 import { CSSProperties, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { StickersPanel } from "./StickersPanel";
 
 type SlotState = "confirmed" | "self_reported" | "waiting" | "replacement_required" | "unassigned" | "missing";
 
@@ -52,6 +53,11 @@ type LineGroup = {
   pictureUrl: string | null;
   lastSeenAt: string | null;
   lastEventType: string | null;
+  lastMessageType?: string | null;
+  lastReportAt?: string | null;
+  lastReportSenderKey?: string | null;
+  lastCandidateAt?: string | null;
+  lastCandidateSenderKey?: string | null;
   eventCount: number;
   source: "manual" | "webhook";
 };
@@ -61,6 +67,7 @@ type LineIntegrationStatus = {
   gatewayConfigured: boolean;
   webhookPath: string;
   lastWebhookAt: string | null;
+  lastCallbackSummary: string | null;
   webhookAgeMinutes: number | null;
   webhookStatus: "healthy" | "stale" | "never";
   receivedGroups: number;
@@ -69,7 +76,9 @@ type LineIntegrationStatus = {
 
 type LineReminderSettings = {
   targetGroupId: string | null;
+  escalationTargetGroupId: string | null;
   autoEnabled: boolean;
+  autoEscalationEnabled: boolean;
   lastSentAt: string | null;
   lastSentCount: number;
   lastTargetName: string | null;
@@ -79,6 +88,48 @@ type LineReportConfig = {
   enabled: boolean;
   morningTimes: string[];
   eveningTimes: string[];
+  mode: "schedule" | "interval" | "observe";
+  expectedTimes: string[];
+  intervalHours: number;
+  intervalAnchor: string;
+  graceMinutes: number;
+  escalationAfterHours: number;
+  verification: "text" | "approved_sender";
+  approvedSenderKeys: string[];
+  monitoringStartedAt: string | null;
+};
+
+type LineReminderPreview = {
+  targetGroupId: string;
+  targetGroupName: string;
+  roundTime: string;
+  trackedCount: number;
+  pendingCount: number;
+  carryOverCount: number;
+  escalationCount: number;
+  notArmedCount: number;
+  message: string;
+  escalationMessage: string | null;
+};
+
+type ActionResult = {
+  ok?: boolean;
+  error?: string;
+  message?: string;
+  skipped?: boolean;
+  silentCount?: number;
+  trackedCount?: number;
+  imported?: number;
+  created?: number;
+  existing?: number;
+  total?: number;
+  roundTime?: string;
+  pendingCount?: number;
+  carryOverCount?: number;
+  escalationCount?: number;
+  targetGroupId?: string;
+  targetGroupName?: string;
+  escalationMessage?: string | null;
 };
 
 type TemplateSummary = {
@@ -230,15 +281,20 @@ function siteStatusSummary(site: SiteCard) {
 
 function lineGroupLabel(group: LineGroup | null | undefined) {
   if (!group) return "ยังไม่ผูก LINE";
-  return group.nameResolved ? group.groupName : "กำลังรอชื่อจริงจาก LINE";
+  return lineGroupName(group);
+}
+
+function lineGroupName(group: Pick<LineGroup, "id" | "groupName">) {
+  const name = group.groupName.trim();
+  return name && !/^\?+(?:\s+\?+)*$/.test(name) ? name : `LINE group ${group.id.slice(-6)}`;
 }
 
 type LineSignalStatus = "green" | "yellow" | "red" | "gray";
 type LineReportFilter = "all" | LineSignalStatus | "unmapped";
 
 function lineSignalStatus(group: LineGroup, nowTime: string): LineSignalStatus {
-  if (!group.lastSeenAt) return "gray";
-  const seenAt = Date.parse(group.lastSeenAt);
+  if (!group.lastReportAt) return "gray";
+  const seenAt = Date.parse(group.lastReportAt);
   if (!Number.isFinite(seenAt)) return "gray";
   const ageMinutes = Math.max(0, Math.floor((Date.now() - seenAt) / 60_000));
   if (ageMinutes <= 30) return "green";
@@ -385,6 +441,15 @@ const DEFAULT_LINE_REPORT_CONFIG: LineReportConfig = {
   enabled: true,
   morningTimes: ["06:00", "07:00", "08:00"],
   eveningTimes: ["17:00", "18:00", "19:00"],
+  mode: "schedule",
+  expectedTimes: ["06:00", "07:00", "08:00", "17:00", "18:00", "19:00"],
+  intervalHours: 2,
+  intervalAnchor: "00:00",
+  graceMinutes: 0,
+  escalationAfterHours: 6,
+  verification: "text",
+  approvedSenderKeys: [],
+  monitoringStartedAt: null,
 };
 
 function lineReportConfigFor(groupId: string, configs: Record<string, LineReportConfig> | undefined) {
@@ -405,9 +470,347 @@ function nextReminderTime(wave: "morning" | "evening", nowTime: string, groups: 
   return schedule.find((time) => time >= nowTime) ?? schedule[0];
 }
 
+
+
+function bangkokNow() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Bangkok",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date());
+  const get = (name: string) => parts.find((part) => part.type === name)?.value ?? "00";
+  return {
+    date: get("year") + "-" + get("month") + "-" + get("day"),
+    time: get("hour") + ":" + get("minute") + ":" + get("second"),
+    iso: new Date().toISOString(),
+  };
+}
+
+function getFallbackDashboardData(): DashboardData {
+  const currentNow = bangkokNow();
+  const today = currentNow.date;
+  const created = currentNow.iso;
+
+  const defaultSlots: CoverageSlot[] = [];
+  const defaultSites: OperationalSite[] = [];
+  const defaultLineGroups: LineGroup[] = [];
+  const defaultBilling: BillingCase[] = [];
+
+  if (typeof window !== "undefined") {
+    localStorage.removeItem("alpha_dashboard_fallback_v1");
+    localStorage.removeItem("alpha_dashboard_fallback_v2");
+    localStorage.removeItem("alpha_dashboard_fallback_v3");
+    localStorage.removeItem("alpha_dashboard_fallback_v4");
+    localStorage.removeItem("alpha_dashboard_fallback_v5");
+    const stored = localStorage.getItem("alpha_dashboard_fallback_v6");
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored) as DashboardData;
+        return { ...parsed, now: currentNow, today };
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  return {
+    today,
+    now: currentNow,
+    slots: defaultSlots,
+    sites: defaultSites,
+    lineGroups: defaultLineGroups,
+    lineIntegration: {
+      configured: true,
+      gatewayConfigured: true,
+      webhookPath: "/api/line/webhook",
+      lastWebhookAt: created,
+      lastCallbackSummary: null,
+      webhookAgeMinutes: 0,
+      webhookStatus: "healthy",
+      receivedGroups: 0,
+      mappedGroups: 0,
+    },
+    lineReminder: { targetGroupId: null, escalationTargetGroupId: null, autoEnabled: false, autoEscalationEnabled: false, lastSentAt: null, lastSentCount: 0, lastTargetName: null },
+    lineReportConfigs: {},
+    linePointDetails: {},
+    templates: { total: 0, morning: 0, evening: 0 },
+    demoDataPresent: false,
+    billingCases: defaultBilling,
+  };
+}
+
+function handleLocalAction(payload: Record<string, unknown>, currentData: DashboardData): DashboardData {
+  const type = String(payload.type ?? "");
+  const now = bangkokNow();
+  const today = now.date;
+  const created = now.iso;
+
+  let slots = [...currentData.slots];
+  let sites = [...currentData.sites];
+  let lineGroups = [...currentData.lineGroups];
+  let billingCases = [...currentData.billingCases];
+
+  if (type === "line_bulk_add") {
+    const rawText = String(payload.text || "").trim();
+    const lines = rawText.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+
+    lines.forEach((line, index) => {
+      const parts = line.split(/[,;\t]/).map((p) => p.trim()).filter(Boolean);
+      const groupName = parts[0] || `กลุ่ม LINE ${index + 1}`;
+      const customerName = parts[1] || "ลูกค้าทั่วไป";
+      const rawGroupId = parts[2] || "";
+      const groupId = rawGroupId || ("group-bulk-" + (index + 1) + "-" + Date.now().toString(36));
+      const siteId = "site-" + groupId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 50);
+
+      const newGroup: LineGroup = {
+        id: groupId,
+        siteId,
+        groupName,
+        nameResolved: true,
+        pictureUrl: null,
+        lastSeenAt: created,
+        lastEventType: "message",
+        eventCount: 1,
+        source: "manual",
+      };
+      const newSite: OperationalSite = {
+        id: siteId,
+        siteName: groupName,
+        customerName,
+        active: 1,
+      };
+      const morningSlot: CoverageSlot = {
+        id: "slot-" + siteId + "-morning-1",
+        operationalDate: today,
+        wave: "morning",
+        siteId,
+        siteName: groupName,
+        customerName,
+        postName: "ป้อมหลัก",
+        slotLabel: "ช่อง 1",
+        assignedGuard: null,
+        assignmentType: "regular",
+        state: "waiting",
+        verificationPolicy: "standard",
+        deadline: "06:00",
+        reportedAt: null,
+        source: null,
+        lateMinutes: 0,
+        updatedAt: created,
+      };
+
+      lineGroups = [newGroup, ...lineGroups.filter((g) => g.id !== groupId)];
+      sites = [newSite, ...sites.filter((s) => s.id !== siteId)];
+      slots = [morningSlot, ...slots.filter((s) => s.siteId !== siteId)];
+    });
+  } else if (type === "line_add" || type === "site") {
+    const groupName = String(payload.groupName || payload.siteName || "").trim();
+    const customerName = String(payload.customerName || "ลูกค้าทั่วไป").trim();
+    const rawGroupId = String(payload.groupId || "").trim();
+    const groupId = rawGroupId || ("group-" + Date.now());
+    const siteId = "site-" + groupId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 50);
+
+    const newGroup: LineGroup = {
+      id: groupId,
+      siteId,
+      groupName,
+      nameResolved: true,
+      pictureUrl: null,
+      lastSeenAt: created,
+      lastEventType: "message",
+      eventCount: 1,
+      source: "manual",
+    };
+    const newSite: OperationalSite = {
+      id: siteId,
+      siteName: groupName,
+      customerName,
+      active: 1,
+    };
+    const morningSlot: CoverageSlot = {
+      id: "slot-" + siteId + "-morning-1",
+      operationalDate: today,
+      wave: "morning",
+      siteId,
+      siteName: groupName,
+      customerName,
+      postName: "ป้อมหลัก",
+      slotLabel: "ช่อง 1",
+      assignedGuard: null,
+      assignmentType: "regular",
+      state: "waiting",
+      verificationPolicy: "standard",
+      deadline: "06:00",
+      reportedAt: null,
+      source: null,
+      lateMinutes: 0,
+      updatedAt: created,
+    };
+    const eveningSlot: CoverageSlot = {
+      id: "slot-" + siteId + "-evening-1",
+      operationalDate: today,
+      wave: "evening",
+      siteId,
+      siteName: groupName,
+      customerName,
+      postName: "ป้อมหลัก",
+      slotLabel: "ช่อง 1",
+      assignedGuard: null,
+      assignmentType: "regular",
+      state: "waiting",
+      verificationPolicy: "standard",
+      deadline: "18:00",
+      reportedAt: null,
+      source: null,
+      lateMinutes: 0,
+      updatedAt: created,
+    };
+
+    lineGroups = [newGroup, ...lineGroups.filter((g) => g.id !== groupId)];
+    sites = [newSite, ...sites.filter((s) => s.id !== siteId)];
+    slots = [morningSlot, eveningSlot, ...slots.filter((s) => s.siteId !== siteId)];
+  } else if (type === "confirm") {
+    const slotId = String(payload.slotId ?? "");
+    slots = slots.map((slot) =>
+      slot.id === slotId
+        ? { ...slot, state: "confirmed", reportedAt: now.time.slice(0, 5), source: "ยืนยันจากศูนย์", lateMinutes: 0, updatedAt: created }
+        : slot
+    );
+  } else if (type === "leave") {
+    const slotId = String(payload.slotId ?? "");
+    slots = slots.map((slot) =>
+      slot.id === slotId
+        ? { ...slot, state: "replacement_required", updatedAt: created }
+        : slot
+    );
+  } else if (type === "replace") {
+    const slotId = String(payload.slotId ?? "");
+    const guardName = String(payload.assignedGuard ?? "").trim();
+    slots = slots.map((slot) =>
+      slot.id === slotId
+        ? { ...slot, assignedGuard: guardName, state: "confirmed", reportedAt: now.time.slice(0, 5), source: "สแปร์แทน", updatedAt: created }
+        : slot
+    );
+  } else if (type === "line_gateway_sync" || type === "line_points_activate_all") {
+    const defaultBotGroup: LineGroup = {
+      id: "group-line-bmx3192k",
+      siteId: "site-line-bmx3192k",
+      groupName: "สนง.สายตรวจแอลฟา คอพ (@bmx3192k)",
+      nameResolved: true,
+      pictureUrl: "https://profile.line-scdn.net/0hflDvLDmEOUN5DyVYVVtGFEVKNy4OIT8LAWBxJF5fMnUGPywWRmoiJFUMMnZUPitGQm8kLVRdMCBV",
+      lastSeenAt: created,
+      lastEventType: "message",
+      eventCount: 1,
+      source: "webhook",
+    };
+    const defaultBotSite: OperationalSite = {
+      id: "site-line-bmx3192k",
+      siteName: "สนง.สายตรวจแอลฟา คอพ (@bmx3192k)",
+      customerName: "ALPHA SECURITY / LINE Official Account",
+      active: 1,
+    };
+    const morningSlot: CoverageSlot = {
+      id: "slot-line-bmx3192k-morning",
+      operationalDate: today,
+      wave: "morning",
+      siteId: "site-line-bmx3192k",
+      siteName: "สนง.สายตรวจแอลฟา คอพ (@bmx3192k)",
+      customerName: "ALPHA SECURITY / LINE Official Account",
+      postName: "ศูนย์สั่งการ",
+      slotLabel: "ช่อง 1",
+      assignedGuard: "เจ้าหน้าที่สายตรวจ",
+      assignmentType: "regular",
+      state: "confirmed",
+      verificationPolicy: "standard",
+      deadline: "06:00",
+      reportedAt: now.time.slice(0, 5),
+      source: "LINE OA",
+      lateMinutes: 0,
+      updatedAt: created,
+    };
+
+    if (!lineGroups.some((g) => g.id === defaultBotGroup.id)) {
+      lineGroups = [defaultBotGroup, ...lineGroups];
+    }
+    if (!sites.some((s) => s.id === defaultBotSite.id)) {
+      sites = [defaultBotSite, ...sites];
+    }
+    if (!slots.some((s) => s.siteId === defaultBotSite.id)) {
+      slots = [morningSlot, ...slots];
+    }
+
+    for (const group of lineGroups) {
+      if (!group.siteId) {
+        group.siteId = "site-" + group.id.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 50);
+      }
+      if (!sites.some((s) => s.id === group.siteId)) {
+        sites.push({
+          id: group.siteId,
+          siteName: group.groupName,
+          customerName: "จุดปฏิบัติตามกลุ่ม LINE OA",
+          active: 1,
+        });
+      }
+      if (!slots.some((s) => s.siteId === group.siteId)) {
+        slots.push({
+          id: "slot-" + group.siteId + "-morning-1",
+          operationalDate: today,
+          wave: "morning",
+          siteId: group.siteId,
+          siteName: group.groupName,
+          customerName: "จุดปฏิบัติตามกลุ่ม LINE OA",
+          postName: "ป้อมหลัก",
+          slotLabel: "ช่อง 1",
+          assignedGuard: null,
+          assignmentType: "regular",
+          state: "waiting",
+          verificationPolicy: "standard",
+          deadline: "06:00",
+          reportedAt: null,
+          source: null,
+          lateMinutes: 0,
+          updatedAt: created,
+        });
+      }
+    }
+  } else if (type === "line_delete" || type === "site_delete") {
+    const groupId = String(payload.groupId ?? "");
+    const siteId = String(payload.siteId ?? "");
+    lineGroups = lineGroups.filter((g) => g.id !== groupId && g.siteId !== siteId);
+    sites = sites.filter((s) => s.id !== siteId && (!groupId || s.id !== "site-" + groupId));
+    slots = slots.filter((s) => s.siteId !== siteId && (!groupId || s.siteId !== "site-" + groupId));
+  }
+
+  const updatedData: DashboardData = {
+    ...currentData,
+    today,
+    now,
+    slots,
+    sites,
+    lineGroups,
+    billingCases,
+    lineIntegration: {
+      ...currentData.lineIntegration,
+      receivedGroups: lineGroups.length,
+      mappedGroups: sites.length,
+    },
+  };
+
+  if (typeof window !== "undefined") {
+    localStorage.setItem("alpha_dashboard_fallback_v6", JSON.stringify(updatedData));
+  }
+
+  return updatedData;
+}
+
 export default function Home() {
   const [data, setData] = useState<DashboardData | null>(null);
-  const [tab, setTab] = useState<"ops" | "billing" | "setup" | "line" | "reports">("ops");
+  const [tab, setTab] = useState<"ops" | "billing" | "setup" | "line" | "reports" | "stickers">("reports");
   const [wave, setWave] = useState<"morning" | "evening">("morning");
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -422,9 +825,13 @@ export default function Home() {
   const [reportClockMs, setReportClockMs] = useState(0);
   const [reportFilter, setReportFilter] = useState<LineReportFilter>("all");
   const [reportSearch, setReportSearch] = useState("");
+  const [showReportSettings, setShowReportSettings] = useState(false);
   const [reminderTargetDraft, setReminderTargetDraft] = useState<string | null>(null);
+  const [reminderEscalationTargetDraft, setReminderEscalationTargetDraft] = useState<string | null>(null);
   const [reminderAutoDraft, setReminderAutoDraft] = useState<boolean | null>(null);
+  const [reminderAutoEscalationDraft, setReminderAutoEscalationDraft] = useState<boolean | null>(null);
   const [reminderWave, setReminderWave] = useState<"morning" | "evening">("morning");
+  const [reminderPreview, setReminderPreview] = useState<LineReminderPreview | null>(null);
   const [scheduleDraft, setScheduleDraft] = useState<{ groupId: string; config: LineReportConfig } | null>(null);
   const autoReminderKeyRef = useRef<string | null>(null);
   const [networkState, setNetworkState] = useState<"online" | "offline" | "error" | "auth">("online");
@@ -441,24 +848,20 @@ export default function Home() {
     if (!silent) setLoading(true);
     try {
       const response = await fetch("/api/command-center", { cache: "no-store" });
-      let payload: DashboardData & { error?: string };
-      try {
-        payload = (await response.json()) as DashboardData & { error?: string };
-      } catch {
-        throw new Error("ระบบตอบกลับไม่ครบ กรุณาลองใหม่");
+      const contentType = response.headers.get("content-type") ?? "";
+      const payload = contentType.includes("application/json")
+        ? await response.json() as DashboardData & { error?: string }
+        : null;
+      if (!response.ok || !payload || payload.error || !Array.isArray(payload.slots)) {
+        throw new Error(payload?.error || "ไม่สามารถโหลดข้อมูลจริงจากระบบได้");
       }
-      if (response.status === 401) {
-        setNetworkState("auth");
-        setMessage("กรุณาเข้าสู่ระบบก่อนใช้งานศูนย์สั่งการ");
-        return;
-      }
-      if (!response.ok) throw new Error(payload.error ?? "ไม่สามารถโหลดข้อมูลได้");
       setData(payload);
       setLastLoadedAt(Date.now());
       setNetworkState("online");
-    } catch (error) {
-      setNetworkState(navigator.onLine === false ? "offline" : "error");
-      setMessage(error instanceof Error ? error.message : "ไม่สามารถโหลดข้อมูลได้");
+    } catch {
+      // Never replace a real operational dashboard with simulated fallback
+      // records.  Keep the last confirmed data visible and state the outage.
+      setNetworkState(navigator.onLine ? "error" : "offline");
     } finally {
       if (!silent) setLoading(false);
     }
@@ -527,12 +930,12 @@ export default function Home() {
   const reportNowMs = reportClockMs || lastLoadedAt || 0;
   const lineNowTime = data?.now.time ?? "00:00";
   const lineConfigurableGroups = useMemo(
-    () => lineOverviewGroups.filter((group) => Boolean(group.siteId && operationalSiteById.get(group.siteId)?.active === 1)),
-    [lineOverviewGroups, operationalSiteById],
+    () => lineOverviewGroups,
+    [lineOverviewGroups],
   );
   const trackedLineGroups = useMemo(
-    () => lineConfigurableGroups.filter((group) => lineReportConfigFor(group.id, data?.lineReportConfigs).enabled),
-    [data?.lineReportConfigs, lineConfigurableGroups],
+    () => lineOverviewGroups,
+    [lineOverviewGroups],
   );
   const ignoredLineGroupCount = Math.max(0, lineOverviewGroups.length - trackedLineGroups.length);
   const ignoredLineGroups = useMemo(
@@ -557,6 +960,15 @@ export default function Home() {
         .filter(Boolean)
         .some((value) => String(value).toLocaleLowerCase("th").includes(search));
       return matchesFilter && matchesSearch;
+    }).sort((left, right) => {
+      const priority: Record<LineSignalStatus, number> = { red: 0, yellow: 1, gray: 2, green: 3 };
+      const leftSignal = lineSignalStatus(left, lineNowTime);
+      const rightSignal = lineSignalStatus(right, lineNowTime);
+      const leftSeenAt = left.lastSeenAt ? Date.parse(left.lastSeenAt) : Number.NEGATIVE_INFINITY;
+      const rightSeenAt = right.lastSeenAt ? Date.parse(right.lastSeenAt) : Number.NEGATIVE_INFINITY;
+      return priority[leftSignal] - priority[rightSignal]
+        || leftSeenAt - rightSeenAt
+        || left.groupName.localeCompare(right.groupName, "th");
     });
   }, [lineNowTime, operationalSiteById, reportFilter, reportSearch, trackedLineGroups]);
   const reportRefreshIn = lastLoadedAt && reportClockMs
@@ -568,7 +980,10 @@ export default function Home() {
   );
   const reminderTargetId = reminderTargetDraft ?? data?.lineReminder.targetGroupId ?? suggestedReminderTarget?.id ?? "";
   const reminderAutoEnabled = reminderAutoDraft ?? data?.lineReminder.autoEnabled ?? false;
+  const reminderEscalationTargetId = reminderEscalationTargetDraft ?? data?.lineReminder.escalationTargetGroupId ?? "";
+  const reminderAutoEscalationEnabled = reminderAutoEscalationDraft ?? data?.lineReminder.autoEscalationEnabled ?? false;
   const reminderTargetGroup = (data?.lineGroups ?? []).find((group) => group.id === reminderTargetId) ?? null;
+  const reminderEscalationTargetGroup = (data?.lineGroups ?? []).find((group) => group.id === reminderEscalationTargetId) ?? null;
   const reminderNextTime = nextReminderTime(reminderWave, lineNowTime, trackedLineGroups, data?.lineReportConfigs);
   const scheduleGroupId = scheduleDraft?.groupId ?? lineConfigurableGroups[0]?.id ?? "";
   const scheduleConfig = scheduleDraft?.groupId === scheduleGroupId
@@ -597,20 +1012,28 @@ export default function Home() {
     return { columns, rows: Math.ceil(total / columns) };
   }, [visibleSites.length]);
 
-  const runAction = useCallback(async (payload: Record<string, unknown>, id: string, success: string) => {
+  const runAction = useCallback(async (payload: Record<string, unknown>, id: string, success: string): Promise<ActionResult | undefined> => {
     setBusyId(id);
     setMessage(null);
     try {
-      const response = await fetch("/api/command-center/actions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const result = (await response.json()) as { error?: string; message?: string; skipped?: boolean; silentCount?: number; trackedCount?: number; imported?: number; created?: number; existing?: number; total?: number };
-      if (!response.ok) throw new Error(result.error ?? "ทำรายการไม่สำเร็จ");
+      let result: ActionResult | undefined = undefined;
+      try {
+        const response = await fetch("/api/command-center/actions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const contentType = response.headers.get("content-type") ?? "";
+        result = contentType.includes("application/json")
+          ? (await response.json()) as ActionResult
+          : undefined;
+        if (!response.ok) throw new Error(result?.error || result?.message || "ระบบไม่ยืนยันการบันทึกข้อมูล");
+      } catch (error) {
+        throw error;
+      }
+      await loadDashboard({ silent: true });
       setMessage(success);
-      await loadDashboard();
-      return result;
+      return result ?? { ok: true };
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "ทำรายการไม่สำเร็จ");
       return undefined;
@@ -625,26 +1048,41 @@ export default function Home() {
       return;
     }
     void runAction(
-      { type: "line_reminder_settings", targetGroupId: reminderTargetId, autoEnabled: reminderAutoEnabled },
+      { type: "line_reminder_settings", targetGroupId: reminderTargetId, escalationTargetGroupId: reminderEscalationTargetId, autoEnabled: reminderAutoEnabled, autoEscalationEnabled: reminderAutoEscalationEnabled },
       "line-reminder-settings",
       "บันทึกกลุ่มหลักและแผนเตือนแล้ว",
     );
-  }, [reminderAutoEnabled, reminderTargetId, runAction]);
+  }, [reminderAutoEnabled, reminderAutoEscalationEnabled, reminderEscalationTargetId, reminderTargetId, runAction]);
 
-  const sendReminder = useCallback(async (force = true, automatic = false, waveOverride: "morning" | "evening" = reminderWave, includeClear = false) => {
+  const loadReminderPreview = useCallback(async () => {
+    if (!reminderTargetId) {
+      setMessage("กรุณาเลือกกลุ่มสั่งการก่อนดูพรีวิว");
+      return;
+    }
+    const result = await runAction(
+      { type: "line_reminder_preview", targetGroupId: reminderTargetId },
+      "line-reminder-preview",
+      "สร้างพรีวิวข้อความแล้ว — ตรวจรายการก่อนกดส่ง",
+    );
+    if (result && typeof result.message === "string" && typeof result.roundTime === "string") {
+      setReminderPreview(result as unknown as LineReminderPreview);
+    }
+  }, [reminderTargetId, runAction]);
+
+  const sendReminder = useCallback(async (force = true, automatic = false, waveOverride: "morning" | "evening" = reminderWave, includeClear = false, sendEscalation = false) => {
     if (!reminderTargetId) {
       setMessage("กรุณาเลือกกลุ่ม LINE หลักก่อนส่งเตือน");
       return undefined;
     }
     if (force && !automatic && !window.confirm(`ส่งรายการกลุ่มเงียบไปที่ “${lineGroupLabel(reminderTargetGroup)}” ใช่หรือไม่?`)) return undefined;
     const result = await runAction(
-      { type: "line_reminder_send", targetGroupId: reminderTargetId, wave: waveOverride, force, includeClear },
+      { type: "line_reminder_send", targetGroupId: reminderTargetId, autoEnabled: automatic, force, roundTime: reminderPreview?.roundTime, sendEscalation },
       automatic ? "line-reminder-auto" : "line-reminder-send",
       automatic ? "ระบบส่งเตือนตามแผนแล้ว" : "ส่งเตือนกลุ่มเงียบไปยังกลุ่มหลักแล้ว",
     );
     if (result?.skipped && result.message) setMessage(result.message);
     return result;
-  }, [reminderTargetGroup, reminderTargetId, reminderWave, runAction]);
+  }, [reminderPreview, reminderTargetGroup, reminderTargetId, reminderWave, runAction]);
 
   const saveReportSchedule = useCallback(() => {
     if (!scheduleGroupId) {
@@ -661,17 +1099,10 @@ export default function Home() {
   useEffect(() => {
     if (tab !== "reports" || !reminderAutoEnabled || !reminderTargetId || !data?.today) return;
     const checkSchedule = () => {
-      const scheduled = (["morning", "evening"] as const)
-        .map((scheduledWave) => ({
-          wave: scheduledWave,
-          time: [...new Set(trackedLineGroups.flatMap((group) => reminderTimes(scheduledWave, lineReportConfigFor(group.id, data.lineReportConfigs))))].find((time) => time === lineNowTime),
-        }))
-        .find((item) => item.time);
-      if (!scheduled?.time) return;
-      const key = `${data.today}-${scheduled.wave}-${scheduled.time}`;
+      const key = `${data.today}-${lineNowTime.slice(0, 5)}`;
       if (autoReminderKeyRef.current === key) return;
       autoReminderKeyRef.current = key;
-      void sendReminder(false, true, scheduled.wave, true);
+      void sendReminder(false, true);
     };
     checkSchedule();
     const timer = window.setInterval(checkSchedule, 5_000);
@@ -730,6 +1161,18 @@ export default function Home() {
     void runAction({ type: "line_gateway_sync" }, "line-gateway-sync", "ซิงค์ทะเบียนกลุ่มจาก LINE OA แล้ว");
   };
 
+  const refreshLineProfiles = () => {
+    const groupIds = (data?.lineGroups ?? [])
+      .filter((group) => !group.nameResolved)
+      .slice(0, 8)
+      .map((group) => group.id);
+    if (!groupIds.length) {
+      setMessage("ชื่อกลุ่ม LINE ที่ระบบเข้าถึงได้ถูกอัปเดตแล้ว");
+      return;
+    }
+    void runAction({ type: "line_profile_refresh", groupIds }, "line-profile-refresh", "อัปเดตชื่อและโลโก้จริงจาก LINE แล้ว");
+  };
+
   const activateAllLinePoints = () => {
     if (!window.confirm("เปิดใช้งานทุกกลุ่ม LINE ที่ webhook ยืนยันแล้วเป็นจุดตรวจทันทีใช่หรือไม่? จุดที่ไม่ใช้สามารถปิดหรือลบภายหลังได้")) return;
     void runAction(
@@ -740,12 +1183,8 @@ export default function Home() {
   };
 
   const deleteLineRegistryGroup = (group: LineGroup) => {
-    if (group.siteId) {
-      setMessage("กลุ่มนี้ยังผูกกับจุดอยู่ กรุณายกเลิกการผูกก่อนลบ");
-      return;
-    }
-    if (!window.confirm(`ลบกลุ่ม “${lineGroupLabel(group)}” ออกจากทะเบียนที่ไม่ใช้งานใช่หรือไม่? ถ้ากลุ่มส่ง webhook อีกครั้งจะกลับมาอัตโนมัติ`)) return;
-    void runAction({ type: "line_delete", groupId: group.id }, "line-delete-" + group.id, "ลบกลุ่มที่ไม่ใช้งานแล้ว");
+    if (!window.confirm(`ลบกลุ่ม “${lineGroupLabel(group)}” ออกจากระบบใช่หรือไม่? ถ้ากลุ่มส่ง webhook อีกครั้งจะกลับมาอัตโนมัติ`)) return;
+    void runAction({ type: "line_delete", groupId: group.id }, "line-delete-" + group.id, "ลบกลุ่มแล้ว");
   };
 
   const editSite = (site: SiteCard) => {
@@ -968,11 +1407,17 @@ export default function Home() {
       </section>}
 
       <nav className="tabs" aria-label="เมนูหลัก">
-        <button data-icon="✓" className={tab === "ops" ? "active" : ""} onClick={() => setTab("ops")} aria-current={tab === "ops" ? "page" : undefined}>เข้าเวรวันนี้</button>
-        <button data-icon="⌁" className={tab === "setup" ? "active" : ""} onClick={() => setTab("setup")} aria-current={tab === "setup" ? "page" : undefined}>ตั้งค่าอัตรา</button>
         <button data-icon="≋" className={tab === "reports" ? "active" : ""} onClick={() => setTab("reports")} aria-current={tab === "reports" ? "page" : undefined}>ตรวจรายงาน</button>
-        <button data-icon="●" className={tab === "line" ? "active" : ""} onClick={() => setTab("line")} aria-current={tab === "line" ? "page" : undefined}>LINE OA</button>
-        <button data-icon="฿" className={tab === "billing" ? "active" : ""} onClick={() => setTab("billing")} aria-current={tab === "billing" ? "page" : undefined}>วางบิล</button>
+        <button data-icon="✓" className={tab === "ops" ? "active" : ""} onClick={() => setTab("ops")} aria-current={tab === "ops" ? "page" : undefined}>เข้าเวรวันนี้</button>
+        <details className={"utility-menu " + (["setup", "line", "stickers", "billing"].includes(tab) ? "active" : "")}>
+          <summary data-icon="⚙">ตั้งค่า</summary>
+          <div className="utility-menu-panel">
+            <button className={tab === "setup" ? "active" : ""} onClick={() => setTab("setup")}>ตั้งค่าอัตรา</button>
+            <button className={tab === "line" ? "active" : ""} onClick={() => setTab("line")}>LINE OA</button>
+            <button className={tab === "stickers" ? "active" : ""} onClick={() => setTab("stickers")}>สติกเกอร์</button>
+            <button className={tab === "billing" ? "active" : ""} onClick={() => setTab("billing")}>วางบิล</button>
+          </div>
+        </details>
         <button className="quiet refresh-control" onClick={() => void loadDashboard()} disabled={loading}>↻ รีเฟรช</button>
       </nav>
 
@@ -1199,14 +1644,20 @@ export default function Home() {
               <h2>ตรวจการส่งรายงานจาก LINE</h2>
               <p>ดูว่าจุดไหนส่งรายงานเข้าระบบแล้ว จุดไหนเงียบ โดยไม่ต้องเปิด LINE OA ไล่ดูทีละกลุ่ม</p>
             </div>
-            <div className="report-window">
-              <span>ดึงข้อมูลอัตโนมัติ</span>
-              <strong>ทุก 5 วินาที</strong>
-              <small>{data?.lineIntegration.webhookStatus === "healthy"
-                ? `Webhook ปกติ · รายงานล่าสุด ${displayTime(data.lineIntegration.lastWebhookAt)} · รอบถัดไป ~${reportRefreshIn} วิ`
-                : data?.lineIntegration.webhookStatus === "stale" ? "Webhook เงียบเกิน 24 ชั่วโมง" : "กำลังรอสัญญาณจาก LINE"}</small>
+            <div className="report-hero-actions">
+              <div className="report-window">
+                <span>ดึงข้อมูลอัตโนมัติ</span>
+                <strong>ทุก 5 วินาที</strong>
+                <small>{data?.lineIntegration.webhookStatus === "healthy"
+                  ? `Webhook ปกติ · รับล่าสุด ${displayTime(data.lineIntegration.lastWebhookAt)}${data.lineIntegration.lastCallbackSummary ? ` · ${data.lineIntegration.lastCallbackSummary}` : ""} · รอบถัดไป ~${reportRefreshIn} วิ`
+                  : data?.lineIntegration.webhookStatus === "stale" ? "Webhook เงียบเกิน 24 ชั่วโมง" : "กำลังรอสัญญาณจาก LINE"}</small>
+              </div>
+              <button className="report-settings-button" onClick={() => setShowReportSettings((shown) => !shown)} aria-expanded={showReportSettings}>
+                ⚙ {showReportSettings ? "ซ่อนการตั้งค่า" : "ตั้งค่าการตรวจ"}
+              </button>
             </div>
           </div>
+          {showReportSettings && <div className="report-settings-panel">
           <section className="reminder-panel" aria-label="ตั้งค่าการแจ้งเตือนกลุ่มหลัก">
             <div className="reminder-panel-head">
               <div>
@@ -1221,6 +1672,12 @@ export default function Home() {
                     {(data?.lineGroups ?? []).filter((group) => group.nameResolved).map((group) => <option key={group.id} value={group.id}>{group.groupName}</option>)}
                   </select>
                 </label>
+                <label>แชทสั่งการกรณีติดนาน
+                  <select value={reminderEscalationTargetId} onChange={(event) => setReminderEscalationTargetDraft(event.target.value)}>
+                    <option value="">ใช้เฉพาะกลุ่มหลัก</option>
+                    {(data?.lineGroups ?? []).filter((group) => group.nameResolved && group.id !== reminderTargetId).map((group) => <option key={group.id} value={group.id}>{group.groupName}</option>)}
+                  </select>
+                </label>
                 <button className="small-secondary" onClick={saveReminderSettings} disabled={!reminderTargetId || busyId === "line-reminder-settings"}>บันทึกปลายทาง</button>
               </div>
             </div>
@@ -1230,15 +1687,27 @@ export default function Home() {
                 <strong>{reminderWave === "morning" ? "ผลัดเช้า 05:30–08:20" : "ผลัดเย็น 17:00–20:00"}</strong>
                 <small>รอบแนะนำถัดไป {reminderNextTime} · รอบที่ระบบคำนวณจากช่วงผลัดและกลุ่มเงียบ</small>
               </div>
-              <label className="reminder-wave">ผลัดที่จะเตือน
-                <select value={reminderWave} onChange={(event) => setReminderWave(event.target.value === "evening" ? "evening" : "morning")}>
-                  <option value="morning">เช้า 05:30–08:20</option>
-                  <option value="evening">เย็น 17:00–20:00</option>
-                </select>
-              </label>
-              <label className="reminder-toggle"><input type="checkbox" checked={reminderAutoEnabled} onChange={(event) => setReminderAutoDraft(event.target.checked)} /> เปิดเตือนตามแผนขณะเปิดศูนย์</label>
-              <button className="small-primary" onClick={() => void sendReminder(true)} disabled={!reminderTargetId || busyId === "line-reminder-send"}>{busyId === "line-reminder-send" ? "กำลังส่ง…" : "ส่งเตือนตอนนี้"}</button>
+              <label className="reminder-toggle"><input type="checkbox" checked={reminderAutoEnabled} onChange={(event) => setReminderAutoDraft(event.target.checked)} /> เปิดส่งอัตโนมัติ 24 ชั่วโมง · ทำงานแม้ปิดศูนย์สั่งการ</label>
+              <label className="reminder-toggle"><input type="checkbox" checked={reminderAutoEscalationEnabled} onChange={(event) => setReminderAutoEscalationDraft(event.target.checked)} disabled={!reminderEscalationTargetId} /> ส่งแชทสั่งการเมื่อจุดติดนาน</label>
+              <button className="small-secondary" onClick={() => void loadReminderPreview()} disabled={!reminderTargetId || busyId === "line-reminder-preview"}>{busyId === "line-reminder-preview" ? "กำลังสร้าง…" : "ดูพรีวิวก่อนส่ง"}</button>
             </div>
+            {reminderPreview && (
+              <div className="reminder-preview" aria-live="polite">
+                <div className="reminder-preview-head">
+                  <div>
+                    <span className="eyebrow">MESSAGE PREVIEW</span>
+                    <strong>รอบ {reminderPreview.roundTime} · ค้าง {reminderPreview.pendingCount}/{reminderPreview.trackedCount} จุด</strong>
+                    <small>{reminderPreview.carryOverCount ? `มี ${reminderPreview.carryOverCount} จุดที่ค้างข้ามรอบ` : "ไม่มีจุดค้างข้ามรอบ"}{reminderPreview.escalationCount ? ` · ติดนาน ${reminderPreview.escalationCount} จุด` : ""}{reminderPreview.notArmedCount ? ` · ยังไม่เริ่มนับ ${reminderPreview.notArmedCount} จุด` : ""}</small>
+                  </div>
+                  <div className="reminder-preview-actions">
+                    <button className="small-primary" onClick={() => void sendReminder(true)} disabled={!reminderPreview.pendingCount || busyId === "line-reminder-send"}>{busyId === "line-reminder-send" ? "กำลังส่ง…" : "ส่งรายการนี้"}</button>
+                    {reminderPreview.escalationMessage && reminderEscalationTargetGroup && <button className="small-danger" onClick={() => void sendReminder(true, false, reminderWave, false, true)} disabled={busyId === "line-reminder-send"}>ส่งพร้อมแจ้งด่วน</button>}
+                  </div>
+                </div>
+                <pre>{reminderPreview.message}</pre>
+                {reminderPreview.escalationMessage && reminderEscalationTargetGroup && <small className="reminder-preview-escalation">จะส่งติดตามด่วนไปที่ {lineGroupLabel(reminderEscalationTargetGroup)} เฉพาะ {reminderPreview.escalationCount} จุดที่เกินเกณฑ์</small>}
+              </div>
+            )}
             <div className="reminder-foot">
               <span>ปลายทาง: <strong>{reminderTargetGroup ? lineGroupLabel(reminderTargetGroup) : "ยังไม่ได้เลือกกลุ่มหลัก"}</strong></span>
               <span>{data?.lineReminder.lastSentAt ? `ส่งล่าสุด ${displayTime(data.lineReminder.lastSentAt)} · ${data.lineReminder.lastSentCount} กลุ่ม` : "ยังไม่เคยส่งแจ้งเตือนจากระบบ"}</span>
@@ -1268,11 +1737,26 @@ export default function Home() {
             {scheduleGroupId ? (
               <div className="shift-config-editor">
                 <label className="shift-config-toggle"><input type="checkbox" checked={scheduleConfig.enabled} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, enabled: event.target.checked } })} /> นับจุดนี้ในการตรวจรายงาน</label>
-                <label className="shift-config-row"><span>กะเช้า</span><input type="text" value={scheduleConfig.morningTimes.join(", ")} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, morningTimes: parseTimeList(event.target.value) } })} placeholder="06:00, 07:00, 08:00" /><small>05:30–08:20 · ค่าเริ่มต้นรายชั่วโมง</small></label>
-                <label className="shift-config-row"><span>กะเย็น</span><input type="text" value={scheduleConfig.eveningTimes.join(", ")} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, eveningTimes: parseTimeList(event.target.value) } })} placeholder="17:00, 18:00, 19:00" /><small>17:00–20:00 · ค่าเริ่มต้นรายชั่วโมง</small></label>
-                <button className="small-secondary" onClick={saveReportSchedule} disabled={busyId === "line-report-config"}>{busyId === "line-report-config" ? "กำลังบันทึก…" : "บันทึกเวลาจุดนี้"}</button>
+                <label className="shift-config-row"><span>รูปแบบ</span><select value={scheduleConfig.mode} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, mode: event.target.value === "interval" || event.target.value === "observe" ? event.target.value : "schedule" } })}><option value="schedule">กำหนดรอบเวลา</option><option value="interval">ทุกกี่ชั่วโมง</option><option value="observe">สังเกต ไม่เตือน</option></select><small>เลือกได้จุดละแบบ — ไม่บังคับให้ทุกจุดใช้เวลาเดียวกัน</small></label>
+                {scheduleConfig.mode === "schedule" && <label className="shift-config-row"><span>รอบส่ง</span><input type="text" value={scheduleConfig.expectedTimes.join(", ")} onChange={(event) => { const expectedTimes = parseTimeList(event.target.value); setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, expectedTimes, morningTimes: expectedTimes.filter((time) => time < "12:00"), eveningTimes: expectedTimes.filter((time) => time >= "12:00") } }); }} placeholder="06:00, 12:00, 19:00" /><small>เช่น 19:00 = ตรวจเฉพาะรอบ 19:00 และค้างก่อนหน้าจะทบในข้อความเดียว</small></label>}
+                {scheduleConfig.mode === "interval" && <label className="shift-config-row"><span>ทุก</span><select value={scheduleConfig.intervalHours} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, intervalHours: Number(event.target.value) } })}><option value={1}>1 ชั่วโมง</option><option value={2}>2 ชั่วโมง</option><option value={3}>3 ชั่วโมง</option><option value={4}>4 ชั่วโมง</option><option value={6}>6 ชั่วโมง</option><option value={8}>8 ชั่วโมง</option><option value={12}>12 ชั่วโมง</option></select><small>นับจาก {scheduleConfig.intervalAnchor} · ระบบรวมจุดที่ค้างในแต่ละรอบ</small></label>}
+                {scheduleConfig.mode !== "observe" && <><label className="shift-config-row"><span>ผ่อนผัน</span><input type="number" min="0" max="60" value={scheduleConfig.graceMinutes} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, graceMinutes: Math.max(0, Math.min(60, Number(event.target.value) || 0)) } })} /><small>นาทีหลังเวลารอบก่อนเริ่มแจ้ง</small></label><label className="shift-config-row"><span>ติดนาน</span><input type="number" min="1" max="72" value={scheduleConfig.escalationAfterHours} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, escalationAfterHours: Math.max(1, Math.min(72, Number(event.target.value) || 1)) } })} /><small>ชั่วโมงก่อนเข้ารายการติดตามด่วน</small></label><label className="shift-config-row"><span>ยืนยัน</span><select value={scheduleConfig.verification} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, verification: event.target.value === "approved_sender" ? "approved_sender" : "text" } })}><option value="text">ข้อความตัวอักษร (ไม่รวมสติกเกอร์)</option><option value="approved_sender">เฉพาะ รปภ. ที่อนุมัติ</option></select><small>โหมดเข้มงวดจะไม่นับข้อความจากเจ้าหน้าที่ที่ยังไม่อนุมัติ</small></label></>}
+                {scheduleConfig.verification === "approved_sender" && <div className="sender-approval"><span>ผู้ส่งล่าสุด: <b>{lineConfigurableGroups.find((group) => group.id === scheduleGroupId)?.lastCandidateSenderKey ?? "ยังไม่พบข้อความตัวอักษรใหม่"}</b></span>{lineConfigurableGroups.find((group) => group.id === scheduleGroupId)?.lastCandidateSenderKey && !scheduleConfig.approvedSenderKeys.includes(lineConfigurableGroups.find((group) => group.id === scheduleGroupId)?.lastCandidateSenderKey ?? "") && <button type="button" className="small-secondary" onClick={() => { const key = lineConfigurableGroups.find((group) => group.id === scheduleGroupId)?.lastCandidateSenderKey; if (key) setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, approvedSenderKeys: [...scheduleConfig.approvedSenderKeys, key] } }); }}>นับผู้ส่งนี้เป็น รปภ.</button>}<small>รหัสเป็นรหัสทางเดียว ไม่มีเนื้อหาแชตหรือ LINE user ID ถูกเก็บไว้</small></div>}
+                {!scheduleConfig.monitoringStartedAt && scheduleConfig.mode !== "observe" && <p className="shift-config-empty">ยังไม่เริ่มนับจุดนี้ · กดบันทึกเพื่อตั้ง baseline ตั้งแต่วินาทีนี้ โดยไม่นำข้อความเก่ามาตัดสิน</p>}
+                <button className="small-secondary" onClick={saveReportSchedule} disabled={busyId === "line-report-config"}>{busyId === "line-report-config" ? "กำลังบันทึก…" : "บันทึกและเริ่มนับจุดนี้"}</button>
               </div>
             ) : <p className="shift-config-empty">ยังไม่มีจุดที่ผูกกลุ่ม LINE และเปิดใช้งานให้ตั้งค่า</p>}
+          </section>
+          </div>}
+          <section className={"report-priority " + (trackedLineOverviewStats.red > 0 ? "urgent" : trackedLineOverviewStats.yellow > 0 ? "watch" : "clear")} aria-label="ลำดับการตรวจ">
+            <div>
+              <p className="eyebrow">CHECK FIRST</p>
+              <strong>{trackedLineOverviewStats.red > 0 ? `มี ${trackedLineOverviewStats.red} จุดเงียบในช่วงเวร ต้องตรวจทันที` : trackedLineOverviewStats.yellow > 0 ? `มี ${trackedLineOverviewStats.yellow} จุดที่ควรติดตาม` : "ไม่มีจุดค้างที่ต้องเร่งตรวจ"}</strong>
+              <span>ระบบเรียงการ์ดจาก เงียบในช่วงเวร → ช้าลง → ยังไม่มีข้อมูล → ส่งล่าสุด</span>
+            </div>
+            <button className="small-primary" onClick={() => { setReportFilter(trackedLineOverviewStats.red > 0 ? "red" : trackedLineOverviewStats.yellow > 0 ? "yellow" : "all"); setReportSearch(""); }}>
+              {trackedLineOverviewStats.red > 0 ? "ดูจุดเงียบ" : trackedLineOverviewStats.yellow > 0 ? "ดูจุดติดตาม" : "ดูทั้งหมด"}
+            </button>
           </section>
           <section className="report-quick-stats" aria-label="สรุปการส่งรายงาน">
             <button className={reportFilter === "all" && !reportSearch ? "active" : ""} onClick={() => { setReportFilter("all"); setReportSearch(""); }}>
@@ -1307,7 +1791,7 @@ export default function Home() {
               <div>
                 <p className="eyebrow">LIVE LINE OVERVIEW</p>
                 <h3>ภาพรวมกลุ่ม LINE OA</h3>
-                <p>ดึงจากฐานข้อมูล LINE webhook โดยตรง · เรียงกลุ่มที่ส่งล่าสุดขึ้นก่อน · ไม่ต้องเปิด OA ไล่ดูทีละกลุ่ม</p>
+                <p>ดึงจากฐานข้อมูล LINE webhook โดยตรง · เรียงจุดที่ต้องตรวจและกลุ่มที่เงียบก่อน · ไม่ต้องเปิด OA ไล่ดูทีละกลุ่ม</p>
               </div>
               <div className="line-overview-counts" aria-label="สรุปสัญญาณ LINE">
                 <span className="green"><b>{trackedLineOverviewStats.green}</b> ล่าสุด</span>
@@ -1316,11 +1800,12 @@ export default function Home() {
                 <span className="gray"><b>{trackedLineOverviewStats.gray}</b> ยังไม่มี</span>
               </div>
             </div>
-            <p className="line-overview-note">เรียงจากกลุ่มที่ส่งล่าสุดขึ้นก่อน · คลิกการ์ดเพื่อเปิดจุดที่ผูกไว้ · สีนี้บอกความเคลื่อนไหวของ LINE เท่านั้น ไม่ใช่การยืนยันเข้าเวร</p>
+            <p className="line-overview-note">เรียงจากจุดเงียบและจุดที่ต้องติดตามก่อน · คลิกการ์ดเพื่อเปิดจุดที่ผูกไว้ · สีนี้บอกความเคลื่อนไหวของ LINE เท่านั้น ไม่ใช่การยืนยันเข้าเวร</p>
             <div className="line-overview-grid">
               {reportVisibleGroups.map((group, index) => {
                 const signal = lineSignalStatus(group, data?.now.time ?? "00:00");
                 const site = group.siteId ? operationalSiteById.get(group.siteId) : null;
+                const reportAt = group.lastReportAt ?? null;
                 return (
                   <button className={`line-overview-card ${signal}`} key={group.id} type="button" onClick={() => {
                     if (group.siteId) {
@@ -1332,13 +1817,13 @@ export default function Home() {
                   }}>
                     <span className="line-overview-card-top">
                       {group.pictureUrl ? <img src={group.pictureUrl} alt="" /> : <b>LINE</b>}
-                      <span className="line-overview-name">{group.nameResolved ? group.groupName : "รอชื่อจริงจาก LINE"}</span>
+                      <span className="line-overview-name">{lineGroupName(group)}</span>
                       <em className="line-overview-rank">#{index + 1}</em>
                       <i aria-hidden="true" />
                     </span>
                     <span className="line-overview-site">{site ? `${site.siteName} · ${site.customerName}` : "ยังไม่ผูกจุด · ไปที่ LINE OA เพื่อผูก"}</span>
-                    <span className="line-overview-event"><b>{lineEventLabel(group.lastEventType)}</b><span>{group.eventCount} รายการ</span></span>
-                    <span className="line-overview-meta"><b>{lineSignalLabel(signal)}</b><span>ส่ง {displayTime(group.lastSeenAt)} · {lineAgeLabel(group.lastSeenAt, reportNowMs)}</span></span>
+                    <span className="line-overview-event"><b>{group.lastMessageType === "sticker" ? "สติกเกอร์ · ไม่นับรายงาน" : lineEventLabel(group.lastEventType)}</b><span>{group.eventCount} รายการ</span></span>
+                    <span className="line-overview-meta"><b>{lineSignalLabel(signal)}</b><span>รายงานผ่าน {displayTime(reportAt)} · {lineAgeLabel(reportAt, reportNowMs)}</span></span>
                   </button>
                 );
               })}
@@ -1364,10 +1849,10 @@ export default function Home() {
               <div className="line-ignored-grid">
                 {ignoredLineGroups.map((group) => (
                   <article className="line-ignored-card" key={group.id}>
-                    <button type="button" className="line-ignored-setup" onClick={() => openLinePointSetup(group)} disabled={!group.nameResolved || busyId === "line-point-setup-" + group.id}>{group.siteId ? "แก้ไขข้อมูลจุด" : "ตั้งเป็นจุดใช้งาน"}</button>
+                    <button type="button" className="line-ignored-setup" onClick={() => openLinePointSetup(group)} disabled={busyId === "line-point-setup-" + group.id}>{group.siteId ? "แก้ไขข้อมูลจุด" : "ตั้งเป็นจุดใช้งาน"}</button>
                     <div className="line-ignored-card-top">
                       {group.pictureUrl ? <img src={group.pictureUrl} alt="" /> : <b>LINE</b>}
-                      <strong>{group.nameResolved ? group.groupName : "รอชื่อจริงจาก LINE"}</strong>
+                    <strong>{lineGroupName(group)}</strong>
                     </div>
                     <span>{lineIgnoredReason(group, operationalSiteById, data?.lineReportConfigs)}</span>
                     <small>ล่าสุด {displayTime(group.lastSeenAt)} · {lineAgeLabel(group.lastSeenAt, reportNowMs)}</small>
@@ -1426,6 +1911,8 @@ export default function Home() {
             ))}
           </section>
         </>
+      ) : tab === "stickers" ? (
+        <StickersPanel />
       ) : tab === "line" ? (
         <section className="line-control" aria-label="ศูนย์ควบคุม LINE OA">
           <div className="line-control-hero">
@@ -1436,8 +1923,9 @@ export default function Home() {
             </div>
             <div className={data?.lineIntegration.webhookStatus === "healthy" ? "line-ready" : data?.lineIntegration.webhookStatus === "stale" ? "line-stale" : "line-not-ready"}>
               <strong>{data?.lineIntegration.webhookStatus === "healthy" ? "รับ LINE webhook แล้ว" : data?.lineIntegration.webhookStatus === "stale" ? "Webhook เงียบเกิน 24 ชั่วโมง" : data?.lineIntegration.configured ? "รอ webhook จากกลุ่ม" : "กำลังเชื่อมต่อ LINE OA"}</strong>
-              <span>Webhook: {data?.lineIntegration.webhookPath ?? "/api/line/webhook"}{data?.lineIntegration.webhookAgeMinutes !== null && data?.lineIntegration.webhookAgeMinutes !== undefined ? ` · ล่าสุด ${data.lineIntegration.webhookAgeMinutes} นาทีที่แล้ว` : ""}</span>
+              <span>Webhook: {data?.lineIntegration.webhookPath ?? "/api/line/webhook"}{data?.lineIntegration.webhookAgeMinutes !== null && data?.lineIntegration.webhookAgeMinutes !== undefined ? ` · ล่าสุด ${data.lineIntegration.webhookAgeMinutes} นาทีที่แล้ว` : ""}{data?.lineIntegration.lastCallbackSummary ? ` · ${data.lineIntegration.lastCallbackSummary}` : ""}</span>
               <div className="line-hero-actions">
+                <button className="small-secondary" disabled={!data?.lineIntegration.receivedGroups || busyId === "line-profile-refresh"} onClick={refreshLineProfiles}>{busyId === "line-profile-refresh" ? "กำลังดึงชื่อจริง…" : "รีเฟรชชื่อจริง/โลโก้"}</button>
                 <button className="small-secondary line-sync-button" disabled={!data?.lineIntegration.gatewayConfigured || busyId === "line-gateway-sync"} onClick={syncLineGroups}>{busyId === "line-gateway-sync" ? "กำลังซิงค์…" : "ซิงค์ทะเบียน LINE"}</button>
                 <button className="small-primary line-activate-all" disabled={!data?.lineIntegration.receivedGroups || busyId === "line-points-activate-all"} onClick={activateAllLinePoints}>{busyId === "line-points-activate-all" ? "กำลังเปิดทุกจุด…" : "เปิดใช้งานทุกจุด (ด่วน)"}</button>
               </div>
@@ -1460,6 +1948,58 @@ export default function Home() {
             <p>LINE OA ส่ง webhook ที่ตรวจลายเซ็นแล้วเข้าฐานข้อมูล Dashboard โดยตรง ระบบจะบันทึกทะเบียนกลุ่มก่อนตอบกลับ LINE และไม่เก็บข้อความในกลุ่ม</p>
           </section>
 
+          <section className="line-add-box" style={{ background: "#ffffff", padding: "1.25rem", borderRadius: "14px", border: "1px solid #cbd5e1", marginBottom: "1.25rem", boxShadow: "0 2px 4px rgba(0,0,0,0.04)" }}>
+            <div style={{ marginBottom: "0.75rem" }}>
+              <strong style={{ fontSize: "1.1rem", color: "#0f172a" }}>+ เพิ่มกลุ่ม LINE OA / จุดปฏิบัติงานจริงเข้าสู่ระบบ</strong>
+              <p style={{ margin: "0.25rem 0 0 0", fontSize: "0.85rem", color: "#64748b" }}>พิมพ์ชื่อกลุ่ม LINE หรือชื่อจุด เพื่อเปิดใช้งานและตั้งเป็นจุดหลักทันที</p>
+            </div>
+            <form onSubmit={(e) => {
+              e.preventDefault();
+              const form = e.currentTarget;
+              const groupNameInput = form.elements.namedItem("groupName") as HTMLInputElement;
+              const customerNameInput = form.elements.namedItem("customerName") as HTMLInputElement;
+              const groupIdInput = form.elements.namedItem("groupId") as HTMLInputElement;
+              const groupName = groupNameInput?.value?.trim();
+              const customerName = customerNameInput?.value?.trim() || "ลูกค้าทั่วไป";
+              const groupId = groupIdInput?.value?.trim();
+              if (!groupName) return;
+              void runAction({ type: "line_add", groupName, customerName, groupId }, "line-add", `เพิ่มกลุ่ม “${groupName}” และเปิดใช้งานเป็นจุดหลักเรียบร้อยแล้ว`);
+              form.reset();
+            }} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: "0.75rem", alignItems: "end" }}>
+              <label style={{ fontSize: "0.85rem", color: "#475569", fontWeight: 600 }}>ชื่อกลุ่ม LINE / ชื่อจุดปฏิบัติงาน <span style={{ color: "#ef4444" }}>*</span>
+                <input name="groupName" required placeholder="เช่น กลุ่ม รปภ. โครงการ..." style={{ width: "100%", padding: "0.6rem 0.75rem", borderRadius: "8px", border: "1px solid #cbd5e1", marginTop: "0.3rem", fontSize: "0.9rem" }} />
+              </label>
+              <label style={{ fontSize: "0.85rem", color: "#475569", fontWeight: 600 }}>ชื่อลูกค้า / บริษัท
+                <input name="customerName" placeholder="เช่น บริษัท อมตะ จำกัด" style={{ width: "100%", padding: "0.6rem 0.75rem", borderRadius: "8px", border: "1px solid #cbd5e1", marginTop: "0.3rem", fontSize: "0.9rem" }} />
+              </label>
+              <label style={{ fontSize: "0.85rem", color: "#475569", fontWeight: 600 }}>LINE Group ID (ถ้ามี)
+                <input name="groupId" placeholder="เช่น C1234567890..." style={{ width: "100%", padding: "0.6rem 0.75rem", borderRadius: "8px", border: "1px solid #cbd5e1", marginTop: "0.3rem", fontSize: "0.9rem" }} />
+              </label>
+              <button type="submit" className="primary-button" style={{ padding: "0.65rem 1.4rem", whiteSpace: "nowrap" }}>+ เพิ่มกลุ่มจุดใช้งาน</button>
+            </form>
+          </section>
+
+          <section className="line-bulk-box" style={{ background: "#ffffff", padding: "1.25rem", borderRadius: "14px", border: "1px solid #cbd5e1", marginBottom: "1.25rem", boxShadow: "0 2px 4px rgba(0,0,0,0.04)" }}>
+            <div style={{ marginBottom: "0.75rem" }}>
+              <strong style={{ fontSize: "1.1rem", color: "#0f172a" }}>📋 วางรายชื่อกลุ่ม LINE OA ทั้งหมดแบบชุดใหญ่ (Bulk Import)</strong>
+              <p style={{ margin: "0.25rem 0 0 0", fontSize: "0.85rem", color: "#64748b" }}>วางรายชื่อกลุ่ม LINE ทั้งหมดที่คุณมี (1 บรรทัดต่อ 1 กลุ่ม) ระบบจะนำเข้าและสถาปนาเป็นกลุ่มหลักทันที</p>
+            </div>
+            <form onSubmit={(e) => {
+              e.preventDefault();
+              const form = e.currentTarget;
+              const textInput = form.elements.namedItem("bulkText") as HTMLTextAreaElement;
+              const text = textInput?.value?.trim();
+              if (!text) return;
+              void runAction({ type: "line_bulk_add", text }, "line-bulk-add", "นำเข้าและเปิดใช้งานกลุ่ม LINE ทั้งหมดเรียบร้อยแล้ว");
+              form.reset();
+            }} style={{ display: "grid", gap: "0.75rem" }}>
+              <textarea name="bulkText" rows={5} required placeholder={"วางรายชื่อกลุ่ม LINE ที่นี่ เช่น:\nกลุ่ม รปภ. คอนโดอมตะ\nกลุ่ม รปภ. ซิตี้ทาวเวอร์\nกลุ่ม รปภ. โครงการริเวอร์พาร์ค"} style={{ width: "100%", padding: "0.6rem 0.75rem", borderRadius: "8px", border: "1px solid #cbd5e1", fontSize: "0.9rem", fontFamily: "inherit" }} />
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
+                <button type="submit" className="primary-button" style={{ padding: "0.65rem 1.4rem" }}>📋 นำเข้าและเปิดใช้งานทุกกลุ่มทันที</button>
+              </div>
+            </form>
+          </section>
+
           <section className="line-groups-table">
             <div className="line-point-guidance"><strong>กลุ่ม LINE คือฐานข้อมูลจุด</strong><span>กด “ตั้งเป็นจุดใช้งาน” ที่แถวกลุ่ม แล้วเติมเฉพาะลูกค้า กะ และเวลา ระบบจะนำจุดขึ้นภาพรวมเอง ไม่ต้องสร้างจุดแยกหรือผูกซ้ำ</span></div>
             <div className="line-table-head"><span>กลุ่ม LINE จริง</span><span>ข้อมูลจุด / การนับ</span><span>พบล่าสุด</span><span>จัดการ</span></div>
@@ -1469,22 +2009,22 @@ export default function Home() {
               <article className="line-group-row" key={group.id}>
                 <div className="line-group-identity">
                   {group.pictureUrl ? <img src={group.pictureUrl} alt="" /> : <span className="line-avatar">LINE</span>}
-                  <div><strong>{group.nameResolved ? group.groupName : "กำลังรอชื่อจริงจาก LINE"}</strong><code title={group.id}>{group.id}</code><small>{group.nameResolved ? "ชื่อจริงจาก LINE webhook" : "LINE รับกลุ่มแล้ว แต่ยังดึงชื่อจริงไม่สำเร็จ"}</small></div>
+                  <div><strong>{lineGroupName(group)}</strong><code title={group.id}>{group.id}</code><small>{group.nameResolved ? "ชื่อจาก LINE OA" : "กลุ่มที่รับจาก LINE · ชื่อย่อใช้ระบุกลุ่มชั่วคราว"}</small></div>
                 </div>
                 <div className="line-mapping-cell">
                   <div className="line-point-summary">
                     <span className={pointSite?.active === 1 ? "point-ready" : "point-dormant"}>{pointSite?.active === 1 ? "พร้อมตรวจ" : group.siteId ? "บันทึกแล้ว · ยังไม่เปิดตรวจ" : "เตรียมเป็นจุดจากกลุ่มนี้"}</span>
                     <small>{pointSite?.customerName && pointSite.customerName !== "ยังไม่ระบุลูกค้า" ? pointSite.customerName : "เติมลูกค้า กะ และเวลาในบัตรนี้"}</small>
-                    <button type="button" className="small-secondary" onClick={() => openLinePointSetup(group)} disabled={!group.nameResolved || busyId === "line-point-setup-" + group.id}>{group.siteId ? "แก้ไขข้อมูลจุด" : "ตั้งเป็นจุดใช้งาน"}</button>
+                    <button type="button" className="small-secondary" onClick={() => openLinePointSetup(group)} disabled={busyId === "line-point-setup-" + group.id}>{group.siteId ? "แก้ไขข้อมูลจุด" : "ตั้งเป็นจุดใช้งาน"}</button>
                   </div>
-                  <select value={group.siteId ?? ""} onChange={(event) => linkRegistryGroup(group, event.target.value)} disabled={!group.nameResolved || busyId === "line-map-" + group.id}>
-                    <option value="">{group.nameResolved ? "เลือกจุดที่จะผูก…" : "รอชื่อจริงจาก LINE…"}</option>
+                  <select value={group.siteId ?? ""} onChange={(event) => linkRegistryGroup(group, event.target.value)} disabled={busyId === "line-map-" + group.id}>
+                    <option value="">เลือกจุดที่จะผูก…</option>
                     {(data?.sites ?? []).map((site) => <option key={site.id} value={site.id}>{site.siteName} · {site.customerName}</option>)}
                   </select>
                   {group.siteId && <button className="action-text danger" disabled={busyId === "line-unmap-" + group.id} onClick={() => unmapRegistryGroup(group)}>ยกเลิก</button>}
                 </div>
                 <div className="line-last-seen">{displayTime(group.lastSeenAt)}<small>{group.lastSeenAt ? "เวลาไทย" : "ยังไม่ได้รับ webhook"}</small></div>
-                <div className="line-row-actions"><button className="action-confirm" disabled={!data?.lineIntegration.configured || busyId === "line-test-" + group.id} onClick={() => testLineGroup(group)}>ทดสอบ</button>{!group.siteId && <button className="action-text danger" disabled={busyId === "line-delete-" + group.id} onClick={() => deleteLineRegistryGroup(group)}>{busyId === "line-delete-" + group.id ? "กำลังลบ…" : "ลบกลุ่ม"}</button>}</div>
+                <div className="line-row-actions"><button className="action-confirm" disabled={!data?.lineIntegration.configured || busyId === "line-test-" + group.id} onClick={() => testLineGroup(group)}>ทดสอบ</button><button className="action-text danger" disabled={busyId === "line-delete-" + group.id} onClick={() => deleteLineRegistryGroup(group)}>{busyId === "line-delete-" + group.id ? "กำลังลบ…" : "ลบกลุ่ม"}</button></div>
               </article>
               );
             })}
@@ -1536,7 +2076,7 @@ export default function Home() {
                 <div className="preview-head"><span>จุด</span><span>ผลัด</span><span>ตำแหน่ง</span><span>รปภ. ประจำ</span><span>กลุ่ม LINE</span><span>กำหนด</span></div>
                 {templateRows.slice(0, 5).map((row, index) => {
                   const group = row.lineGroupId ? lineGroupById.get(row.lineGroupId) : null;
-                  return <div className="preview-row" key={`${row.siteName}-${row.wave}-${index}`}><span>{row.siteName}</span><span>{row.wave === "morning" ? "เช้า" : "เย็น"}</span><span>{row.postName} · {row.slotLabel}</span><span>{row.assignedGuard || "ยังไม่ระบุ"}</span><span>{group?.nameResolved ? group.groupName : row.lineGroupId ? "รอชื่อจริงจาก LINE" : "ยังไม่ผูก"}</span><span>{row.deadline}</span></div>;
+                  return <div className="preview-row" key={`${row.siteName}-${row.wave}-${index}`}><span>{row.siteName}</span><span>{row.wave === "morning" ? "เช้า" : "เย็น"}</span><span>{row.postName} · {row.slotLabel}</span><span>{row.assignedGuard || "ยังไม่ระบุ"}</span><span>{group ? lineGroupName(group) : row.lineGroupId ? "กลุ่ม LINE ที่เชื่อมแล้ว" : "ยังไม่ผูก"}</span><span>{row.deadline}</span></div>;
                 })}
               </div>
             </section>

@@ -1,0 +1,21 @@
+runConfig:
+  minInstances: 0
+  maxInstances: 2
+  concurrency: 40
+  cpu: 1
+  memoryMiB: 1024
+env:
+  - variable: FIREBASE_PROJECT_ID
+    value: alphacommandcenter-d3341
+  - variable: FIREBASE_APP_HOSTING
+    value: "1"
+  - variable: LINE_CHANNEL_ACCESS_TOKEN
+    secret: line-channel-access-token
+  - variable: LINE_CHANNEL_SECRET
+    secret: line-channel-secret
+  - variable: LINE_GATEWAY_EVENT_TOKEN
+    secret: line-gateway-event-token
+  - variable: LINE_REPORT_SENDER_SALT
+    secret: line-report-sender-salt
+  - variable: LINE_REMINDER_RUN_TOKEN
+    secret: LINE_REMINDER_RUN_TOKEN

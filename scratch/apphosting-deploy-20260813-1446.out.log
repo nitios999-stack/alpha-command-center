@@ -1,0 +1,14 @@
+
+[1m[37m===[39m Deploying to 'alphacommandcenter-d3341'...[22m
+
+[36m[1mi [22m[39m deploying [1mapphosting[22m
+[36m[1mi  apphosting:[22m[39m Found backend(s) alpha-command-center
+[36m[1mi  apphosting:[22m[39m Zipped source for backend alpha-command-center
+[36m[1mi  apphosting:[22m[39m Uploading source for backend alpha-command-center...
+[36m[1mi  apphosting:[22m[39m Uploaded at gs://firebaseapphosting-sources-835757238888-asia-southeast1/alpha-command-center--8972-t8LTbS09g7Au-.zip
+[36m[1mi  apphosting:[22m[39m You may also track the rollout(s) at:
+	https://console.firebase.google.com/project/alphacommandcenter-d3341/apphosting
+[33m[1m!  apphosting:[22m[39m Rollout for backend alpha-command-center failed.
+[31m[1m!!  apphosting:[22m[39m FirebaseError: Request to https://firebaseapphosting.googleapis.com/v1beta/projects/alphacommandcenter-d3341/locations/asia-southeast1/backends/alpha-command-center/builds?buildId=build-2026-08-13-009 had HTTP Error: 409, unable to queue the operation
+
+[1m[31mError:[39m[22m One or more rollouts failed. Please review the errors above and try again.

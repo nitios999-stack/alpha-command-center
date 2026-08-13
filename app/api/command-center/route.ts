@@ -1,7 +1,7 @@
 import { getDashboard } from "../../../db/command-center";
 import { apiAuthRequiredResponse, getChatGPTUser } from "../../chatgpt-auth";
 
-export const runtime = "edge";
+export const runtime = "nodejs";
 
 export async function GET() {
   if (!(await getChatGPTUser())) return apiAuthRequiredResponse();

@@ -1,7 +1,7 @@
-import { env } from "cloudflare:workers";
+const env = (typeof process !== "undefined" ? process.env : {}) as Record<string, string | undefined>;
 import { ensureDatabase } from "../../../db/command-center";
 
-export const runtime = "edge";
+export const runtime = "nodejs";
 
 type HealthEnv = {
   LINE_CHANNEL_ACCESS_TOKEN?: string;

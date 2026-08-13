@@ -84,11 +84,14 @@ export const lineWebhookEvents = sqliteTable("line_webhook_events", {
   id: text("id").primaryKey(),
   groupId: text("group_id"),
   eventType: text("event_type").notNull(),
+  messageType: text("message_type"),
+  senderKey: text("sender_key"),
   receivedAt: text("received_at").notNull(),
   summary: text("summary").notNull(),
 }, (table) => [
   index("idx_line_events_group_time").on(table.groupId, table.receivedAt),
   index("idx_line_events_type_time").on(table.eventType, table.receivedAt),
+  index("idx_line_events_report_candidate").on(table.groupId, table.messageType, table.receivedAt),
 ]);
 
 export const billingCases = sqliteTable("billing_cases", {
@@ -121,3 +124,52 @@ export const auditLogs = sqliteTable("audit_logs", {
 }, (table) => [
   index("idx_audit_entity").on(table.entityType, table.entityId, table.createdAt),
 ]);
+
+export const lineAutoReplyConfigs = sqliteTable("line_auto_reply_configs", {
+  groupId: text("group_id").primaryKey(),
+  mode: text("mode").notNull().default("silent"),
+  stickerPackageId: text("sticker_package_id"),
+  stickerId: text("sticker_id"),
+  cooldownMinutes: integer("cooldown_minutes").notNull().default(60),
+  activeHoursStart: text("active_hours_start").notNull().default("06:00"),
+  activeHoursEnd: text("active_hours_end").notNull().default("22:00"),
+  dailyLimit: integer("daily_limit").notNull().default(5),
+  dailyCount: integer("daily_count").notNull().default(0),
+  dailyCountDate: text("daily_count_date"),
+  lastReplyAt: text("last_reply_at"),
+  lastInboundEventId: text("last_inbound_event_id"),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const lineStickerPresets = sqliteTable("line_sticker_presets", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  packageId: text("package_id").notNull(),
+  stickerId: text("sticker_id").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const lineOutboundAudit = sqliteTable("line_outbound_audit", {
+  id: text("id").primaryKey(),
+  groupId: text("group_id").notNull(),
+  triggerEventId: text("trigger_event_id"),
+  actionType: text("action_type").notNull(), // 'auto-reply', 'manual-batch'
+  stickerPackageId: text("sticker_package_id").notNull(),
+  stickerId: text("sticker_id").notNull(),
+  status: text("status").notNull(), // 'sent', 'skipped', 'failed'
+  skipReason: text("skip_reason"),
+  sentAt: text("sent_at").notNull(),
+}, (table) => [
+  index("idx_outbound_audit_group_time").on(table.groupId, table.sentAt),
+]);
+
+export const lineManualBatchJobs = sqliteTable("line_manual_batch_jobs", {
+  id: text("id").primaryKey(),
+  groupIds: text("group_ids").notNull(), // JSON array of group IDs
+  stickerPackageId: text("sticker_package_id").notNull(),
+  stickerId: text("sticker_id").notNull(),
+  status: text("status").notNull().default("pending"), // 'pending', 'completed', 'failed'
+  createdAt: text("created_at").notNull(),
+  createdBy: text("created_by").notNull(),
+});

@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Redirecting... | LINE Developers</title>
+    <meta charset="utf-8">
+    <meta prefix="og: http://ogp.me/ns#" property="og:url" content="https://developers.line.biz/">
+    <meta prefix="og: http://ogp.me/ns#" property="og:image" content="https://developers.line.biz/images/ogtags/twitter-ogtag.jpg">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:site" content="@LINE_DEV">
+    <meta name="twitter:image" content="https://developers.line.biz/images/ogtags/twitter-ogtag.jpg">
+    <meta property="devdocs:type" content="redirect">
+    <script>window.location.href = "/en/docs/messaging-api/sticker-list/" + window.location.hash;</script>
+  </head>
+</html>
+  
