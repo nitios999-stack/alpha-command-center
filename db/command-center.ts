@@ -1826,9 +1826,8 @@ export async function consumeAutoReplyQuota(groupId: string, eventId: string): P
 
   if (config.last_inbound_event_id === eventId) return { allowed: false, reason: "no_new_event" };
 
-  const currentHour = now.date.getHours();
-  const currentMinute = now.date.getMinutes();
-  const currentStr = `${currentHour.toString().padStart(2, '0')}:${currentMinute.toString().padStart(2, '0')}`;
+  const [currentHourStr, currentMinuteStr] = now.time.split(':');
+  const currentStr = `${currentHourStr}:${currentMinuteStr}`;
   
   if (currentStr < config.active_hours_start || currentStr > config.active_hours_end) {
     return { allowed: false, reason: "outside_active_hours" };
@@ -1836,7 +1835,8 @@ export async function consumeAutoReplyQuota(groupId: string, eventId: string): P
 
   if (config.last_reply_at) {
     const lastReplyDate = new Date(config.last_reply_at);
-    const diffMinutes = (now.date.getTime() - lastReplyDate.getTime()) / 60000;
+    const nowDate = new Date(now.iso);
+    const diffMinutes = (nowDate.getTime() - lastReplyDate.getTime()) / 60000;
     if (diffMinutes < config.cooldown_minutes) {
       return { allowed: false, reason: "cooldown" };
     }
