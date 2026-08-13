@@ -251,7 +251,7 @@ export default function PatrolDeckPage() {
             </h1>
             <div style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.72rem", color: "#94a3b8" }}>
               <span style={{ display: "inline-block", width: "6px", height: "6px", borderRadius: "50%", background: "#10b981", animation: "pulse 2s infinite" }} />
-              <span>ซิงค์สด {currentTime || "--:--:--"}</span>
+              <span suppressHydrationWarning>ซิงค์สด {currentTime || "--:--:--"}</span>
             </div>
           </div>
         </div>
