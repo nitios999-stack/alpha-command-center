@@ -13,17 +13,18 @@ export async function GET(request: Request) {
   const now = new Date().toISOString();
   let enabledCount = 0;
 
+  const defaultPkg = '11538';
+  const defaultStk = '51626520';
+
   for (const group of groups) {
     await db.prepare(`
       INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, updated_at)
-      VALUES (?, 'reply_on_new_report', '11537', '52002739', ?, ?)
+      VALUES (?, 'reply_on_new_report', ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET 
         mode = 'reply_on_new_report',
-        sticker_package_id = '11537',
-        sticker_id = '52002739',
         cooldown_minutes = ?,
         updated_at = ?
-    `).bind(group.id, cooldown, now, cooldown, now).run();
+    `).bind(group.id, defaultPkg, defaultStk, cooldown, now, cooldown, now).run();
     enabledCount++;
   }
 
