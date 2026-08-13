@@ -39,7 +39,7 @@ export async function POST(request: Request) {
       ).bind(groupId, currentEvent.rowid).first()) as { id: string } | null;
 
       if (newerEvent) {
-        // มีข้อความใหม่เข้ามา แปลว่ายังส่งรูปไม่เสร็จ ให้ข้ามตัวนี้ไป (ตัวใหม่จะนับ 30 วิ ต่อเอง)
+        // มีข้อความใหม่เข้ามา แปลว่ายังส่งรูปไม่เสร็จ ให้ข้ามตัวนี้ไป (ตัวใหม่จะนับ 35 วิ ต่อเอง)
         return Response.json({ ok: true, skipped: true, reason: "newer_message_exists" });
       }
     }
@@ -75,7 +75,7 @@ export async function POST(request: Request) {
       return Response.json({ ok: false, error: "no token" }, { status: 500 });
     }
 
-    // 3. ส่งสติกเกอร์ปิดท้าย 1 ตัว (30 วิ หลังรูปสุดท้าย) ผ่าน Reply API (ฟรี 100% ไม่เสียโควต้าของ LINE)
+    // 3. ส่งสติกเกอร์ปิดท้าย 1 ตัว (35 วิ หลังรูปสุดท้าย) ผ่าน Reply API (ฟรี 100% ไม่เสียโควต้าของ LINE)
     const response = await fetch("https://api.line.me/v2/bot/message/reply", {
       method: "POST",
       headers: {
@@ -86,8 +86,8 @@ export async function POST(request: Request) {
         replyToken: replyToken,
         messages: [{
           type: "sticker",
-          packageId: configData.sticker_package_id,
-          stickerId: configData.sticker_id
+          packageId: stickerPackageId,
+          stickerId: stickerId
         }]
       })
     });
@@ -99,32 +99,33 @@ export async function POST(request: Request) {
         groupId: groupId,
         triggerEventId: eventId,
         actionType: "auto-reply-close",
-        stickerPackageId: configData.sticker_package_id,
-        stickerId: configData.sticker_id,
+        stickerPackageId: stickerPackageId,
+        stickerId: stickerId,
         status: "failed",
         skipReason: `Reply API Error: ${response.status} ${errBody.slice(0, 200)}`
       });
       return Response.json({ ok: false, error: errBody });
     }
 
-    // บันทึกเวลาตอบกลับล่าสุดเพื่อกัน Cooldown
+    // 4. บันทึกเวลาตอบกลับล่าสุดเพื่อกัน Cooldown
     await db.prepare(`
-      UPDATE line_auto_reply_configs 
-      SET last_reply_at = ?,
-          last_inbound_event_id = ?,
-          updated_at = ?
-      WHERE group_id = ?
-    `).bind(now.toISOString(), eventId, now.toISOString(), groupId).run();
+      INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, last_reply_at, last_inbound_event_id, updated_at)
+      VALUES (?, 'ack_only', ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(group_id) DO UPDATE SET 
+        last_reply_at = excluded.last_reply_at,
+        last_inbound_event_id = excluded.last_inbound_event_id,
+        updated_at = excluded.updated_at
+    `).bind(groupId, stickerPackageId, stickerId, cooldownMinutes, now.toISOString(), eventId, now.toISOString()).run();
 
     await logOutboundAction({
       id: actionId,
       groupId: groupId,
       triggerEventId: eventId,
       actionType: "auto-reply-close",
-      stickerPackageId: configData.sticker_package_id,
-      stickerId: configData.sticker_id,
+      stickerPackageId: stickerPackageId,
+      stickerId: stickerId,
       status: "sent",
-      skipReason: "จังหวะปิดจบ 30 วิ (reply ฟรี 100%)"
+      skipReason: "จังหวะปิดจบ 35 วิ (reply ฟรี 100%)"
     });
 
     return Response.json({ ok: true, sent: true });

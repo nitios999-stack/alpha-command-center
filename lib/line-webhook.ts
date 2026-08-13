@@ -164,8 +164,8 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
   });
 
   const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || new URL(request.url).host;
-  const proto = request.headers.get("x-forwarded-proto") || (request.url.startsWith("https") ? "https" : "http");
-  const origin = `${proto}://${host}`;
+  const isHttps = request.headers.get("x-forwarded-proto") === "https" || request.url.startsWith("https") || host.includes("hosted.app") || host.includes("web.app");
+  const origin = `${isHttps ? "https" : "http"}://${host}`;
 
   await Promise.all(Array.from(eventsByGroup.values()).map(async (items) => {
     for (let itemIdx = 0; itemIdx < items.length; itemIdx++) {
@@ -191,11 +191,11 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
         actionType = "manual-batch-queued";
         triggerEventId = queuedSticker.queuedId;
       } else {
-        // TRIGGER DEBOUNCER ONLY ON THE LAST MESSAGE OF THE BATCH (30s after the last photo/message)
+        // TRIGGER DEBOUNCER ONLY ON THE LAST MESSAGE OF THE BATCH (35s after the last photo/message)
         if (isLastInBatch) {
           try {
             const receivedAt = new Date().toISOString();
-            fetch(`${origin}/api/line/stickers/debouncer`, {
+            const debouncerPromise = fetch(`${origin}/api/line/stickers/debouncer`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -206,6 +206,10 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
                 accessToken: accessToken
               })
             }).catch(() => {});
+
+            if (typeof schedule === "function") {
+              schedule(debouncerPromise);
+            }
           } catch (e) {
             // Ignore fetch errors
           }
