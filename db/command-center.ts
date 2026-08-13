@@ -1991,14 +1991,38 @@ export async function getShiftGroupConfigurations() {
   await ensureDatabase();
   const db = database();
   
+  // ดึงกลุ่มจากทุกแหล่ง ทั้ง registry, groups, และ webhook events
   const groupsResult = await db.prepare(`
-    SELECT r.id AS group_id, r.group_name, r.picture_url, r.last_seen_at,
-           m.site_id, s.customer_name, s.active AS site_active
+    SELECT DISTINCT 
+      COALESCE(r.id, m.id) AS group_id,
+      COALESCE(r.group_name, m.group_name, 'กลุ่ม LINE ' || SUBSTR(COALESCE(r.id, m.id), -6)) AS group_name,
+      COALESCE(r.picture_url, m.picture_url) AS picture_url,
+      COALESCE(r.last_seen_at, m.updated_at) AS last_seen_at,
+      m.site_id, s.customer_name, s.active AS site_active
     FROM line_group_registry r
-    LEFT JOIN line_groups m ON m.id = r.id
+    FULL OUTER JOIN line_groups m ON m.id = r.id
     LEFT JOIN operational_sites s ON s.id = m.site_id
-    ORDER BY r.group_name ASC
-  `).all<D1Row>();
+    ORDER BY group_name ASC
+  `).all<D1Row>().catch(async () => {
+    // Fallback for SQLite without FULL OUTER JOIN
+    return await db.prepare(`
+      SELECT 
+        r.id AS group_id, r.group_name, r.picture_url, r.last_seen_at,
+        m.site_id, s.customer_name, s.active AS site_active
+      FROM line_group_registry r
+      LEFT JOIN line_groups m ON m.id = r.id
+      LEFT JOIN operational_sites s ON s.id = m.site_id
+      UNION
+      SELECT 
+        m.id AS group_id, m.group_name, m.picture_url, m.updated_at AS last_seen_at,
+        m.site_id, s.customer_name, s.active AS site_active
+      FROM line_groups m
+      LEFT JOIN line_group_registry r ON r.id = m.id
+      LEFT JOIN operational_sites s ON s.id = m.site_id
+      WHERE r.id IS NULL
+      ORDER BY group_name ASC
+    `).all<D1Row>();
+  });
 
   const templatesResult = await db.prepare(`
     SELECT id, site_id, wave, post_name, slot_label, assigned_guard, deadline, active
@@ -2018,16 +2042,30 @@ export async function getShiftGroupConfigurations() {
     templatesBySite.set(t.site_id, list);
   });
 
+  const autoReplyResult = await db.prepare(
+    "SELECT group_id, mode, sticker_package_id, sticker_id, cooldown_minutes FROM line_auto_reply_configs"
+  ).all<D1Row>();
+  const autoReplyByGroup = new Map<string, any>();
+  (autoReplyResult.results || []).forEach((r: any) => {
+    autoReplyByGroup.set(r.group_id, r);
+  });
+
   const allRows = (groupsResult.results || []) as any[];
 
   const configs: any[] = [];
   const unmanagedGroups: any[] = [];
 
   allRows.forEach((g) => {
+    if (!g.group_id) return;
     const templates = g.site_id ? templatesBySite.get(g.site_id) || [] : [];
     const morningShift = templates.find((t) => t.wave === "morning");
     const eveningShift = templates.find((t) => t.wave === "evening");
     const isConfigured = Boolean(g.site_id && g.site_active === 1 && (morningShift || eveningShift));
+    const isCommandRoom = g.group_id === commandTargetGroupId;
+    
+    const replyConfig = autoReplyByGroup.get(g.group_id);
+    // ออโต้เปิดใช้งานเสมอเป็นค่าเริ่มต้น (ยกเว้นกลุ่มสั่งการ หรือผู้ใช้จงใจปิด)
+    const autoReplyEnabled = isCommandRoom ? false : (replyConfig ? replyConfig.mode !== "disabled" : true);
 
     const item = {
       groupId: g.group_id,
@@ -2043,6 +2081,8 @@ export async function getShiftGroupConfigurations() {
       eveningDeadline: eveningShift?.deadline || "19:00",
       eveningGuard: eveningShift?.assigned_guard || "",
       isConfigured,
+      isCommandRoom,
+      autoReplyEnabled,
     };
 
     configs.push(item);
@@ -2066,6 +2106,71 @@ export async function getShiftGroupConfigurations() {
   };
 }
 
+export async function setGroupAutoReply(input: { groupId: string; enabled: boolean; actor?: string }) {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow().iso;
+  const mode = input.enabled ? "reply_on_new_report" : "disabled";
+
+  await db.prepare(`
+    INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, updated_at)
+    VALUES (?, ?, '11538', '51626520', 3, ?)
+    ON CONFLICT(group_id) DO UPDATE SET mode = excluded.mode, updated_at = excluded.updated_at
+  `).bind(input.groupId, mode, now).run();
+
+  return { ok: true, groupId: input.groupId, enabled: input.enabled };
+}
+
+export async function setAllGroupsAutoReply(input: { enabled: boolean; actor?: string }) {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow().iso;
+  const mode = input.enabled ? "reply_on_new_report" : "disabled";
+
+  const targetGroupSetting = await db.prepare("SELECT value FROM system_settings WHERE key = 'line_reminder_target_group_id'").first<{ value: string }>();
+  const commandGroupId = targetGroupSetting?.value || null;
+
+  const groupsResult = await db.prepare("SELECT id FROM line_group_registry").all();
+  const groups = (groupsResult.results || []) as any[];
+
+  for (const g of groups) {
+    if (g.id === commandGroupId && input.enabled) continue; // Skip command group
+    await db.prepare(`
+      INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, updated_at)
+      VALUES (?, ?, '11538', '51626520', 3, ?)
+      ON CONFLICT(group_id) DO UPDATE SET mode = excluded.mode, updated_at = excluded.updated_at
+    `).bind(g.id, mode, now).run();
+  }
+
+  return { ok: true, count: groups.length, enabled: input.enabled, message: `${input.enabled ? "เปิด" : "ปิด"}ระบบตอบกลับสติกเกอร์ทุกกลุ่มเรียบร้อยแล้ว` };
+}
+
+export async function registerCustomGroup(input: { groupId: string; groupName: string; isCommandRoom?: boolean; actor?: string }) {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow().iso;
+  const groupId = input.groupId.trim();
+  const groupName = input.groupName.trim() || `กลุ่ม ${groupId.slice(-6)}`;
+
+  await db.prepare(`
+    INSERT INTO line_group_registry (id, group_name, source, updated_at)
+    VALUES (?, ?, 'manual', ?)
+    ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, updated_at = excluded.updated_at
+  `).bind(groupId, groupName, now).run();
+
+  if (input.isCommandRoom) {
+    await setCommandTargetGroupId(groupId, input.actor || "admin");
+    // Ensure auto reply is disabled for command group
+    await db.prepare(`
+      INSERT INTO line_auto_reply_configs (group_id, mode, updated_at)
+      VALUES (?, 'disabled', ?)
+      ON CONFLICT(group_id) DO UPDATE SET mode = 'disabled', updated_at = excluded.updated_at
+    `).bind(groupId, now).run();
+  }
+
+  return { ok: true, groupId, groupName, message: `เพิ่ม/กู้คืนกลุ่ม "${groupName}" เข้าสู่ระบบเรียบร้อยแล้ว` };
+}
+
 export async function setCommandTargetGroupId(groupId: string, actor = "admin") {
   await ensureDatabase();
   const db = database();
@@ -2077,11 +2182,18 @@ export async function setCommandTargetGroupId(groupId: string, actor = "admin") 
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
   `).bind(groupId, now).run();
 
+  // Disable auto reply for command group to guarantee NO stickers
+  await db.prepare(`
+    INSERT INTO line_auto_reply_configs (group_id, mode, updated_at)
+    VALUES (?, 'disabled', ?)
+    ON CONFLICT(group_id) DO UPDATE SET mode = 'disabled', updated_at = excluded.updated_at
+  `).bind(groupId, now).run();
+
   const group = (await db.prepare("SELECT group_name FROM line_group_registry WHERE id = ?").bind(groupId).first()) as any;
   const groupName = group?.group_name || groupId;
 
-  await addAudit("line_reminder", groupId, "command_group_selected", actor, `ตั้งกลุ่มสั่งการเป็น: ${groupName}`);
-  return { ok: true, groupId, groupName, message: `ตั้งกลุ่มสั่งการเป็น "${groupName}" เรียบร้อยแล้ว` };
+  await addAudit("line_reminder", groupId, "command_group_selected", actor, `ตั้งกลุ่มสั่งการเป็น: ${groupName} (ปิดสติกเกอร์อัตโนมัติ 100%)`);
+  return { ok: true, groupId, groupName, message: `ตั้งกลุ่มสั่งการเป็น "${groupName}" เรียบร้อยแล้ว (ปิดสติกเกอร์ในกลุ่มนี้ 100%)` };
 }
 
 export async function importSelectedLineGroups(groupIds: string[], actor = "admin") {

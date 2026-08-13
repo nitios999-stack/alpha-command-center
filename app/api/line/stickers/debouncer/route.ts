@@ -16,6 +16,16 @@ export async function POST(request: Request) {
 
     await ensureDatabase();
     const db = database();
+
+    // 0. ตรวจสอบว่ากลุ่มนี้เป็น "กลุ่มไลน์ศูนย์สั่งการ" หรือไม่
+    // หากเป็นกลุ่มสั่งการ ห้ามส่งสติกเกอร์ตอบรับอัตโนมัติเด็ดขาด (ส่งเฉพาะข้อความคำสั่ง/สรุปเท่านั้น)
+    const targetGroupSetting = (await db.prepare(
+      "SELECT value FROM system_settings WHERE key = 'line_reminder_target_group_id'"
+    ).first()) as { value: string } | null;
+
+    if (targetGroupSetting?.value && targetGroupSetting.value === groupId) {
+      return Response.json({ ok: true, skipped: true, reason: "command_room_no_stickers" });
+    }
     
     // 1. ค้นหา event ปัจจุบันในฐานข้อมูลเพื่อดึง rowid
     const currentEvent = (await db.prepare(
@@ -34,21 +44,26 @@ export async function POST(request: Request) {
       }
     }
 
-    // 2. ดึงการตั้งค่าสติกเกอร์ของกลุ่ม
+    // 2. ดึงการตั้งค่าสติกเกอร์ของกลุ่ม (ค่าเริ่มต้นอัตโนมัติ 100%: Brown & Friends ตะเบ๊ะ 11538/51626520, cooldown: 3 นาที)
     const configData = (await db.prepare(
-      "SELECT * FROM line_auto_reply_configs WHERE group_id = ? AND mode = 'reply_on_new_report'"
+      "SELECT * FROM line_auto_reply_configs WHERE group_id = ?"
     ).bind(groupId).first()) as any;
     
-    if (!configData || !configData.sticker_package_id || !configData.sticker_id) {
-      return Response.json({ ok: true, skipped: true, reason: "no_config" });
+    // ถ้าผู้ใช้ตั้งใจกดปิดไว้ ให้ข้าม
+    if (configData && configData.mode === "disabled") {
+      return Response.json({ ok: true, skipped: true, reason: "disabled_by_user" });
     }
+
+    const stickerPackageId = configData?.sticker_package_id || "11538";
+    const stickerId = configData?.sticker_id || "51626520";
+    const cooldownMinutes = configData?.cooldown_minutes ?? 3;
 
     // เช็ก Cooldown
     const now = new Date();
-    if (configData.last_reply_at) {
+    if (configData?.last_reply_at) {
       const lastReplyDate = new Date(configData.last_reply_at);
       const diffMinutes = (now.getTime() - lastReplyDate.getTime()) / 60000;
-      if (diffMinutes < (configData.cooldown_minutes || 3)) {
+      if (diffMinutes < cooldownMinutes) {
         return Response.json({ ok: true, skipped: true, reason: "cooldown_active" });
       }
     }

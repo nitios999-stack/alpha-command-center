@@ -20,6 +20,11 @@ export function ShiftsPanel() {
   const [selectedUnmanaged, setSelectedUnmanaged] = useState<string[]>([]);
   const [showImportModal, setShowImportModal] = useState(false);
 
+  // Custom/Recover Command Group Form
+  const [showCustomCommandModal, setShowCustomCommandModal] = useState(false);
+  const [customGroupName, setCustomGroupName] = useState("สนง.สายตรวจ ALPHA COP");
+  const [customGroupId, setCustomGroupId] = useState("");
+
   const fetchConfigs = async () => {
     setLoading(true);
     try {
@@ -80,12 +85,94 @@ export function ShiftsPanel() {
       if (res.ok) {
         setCommandTargetGroupName(data.groupName);
         setMessage(`🎯 ${data.message}`);
+        await fetchConfigs();
       } else {
         setMessage(`❌ เกิดข้อผิดพลาด: ${data.error}`);
       }
     } catch {
       setMessage("❌ เกิดข้อผิดพลาดในการเชื่อมต่อ");
     }
+  };
+
+  const handleRegisterCustomCommand = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!customGroupId.trim()) return alert("กรุณาระบุ LINE Group ID");
+    setLoading(true);
+    try {
+      const res = await fetch("/api/line/shifts/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "register_custom_group",
+          groupId: customGroupId.trim(),
+          groupName: customGroupName.trim(),
+          isCommandRoom: true,
+          actor: "web-admin",
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setMessage(`🎉 ${data.message}`);
+        setShowCustomCommandModal(false);
+        setCustomGroupId("");
+        await fetchConfigs();
+      } else {
+        setMessage(`❌ เกิดข้อผิดพลาด: ${data.error}`);
+      }
+    } catch {
+      setMessage("❌ เกิดข้อผิดพลาดในการเชื่อมต่อ");
+    }
+    setLoading(false);
+  };
+
+  const handleToggleAutoReply = async (groupId: string, currentStatus: boolean) => {
+    const newStatus = !currentStatus;
+    setSavingId(groupId);
+    try {
+      const res = await fetch("/api/line/shifts/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "toggle_auto_reply",
+          groupId,
+          enabled: newStatus,
+          actor: "web-admin",
+        }),
+      });
+      if (res.ok) {
+        setConfigs((prev) =>
+          prev.map((c) => (c.groupId === groupId ? { ...c, autoReplyEnabled: newStatus } : c))
+        );
+        setMessage(newStatus ? "🤖 เปิดสติกเกอร์ตอบกลับ 35 วิ" : "🔇 ปิดสติกเกอร์กลุ่มนี้แล้ว");
+      }
+    } catch {
+      setMessage("❌ เกิดข้อผิดพลาดในการเปลี่ยนสถานะ");
+    }
+    setSavingId(null);
+  };
+
+  const handleToggleAllAutoReply = async (enabled: boolean) => {
+    if (!confirm(`ยืนยันการ${enabled ? "เปิด" : "ปิด"}ระบบตอบกลับสติกเกอร์อัตโนมัติทุกกลุ่มหรือไม่?`)) return;
+    setLoading(true);
+    try {
+      const res = await fetch("/api/line/shifts/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "toggle_all_auto_reply",
+          enabled,
+          actor: "web-admin",
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setMessage(`🎉 ${data.message}`);
+        await fetchConfigs();
+      }
+    } catch {
+      setMessage("❌ เกิดข้อผิดพลาดในการเชื่อมต่อ");
+    }
+    setLoading(false);
   };
 
   const handleImportSelected = async () => {
@@ -201,6 +288,8 @@ export function ShiftsPanel() {
     return true;
   });
 
+  const totalAutoReplyActive = configs.filter((c) => c.autoReplyEnabled && !c.isCommandRoom).length;
+
   return (
     <section className="line-control" style={{ marginTop: "1.5rem" }}>
       {message && (
@@ -219,18 +308,26 @@ export function ShiftsPanel() {
             <div style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", background: "rgba(56, 189, 248, 0.15)", color: "#38bdf8", padding: "0.25rem 0.6rem", borderRadius: "20px", fontSize: "0.75rem", fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: "0.5rem" }}>
               <span>🛡️</span> ALPHA COMMAND CENTER
             </div>
-            <h2 style={{ fontSize: "1.65rem", margin: "0.2rem 0 0.5rem", fontWeight: 800 }}>ศูนย์จัดการเวลากะและตรวจเวร รปภ.</h2>
-            <p style={{ color: "#94a3b8", fontSize: "0.95rem", maxWidth: "600px", margin: 0 }}>
-              กำหนดเวลาเข้าเวรของแต่ละกลุ่ม ตรวจจับการส่งรายงานเข้าเวรอัตโนมัติ (ล่วงหน้า 1 ชม.) และแจ้งเตือนสรุปจุดขาดเวรเข้ากลุ่มสั่งการ
+            <h2 style={{ fontSize: "1.65rem", margin: "0.2rem 0 0.5rem", fontWeight: 800 }}>ศูนย์จัดการเวลากะและตอบกลับอัตโนมัติ</h2>
+            <p style={{ color: "#94a3b8", fontSize: "0.95rem", maxWidth: "650px", margin: 0 }}>
+              ระบบเปิดตอบกลับสติกเกอร์ 35 วิ อัตโนมัติในตัว (ฟรี 100%) สามารถเปิด/ปิดอิสระรายกลุ่ม และสรุปจุดขาดเวรเข้ากลุ่มสั่งการ
             </p>
           </div>
 
-          <button
-            onClick={() => setShowImportModal(true)}
-            style={{ background: "#38bdf8", color: "#0f172a", border: "none", padding: "0.65rem 1.25rem", borderRadius: "10px", fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.5rem", boxShadow: "0 4px 12px rgba(56, 189, 248, 0.3)" }}
-          >
-            <span>📥</span> ดึงกลุ่ม LINE OA เข้าสู่ระบบ ({unmanagedGroups.length})
-          </button>
+          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+            <button
+              onClick={() => setShowCustomCommandModal(true)}
+              style={{ background: "#334155", color: "white", border: "1px solid #475569", padding: "0.65rem 1rem", borderRadius: "10px", fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.4rem" }}
+            >
+              <span>➕</span> ระบุ/กู้คืนกลุ่มสั่งการ
+            </button>
+            <button
+              onClick={() => setShowImportModal(true)}
+              style={{ background: "#38bdf8", color: "#0f172a", border: "none", padding: "0.65rem 1.25rem", borderRadius: "10px", fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.5rem", boxShadow: "0 4px 12px rgba(56, 189, 248, 0.3)" }}
+            >
+              <span>📥</span> ดึงกลุ่ม LINE OA เข้าสู่ระบบ ({unmanagedGroups.length})
+            </button>
+          </div>
         </div>
       </div>
 
@@ -239,7 +336,7 @@ export function ShiftsPanel() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "1rem" }}>
           <div style={{ flex: "1 1 320px" }}>
             <label style={{ fontSize: "0.85rem", fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", display: "block", marginBottom: "0.35rem" }}>
-              🎯 กลุ่มไลน์ศูนย์สั่งการ (ปลายทางรับการแจ้งเตือนจุดขาดเวร)
+              🎯 กลุ่มไลน์ศูนย์สั่งการ (รับการแจ้งเตือนสรุปจุดขาดเวร · ปิดสติกเกอร์ 100%)
             </label>
             <div style={{ display: "flex", gap: "0.5rem" }}>
               <select
@@ -264,7 +361,10 @@ export function ShiftsPanel() {
             </div>
             {commandTargetGroupName && (
               <div style={{ marginTop: "0.4rem", fontSize: "0.85rem", color: "#16a34a", display: "flex", alignItems: "center", gap: "0.3rem" }}>
-                <span>✓</span> กลุ่มสั่งการที่เปิดใช้อยู่: <strong>{commandTargetGroupName}</strong>
+                <span>✓</span> กลุ่มสั่งการปัจจุบัน: <strong>{commandTargetGroupName}</strong> 
+                <span style={{ background: "#dcfce7", color: "#15803d", padding: "0.1rem 0.4rem", borderRadius: "4px", fontSize: "0.75rem", fontWeight: 700 }}>
+                  🔒 ปิดสติกเกอร์ในกลุ่มนี้เด็ดขาด
+                </span>
               </div>
             )}
           </div>
@@ -308,43 +408,41 @@ export function ShiftsPanel() {
         )}
       </div>
 
-      {/* BULK PRESETS BAR */}
+      {/* BULK PRESETS & MASTER AUTO-REPLY BAR */}
       <div className="card" style={{ marginBottom: "1.5rem", borderRadius: "14px", padding: "1.25rem", border: "1px solid var(--border)", background: "var(--card-bg, #ffffff)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.75rem", marginBottom: "0.75rem" }}>
           <div>
-            <h3 style={{ margin: 0, fontSize: "1.05rem" }}>⚡ ตั้งค่าเวลากะด่วน (ทุกกลุ่มพร้อมกัน)</h3>
+            <h3 style={{ margin: 0, fontSize: "1.05rem" }}>⚡ ตั้งค่าเวลากะด่วน และ สติกเกอร์ตอบกลับ</h3>
             <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: "0.15rem 0 0" }}>
-              เลือกรูปแบบกะที่ใช้บ่อย เพื่อตั้งค่าเวลาเข้าเวรให้ครบทั้ง 65+ กลุ่มในคลิกเดียว
+              เปิดสติกเกอร์ตอบกลับอัตโนมัติ <strong>{totalAutoReplyActive} / {configs.length} กลุ่ม</strong> (ส่งหลังรูปสุดท้าย 35 วิ)
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
+            <button
+              onClick={() => handleToggleAllAutoReply(true)}
+              style={{ background: "#dcfce7", color: "#15803d", border: "1px solid #86efac", padding: "0.4rem 0.75rem", borderRadius: "6px", fontSize: "0.85rem", fontWeight: 700, cursor: "pointer" }}
+            >
+              🤖 เปิดตอบกลับทุกกลุ่ม
+            </button>
+            <button
+              onClick={() => handleToggleAllAutoReply(false)}
+              style={{ background: "#fee2e2", color: "#b91c1c", border: "1px solid #fca5a5", padding: "0.4rem 0.75rem", borderRadius: "6px", fontSize: "0.85rem", fontWeight: 700, cursor: "pointer" }}
+            >
+              🔇 ปิดตอบกลับทั้งหมด
+            </button>
             <button
               onClick={() => handleBulkPreset("24h_07_19")}
               className="btn btn-secondary"
               style={{ padding: "0.4rem 0.75rem", fontSize: "0.85rem", cursor: "pointer" }}
             >
-              ☀️ 2 กะมาตรฐาน (07:00 / 19:00)
-            </button>
-            <button
-              onClick={() => handleBulkPreset("24h_06_18")}
-              className="btn btn-secondary"
-              style={{ padding: "0.4rem 0.75rem", fontSize: "0.85rem", cursor: "pointer" }}
-            >
-              ☀️ 2 กะเร็ว (06:00 / 18:00)
+              ☀️ 2 กะ (07:00 / 19:00)
             </button>
             <button
               onClick={() => handleBulkPreset("night_only_18")}
               className="btn btn-secondary"
               style={{ padding: "0.4rem 0.75rem", fontSize: "0.85rem", cursor: "pointer" }}
             >
-              🌙 กะดึกอย่างเดียว (18:00)
-            </button>
-            <button
-              onClick={() => handleBulkPreset("night_only_19")}
-              className="btn btn-secondary"
-              style={{ padding: "0.4rem 0.75rem", fontSize: "0.85rem", cursor: "pointer" }}
-            >
-              🌙 กะดึกอย่างเดียว (19:00)
+              🌙 ดึกล้วน (18:00)
             </button>
           </div>
         </div>
@@ -391,16 +489,17 @@ export function ShiftsPanel() {
         </div>
       </div>
 
-      {/* SHIFTS CONFIG TABLE */}
+      {/* SHIFTS & AUTO-REPLY CONFIG TABLE */}
       <div className="card" style={{ borderRadius: "14px", overflow: "hidden", border: "1px solid var(--border)" }}>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
             <thead>
               <tr style={{ background: "#f8fafc", borderBottom: "2px solid var(--border)" }}>
                 <th style={{ padding: "0.85rem 1rem", textAlign: "left" }}>กลุ่มไลน์ / หน่วยงาน</th>
-                <th style={{ padding: "0.85rem 0.75rem", textAlign: "center", width: "180px" }}>☀️ ผลัดเช้า</th>
-                <th style={{ padding: "0.85rem 0.75rem", textAlign: "center", width: "180px" }}>🌙 ผลัดดึก</th>
-                <th style={{ padding: "0.85rem 1rem", textAlign: "center", width: "130px" }}>สถานะบันทึก</th>
+                <th style={{ padding: "0.85rem 0.75rem", textAlign: "center", width: "160px" }}>🤖 สติกเกอร์ 35 วิ</th>
+                <th style={{ padding: "0.85rem 0.75rem", textAlign: "center", width: "170px" }}>☀️ ผลัดเช้า</th>
+                <th style={{ padding: "0.85rem 0.75rem", textAlign: "center", width: "170px" }}>🌙 ผลัดดึก</th>
+                <th style={{ padding: "0.85rem 1rem", textAlign: "center", width: "120px" }}>สถานะ</th>
               </tr>
             </thead>
             <tbody>
@@ -408,10 +507,46 @@ export function ShiftsPanel() {
                 <tr key={c.groupId} style={{ borderBottom: "1px solid var(--border)" }}>
                   {/* GROUP INFO */}
                   <td style={{ padding: "0.85rem 1rem" }}>
-                    <div style={{ fontWeight: 700, color: "#0f172a" }}>{c.groupName}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                      <span style={{ fontWeight: 700, color: "#0f172a" }}>{c.groupName}</span>
+                      {c.isCommandRoom && (
+                        <span style={{ background: "#dbeafe", color: "#1e40af", padding: "0.1rem 0.4rem", borderRadius: "4px", fontSize: "0.75rem", fontWeight: 700 }}>
+                          🎯 ศูนย์สั่งการ
+                        </span>
+                      )}
+                    </div>
                     <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: "0.15rem" }}>
                       🏢 {c.customerName}
                     </div>
+                  </td>
+
+                  {/* AUTO REPLY TOGGLE */}
+                  <td style={{ padding: "0.85rem 0.75rem", textAlign: "center" }}>
+                    {c.isCommandRoom ? (
+                      <span style={{ fontSize: "0.75rem", color: "#94a3b8", fontWeight: 600, background: "#f1f5f9", padding: "0.2rem 0.5rem", borderRadius: "6px" }}>
+                        🔒 ปิดถาวร (สั่งการ)
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => handleToggleAutoReply(c.groupId, c.autoReplyEnabled)}
+                        disabled={savingId === c.groupId}
+                        style={{
+                          background: c.autoReplyEnabled ? "#dcfce7" : "#f1f5f9",
+                          color: c.autoReplyEnabled ? "#15803d" : "#64748b",
+                          border: `1px solid ${c.autoReplyEnabled ? "#86efac" : "#cbd5e1"}`,
+                          padding: "0.25rem 0.6rem",
+                          borderRadius: "20px",
+                          fontSize: "0.8rem",
+                          fontWeight: 700,
+                          cursor: "pointer",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "0.3rem",
+                        }}
+                      >
+                        <span>{c.autoReplyEnabled ? "🟢 เปิด (35 วิ)" : "⚪ ปิด"}</span>
+                      </button>
+                    )}
                   </td>
 
                   {/* MORNING SHIFT */}
@@ -486,7 +621,7 @@ export function ShiftsPanel() {
                       <span style={{ fontSize: "0.8rem", color: "#38bdf8", fontWeight: 600 }}>⏳ กำลังบันทึก...</span>
                     ) : (
                       <span style={{ fontSize: "0.8rem", color: "#16a34a", fontWeight: 600, display: "inline-flex", alignItems: "center", gap: "0.2rem" }}>
-                        <span>✓</span> บันทึกแล้ว
+                        <span>✓</span> พร้อม
                       </span>
                     )}
                   </td>
@@ -496,6 +631,71 @@ export function ShiftsPanel() {
           </table>
         </div>
       </div>
+
+      {/* MODAL: CUSTOM / RECOVER COMMAND GROUP */}
+      {showCustomCommandModal && (
+        <div className="modal-backdrop" role="presentation" style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
+          <div className="modal-card" style={{ background: "white", padding: "1.5rem", borderRadius: "16px", maxWidth: "520px", width: "90%", boxShadow: "0 20px 25px -5px rgba(0,0,0,0.2)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "1rem" }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: "1.25rem" }}>🎯 ระบุ/กู้คืนกลุ่มไลน์ศูนย์สั่งการ</h3>
+                <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: "0.25rem 0 0" }}>
+                  ใส่ชื่อกลุ่มและ Group ID เพื่อตั้งเป็นกลุ่มสั่งการหลัก (ระบบจะปิดสติกเกอร์ในกลุ่มนี้ 100% ส่งเฉพาะข้อความสั่งการเท่านั้น)
+                </p>
+              </div>
+              <button onClick={() => setShowCustomCommandModal(false)} style={{ background: "none", border: "none", fontSize: "1.25rem", cursor: "pointer" }}>
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleRegisterCustomCommand} style={{ display: "grid", gap: "0.85rem" }}>
+              <div>
+                <label style={{ fontSize: "0.85rem", fontWeight: 600, color: "#475569", display: "block", marginBottom: "0.25rem" }}>
+                  ชื่อกลุ่มสั่งการ
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={customGroupName}
+                  onChange={(e) => setCustomGroupName(e.target.value)}
+                  placeholder="เช่น สนง.สายตรวจ ALPHA COP"
+                  style={{ width: "100%", padding: "0.55rem 0.75rem", borderRadius: "8px", border: "1px solid var(--border)", fontSize: "0.9rem" }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: "0.85rem", fontWeight: 600, color: "#475569", display: "block", marginBottom: "0.25rem" }}>
+                  LINE Group ID <span style={{ color: "#ef4444" }}>*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={customGroupId}
+                  onChange={(e) => setCustomGroupId(e.target.value)}
+                  placeholder="เช่น C1234567890abcdef..."
+                  style={{ width: "100%", padding: "0.55rem 0.75rem", borderRadius: "8px", border: "1px solid var(--border)", fontSize: "0.9rem", fontFamily: "monospace" }}
+                />
+                <small style={{ color: "#64748b", fontSize: "0.75rem", marginTop: "0.2rem", display: "block" }}>
+                  💡 นำ LINE Group ID ที่บอตเคยรับมาวาง หรือหากเคยได้รับ Webhook ระบบจะเชื่อมให้ทันที
+                </small>
+              </div>
+
+              <div style={{ background: "#f8fafc", padding: "0.75rem", borderRadius: "8px", border: "1px solid #e2e8f0", fontSize: "0.85rem", color: "#334155" }}>
+                🔒 <strong>การันตีความปลอดภัย:</strong> บอตจะไม่ส่งสติกเกอร์ตอบรับอัตโนมัติเข้าไปในกลุ่มสั่งการนี้เด็ดขาด โดยจะส่งเฉพาะสรุปจุดขาดเวรและข้อความรายงานเท่านั้น
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "0.5rem" }}>
+                <button type="button" onClick={() => setShowCustomCommandModal(false)} className="btn btn-secondary" style={{ padding: "0.55rem 1rem", borderRadius: "8px", cursor: "pointer" }}>
+                  ยกเลิก
+                </button>
+                <button type="submit" className="btn btn-primary" style={{ padding: "0.55rem 1.25rem", borderRadius: "8px", cursor: "pointer", fontWeight: 700 }}>
+                  ✓ ตั้งเป็นกลุ่มสั่งการทันที
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* MODAL: IMPORT UNMANAGED LINE GROUPS */}
       {showImportModal && (

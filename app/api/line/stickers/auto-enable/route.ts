@@ -16,7 +16,20 @@ export async function GET(request: Request) {
   const defaultPkg = '11538';
   const defaultStk = '51626520';
 
+  const targetGroupSetting = await db.prepare("SELECT value FROM system_settings WHERE key = 'line_reminder_target_group_id'").first<{ value: string }>();
+  const commandGroupId = targetGroupSetting?.value || null;
+
   for (const group of groups) {
+    if (commandGroupId && group.id === commandGroupId) {
+      // กลุ่มสั่งการ: ปิดโหมดสติกเกอร์ 100%
+      await db.prepare(`
+        INSERT INTO line_auto_reply_configs (group_id, mode, updated_at)
+        VALUES (?, 'disabled', ?)
+        ON CONFLICT(group_id) DO UPDATE SET mode = 'disabled', updated_at = excluded.updated_at
+      `).bind(group.id, now).run();
+      continue;
+    }
+
     await db.prepare(`
       INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, updated_at)
       VALUES (?, 'reply_on_new_report', ?, ?, ?, ?)

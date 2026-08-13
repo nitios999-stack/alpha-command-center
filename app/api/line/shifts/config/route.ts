@@ -3,7 +3,10 @@ import {
   updateGroupShiftConfiguration, 
   bulkApplyShiftPreset,
   setCommandTargetGroupId,
-  importSelectedLineGroups
+  importSelectedLineGroups,
+  registerCustomGroup,
+  setGroupAutoReply,
+  setAllGroupsAutoReply
 } from "../../../../../db/command-center";
 
 export const runtime = "nodejs";
@@ -21,6 +24,40 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     
+    // Toggle individual group auto reply
+    if (body.action === "toggle_auto_reply") {
+      if (!body.groupId) return Response.json({ ok: false, error: "groupId is required" }, { status: 400 });
+      const result = await setGroupAutoReply({
+        groupId: body.groupId,
+        enabled: Boolean(body.enabled),
+        actor: body.actor || "admin",
+      });
+      return Response.json(result);
+    }
+
+    // Toggle all groups auto reply
+    if (body.action === "toggle_all_auto_reply") {
+      const result = await setAllGroupsAutoReply({
+        enabled: Boolean(body.enabled),
+        actor: body.actor || "admin",
+      });
+      return Response.json(result);
+    }
+    
+    // Register or recover custom group (e.g. command group)
+    if (body.action === "register_custom_group") {
+      if (!body.groupId) {
+        return Response.json({ ok: false, error: "groupId is required" }, { status: 400 });
+      }
+      const result = await registerCustomGroup({
+        groupId: body.groupId,
+        groupName: body.groupName || "สนง.สายตรวจ ALPHA COP",
+        isCommandRoom: Boolean(body.isCommandRoom),
+        actor: body.actor || "admin",
+      });
+      return Response.json(result);
+    }
+
     // Set command room group
     if (body.action === "set_command_group") {
       if (!body.groupId) {
