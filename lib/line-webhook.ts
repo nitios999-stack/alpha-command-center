@@ -147,16 +147,25 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
       fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(group.groupId)}/member/${encodeURIComponent(group.rawUserId)}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
       }).then(async (res) => {
+        let profileJson: any = null;
         if (res.ok) {
-          const profile = await res.json() as any;
-          if (profile.displayName) {
-            const currentGuardId = group.senderKey || group.rawUserId!;
+          profileJson = await res.json();
+        } else {
+          const userRes = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(group.rawUserId!)}`, {
+            headers: { Authorization: `Bearer ${accessToken}` },
+          });
+          if (userRes.ok) profileJson = await userRes.json();
+        }
+
+        if (profileJson?.displayName) {
+          const targetIds = Array.from(new Set([group.senderKey, group.rawUserId].filter(Boolean) as string[]));
+          for (const tid of targetIds) {
             await saveGuardProfile({
-              id: currentGuardId,
-              siteId: group.groupId,
-              guardName: profile.displayName,
-              displayName: currentGuardId,
-              pictureUrl: profile.pictureUrl || null,
+              id: tid,
+              siteId: linePointSiteIdentifier(group.groupId),
+              guardName: profileJson.displayName,
+              displayName: profileJson.displayName,
+              pictureUrl: profileJson.pictureUrl || null,
               role: "regular",
               preferredShift: "all",
             });

@@ -3780,6 +3780,13 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
   let countCheck = await db.prepare("SELECT COUNT(*) AS count FROM guard_profiles WHERE active = 1").first<{ count: number }>();
   if ((countCheck?.count ?? 0) === 0) {
     await autoSyncGuardsFromLine("auto_init");
+  } else {
+    // ล้างชื่อจำลองที่อาจค้างอยู่ในฐานข้อมูลให้เป็นชื่อ LINE จริงหรือรหัส
+    await db.prepare(`
+      UPDATE guard_profiles
+      SET guard_name = 'รปภ. LINE (' || substr(id, 1, 8) || ')'
+      WHERE guard_name LIKE 'นาย%' AND (display_name LIKE 'U-%' OR display_name LIKE 'guard-%' OR display_name IS NULL)
+    `).run().catch(() => {});
   }
 
   let query = `
@@ -3965,23 +3972,6 @@ export async function getRecentWebhookSenders(options?: number | {
   }));
 }
 
-const THAI_GUARD_NAMES = [
-  "นายสมศักดิ์ ภักดี", "นายวิจิตร มั่นคง", "นายธีรศักดิ์ ศรีสุข", "นายสมชาย ใจดี", 
-  "นายประเสริฐ พูนผล", "นายณรงค์ฤทธิ์ ชัยชนะ", "นายธนพล มั่งคั่ง", "นายสุรชัย วงศ์สวัสดิ์", 
-  "นายอนุชา เกตุแก้ว", "นายกิตติศักดิ์ บุญชู", "นายพิชัย ยอดเยี่ยม", "นายเอกชัย มั่นคง", 
-  "นายบุญมี รักษา", "นายอดิศร สว่างเนตร", "นายเกรียงไกร สร้อยเพชร", "นายทวีศักดิ์ วงศ์ดี", 
-  "นายพงษ์ศักดิ์ ศรีวิชัย", "นายชาญชัย มิ่งขวัญ", "นายมนัส มีสุข", "นายประจักษ์ มิ่งเมือง", 
-  "นายมานพ ชัยสิทธิ์", "นายสมบัติ สุขสำราญ", "นายอุดม พรหมมา", "นายบรรจง โพธิ์ศรี", 
-  "นายชูเกียรติ สว่างอารมณ์", "นายศิริชัย เลิศล้ำ", "นายสมพงษ์ ยิ้มแย้ม", "นายวรวุฒิ สิงห์โต", 
-  "นายประดิษฐ์ คำสอน", "นายอำนาจ พิทักษ์", "นายเจษฎา ภูมิใจ", "นายสิทธิชัย บุญญา", 
-  "นายวรัญญู รัตนชัย", "นายคมสันต์ ศิริพงษ์", "นายธวัชชัย รอดเจริญ", "นายจิรศักดิ์ มีพร้อม", 
-  "นายปัญญา นิลเกิด", "นายกฤษณะ โตชู", "นายวิรัช รุ่งเรือง", "นายสมเกียรติ วัฒนา", 
-  "นายประสิทธิ์ ศรีสวัสดิ์", "นายสมหมาย ชัยรักษ์", "นายรังสรรค์ มั่นจิต", "นายสุนทร พึ่งพา", 
-  "นายเฉลิมพล ดำรงค์", "นายชัยยันต์ ป้อมเพชร", "นายพีระพงษ์ คุ้มครอง", "นายอภิชาติ พิทักษ์ธรรม", 
-  "นายบรรหาร สารคาม", "นายยุทธนา สมิงเดช", "นายชาตรี กล้าหาญ", "นายธนาคาร เจริญดี",
-  "นายอลงกรณ์ แสนสุข", "นายศราวุธ แดงโชติ", "นายภูวดล อินทร์ช่วย", "นายวัชระ ป้องภัย"
-];
-
 export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
   ok: boolean;
   totalSynced: number;
@@ -3995,10 +3985,7 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
   const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
   const now = bangkokNow().iso;
 
-  // 1. ดึงจุดตรวจและกลุ่ม LINE ทั้งหมด
-  const sitesResult = await db.prepare("SELECT * FROM operational_sites WHERE active = 1 ORDER BY site_name ASC").all<D1Row>();
-  const sites = (sitesResult.results || []) as any[];
-
+  // 1. ดึงกลุ่ม LINE ทั้งหมดที่มีในระบบ
   const groupsResult = await db.prepare("SELECT * FROM line_groups").all<D1Row>();
   const groups = (groupsResult.results || []) as any[];
 
@@ -4028,144 +4015,127 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
     senderGroupsMap.set(String(s.sender_key), list);
   }
 
-  // 3. ดึง guard_profiles เดิม
-  const existingProfiles = await db.prepare("SELECT * FROM guard_profiles").all<D1Row>();
-  const existingMap = new Map<string, any>();
-  for (const ep of (existingProfiles.results || [])) {
-    existingMap.set(String(ep.id), ep);
-    if (ep.display_name) existingMap.set(String(ep.display_name), ep);
-  }
-
   let newGuards = 0;
   let updatedGuards = 0;
   let sparesDetected = 0;
   const operations: any[] = [];
-  let nameIndex = 0;
+  const processedUserIds = new Set<string>();
 
-  // 4. สร้างหรืออัปเดตสแปร์กลาง 5 นาย
-  const globalSpares = [
-    { name: "นายณรงค์ศักดิ์ เจริญพร (สแปร์กลาง 1)", phone: "081-442-9901" },
-    { name: "นายชัยยศ วิชิตกุล (สแปร์กลาง 2)", phone: "089-551-8822" },
-    { name: "นายเอกชัย สมบูรณ์ (สแปร์กลาง 3)", phone: "086-339-1144" },
-    { name: "นายบุญมี เกรียงไกร (สแปร์กลาง 4)", phone: "082-771-6655" },
-    { name: "นายธีรพงษ์ สว่างวงศ์ (สแปร์กลาง 5)", phone: "084-882-3377" },
-  ];
+  // 3. ถ้ามี LINE Access Token: พยายามดึงสมาชิกจริงทุกคนในแต่ละกลุ่ม LINE ผ่าน LINE Bot API
+  if (token) {
+    for (const group of groups) {
+      const groupId = group.id;
+      const siteId = group.site_id || linePointSiteIdentifier(groupId);
 
-  for (let i = 0; i < globalSpares.length; i++) {
-    const sp = globalSpares[i];
-    const id = `guard-global-spare-${i + 1}`;
-    const avatarUrl = `https://api.dicebear.com/7.x/bottts/svg?seed=spare-${i + 1}&backgroundColor=0284c7`;
-    operations.push(
-      db.prepare(`
-        INSERT INTO guard_profiles (
-          id, site_id, guard_name, display_name, picture_url, phone_number, preferred_shift, role, active, created_at, updated_at
-        ) VALUES (
-          ?, 'all', ?, ?, ?, ?, 'all', 'spare', 1, ?, ?
-        )
-        ON CONFLICT(id) DO UPDATE SET
-          guard_name = excluded.guard_name,
-          picture_url = COALESCE(excluded.picture_url, guard_profiles.picture_url),
-          role = 'spare',
-          active = 1,
-          updated_at = excluded.updated_at
-      `).bind(id, sp.name, id, avatarUrl, sp.phone, now, now)
-    );
-    sparesDetected++;
+      try {
+        // ดึงรายการ memberIds ทั้งหมดในกลุ่มจาก LINE API
+        const membersRes = await fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/members/ids`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        if (membersRes.ok) {
+          const membersJson = await membersRes.json() as any;
+          const memberIds = (membersJson.memberIds || []) as string[];
+
+          for (const memberId of memberIds) {
+            if (processedUserIds.has(memberId)) continue;
+            processedUserIds.add(memberId);
+
+            // ดึงข้อมูลโปรไฟล์จริง (ชื่อ Display Name และรูป Profile Picture)
+            const profileRes = await fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/member/${encodeURIComponent(memberId)}`, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+
+            if (profileRes.ok) {
+              const profile = await profileRes.json() as any;
+              const realName = profile.displayName || `รปภ. LINE (${memberId.slice(-6)})`;
+              const pictureUrl = profile.pictureUrl || null;
+
+              operations.push(
+                db.prepare(`
+                  INSERT INTO guard_profiles (
+                    id, site_id, guard_name, display_name, picture_url, phone_number, preferred_shift, role, active, created_at, updated_at
+                  ) VALUES (
+                    ?, ?, ?, ?, ?, NULL, 'all', 'regular', 1, ?, ?
+                  )
+                  ON CONFLICT(id) DO UPDATE SET
+                    guard_name = excluded.guard_name,
+                    display_name = excluded.display_name,
+                    picture_url = COALESCE(excluded.picture_url, guard_profiles.picture_url),
+                    active = 1,
+                    updated_at = excluded.updated_at
+                `).bind(memberId, siteId, realName, profile.displayName || memberId, pictureUrl, now, now)
+              );
+              newGuards++;
+            }
+          }
+        }
+      } catch {
+        // ข้ามหากกลุ่มนั้นดึง members/ids ไม่สำเร็จ
+      }
+    }
   }
 
-  // 5. ซิงค์ รปภ. ประจำจุดสำหรับทุกจุดตรวจที่มีในระบบ
-  const allTargetSites = sites.length > 0 ? sites : groups.map((g) => ({ id: g.site_id, site_name: g.group_name }));
-
-  for (let sIdx = 0; sIdx < allTargetSites.length; sIdx++) {
-    const site = allTargetSites[sIdx];
-    const siteId = site.id;
-    const siteName = site.site_name || `จุดตรวจ ${sIdx + 1}`;
-
-    // กะเช้า
-    const morningName = THAI_GUARD_NAMES[nameIndex % THAI_GUARD_NAMES.length];
-    nameIndex++;
-    const morningId = `guard-${siteId}-morning`;
-    const morningAvatar = `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(siteId + "-morning")}&backgroundColor=10b981`;
-    const morningPhone = `08${(sIdx % 9) + 1}-${String(100 + (sIdx * 3) % 900).padStart(3, "0")}-${String(1000 + (sIdx * 7) % 9000).padStart(4, "0")}`;
-
-    operations.push(
-      db.prepare(`
-        INSERT INTO guard_profiles (
-          id, site_id, guard_name, display_name, picture_url, phone_number, preferred_shift, role, active, created_at, updated_at
-        ) VALUES (
-          ?, ?, ?, ?, ?, ?, 'morning', 'regular', 1, ?, ?
-        )
-        ON CONFLICT(id) DO UPDATE SET
-          guard_name = CASE WHEN guard_profiles.guard_name LIKE 'รปภ. ประจำ %' OR guard_profiles.guard_name LIKE 'รปภ. (U-%' THEN excluded.guard_name ELSE guard_profiles.guard_name END,
-          picture_url = COALESCE(guard_profiles.picture_url, excluded.picture_url),
-          phone_number = COALESCE(guard_profiles.phone_number, excluded.phone_number),
-          preferred_shift = 'morning',
-          active = 1,
-          updated_at = excluded.updated_at
-      `).bind(morningId, siteId, `${morningName} (${siteName})`, morningId, morningAvatar, morningPhone, now, now)
-    );
-
-    // กะดึก
-    const eveningName = THAI_GUARD_NAMES[nameIndex % THAI_GUARD_NAMES.length];
-    nameIndex++;
-    const eveningId = `guard-${siteId}-evening`;
-    const eveningAvatar = `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(siteId + "-evening")}&backgroundColor=6366f1`;
-    const eveningPhone = `08${(sIdx % 9) + 1}-${String(200 + (sIdx * 5) % 800).padStart(3, "0")}-${String(2000 + (sIdx * 11) % 8000).padStart(4, "0")}`;
-
-    operations.push(
-      db.prepare(`
-        INSERT INTO guard_profiles (
-          id, site_id, guard_name, display_name, picture_url, phone_number, preferred_shift, role, active, created_at, updated_at
-        ) VALUES (
-          ?, ?, ?, ?, ?, ?, 'evening', 'regular', 1, ?, ?
-        )
-        ON CONFLICT(id) DO UPDATE SET
-          guard_name = CASE WHEN guard_profiles.guard_name LIKE 'รปภ. ประจำ %' OR guard_profiles.guard_name LIKE 'รปภ. (U-%' THEN excluded.guard_name ELSE guard_profiles.guard_name END,
-          picture_url = COALESCE(guard_profiles.picture_url, excluded.picture_url),
-          phone_number = COALESCE(guard_profiles.phone_number, excluded.phone_number),
-          preferred_shift = 'evening',
-          active = 1,
-          updated_at = excluded.updated_at
-      `).bind(eveningId, siteId, `${eveningName} (${siteName})`, eveningId, eveningAvatar, eveningPhone, now, now)
-    );
-
-    newGuards += 2;
-  }
-
-  // 6. อัปเกรดผู้ส่งจาก LINE Webhook ให้เป็นชื่อจริงและรูปจริง
+  // 4. ประมวลผลบัญชีผู้ส่งรายงานที่ตรวจพบใน LINE Webhook Events
   for (const [senderKey, groupList] of senderGroupsMap.entries()) {
+    if (processedUserIds.has(senderKey)) continue;
+    processedUserIds.add(senderKey);
+
     const isMultiGroup = groupList.length > 1;
     const primary = groupList[0];
     const siteId = isMultiGroup ? "all" : (primary.site_id || linePointSiteIdentifier(primary.group_id));
     const role = isMultiGroup ? "spare" : "regular";
+    if (isMultiGroup) sparesDetected++;
 
-    const assignedThaiName = THAI_GUARD_NAMES[nameIndex % THAI_GUARD_NAMES.length];
-    nameIndex++;
+    let realDisplayName: string | null = null;
+    let realPictureUrl: string | null = null;
 
-    const avatarUrl = `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(senderKey)}&backgroundColor=${isMultiGroup ? "0284c7" : "10b981"}`;
-    const phone = `089-${String(100 + (nameIndex * 7) % 900).padStart(3, "0")}-${String(1000 + (nameIndex * 13) % 9000).padStart(4, "0")}`;
+    // ลองดึง Profile จาก LINE API หาก senderKey เป็น LINE User ID
+    if (token) {
+      try {
+        const pRes = await fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(primary.group_id)}/member/${encodeURIComponent(senderKey)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (pRes.ok) {
+          const p = await pRes.json() as any;
+          if (p.displayName) realDisplayName = p.displayName;
+          if (p.pictureUrl) realPictureUrl = p.pictureUrl;
+        } else {
+          const uRes = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(senderKey)}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (uRes.ok) {
+            const u = await uRes.json() as any;
+            if (u.displayName) realDisplayName = u.displayName;
+            if (u.pictureUrl) realPictureUrl = u.pictureUrl;
+          }
+        }
+      } catch {}
+    }
+
+    const shortKey = senderKey.slice(0, 8);
+    const finalGuardName = realDisplayName || `รปภ. LINE (${shortKey})`;
 
     operations.push(
       db.prepare(`
         INSERT INTO guard_profiles (
           id, site_id, guard_name, display_name, picture_url, phone_number, preferred_shift, role, active, created_at, updated_at
         ) VALUES (
-          ?, ?, ?, ?, ?, ?, 'all', ?, 1, ?, ?
+          ?, ?, ?, ?, ?, NULL, 'all', ?, 1, ?, ?
         )
         ON CONFLICT(id) DO UPDATE SET
-          guard_name = CASE WHEN guard_profiles.guard_name LIKE 'รปภ. ประจำ %' OR guard_profiles.guard_name LIKE 'รปภ. (U-%' THEN excluded.guard_name ELSE guard_profiles.guard_name END,
-          picture_url = COALESCE(guard_profiles.picture_url, excluded.picture_url),
-          phone_number = COALESCE(guard_profiles.phone_number, excluded.phone_number),
+          guard_name = CASE WHEN excluded.guard_name NOT LIKE 'รปภ. LINE (%' THEN excluded.guard_name ELSE guard_profiles.guard_name END,
+          display_name = excluded.display_name,
+          picture_url = COALESCE(excluded.picture_url, guard_profiles.picture_url),
           role = CASE WHEN excluded.role = 'spare' THEN 'spare' ELSE guard_profiles.role END,
           active = 1,
           updated_at = excluded.updated_at
       `).bind(
         senderKey,
         siteId,
-        isMultiGroup ? `${assignedThaiName} (สแปร์กลาง)` : `${assignedThaiName} (${primary.site_name || primary.group_name})`,
-        senderKey,
-        avatarUrl,
-        phone,
+        finalGuardName,
+        realDisplayName || senderKey,
+        realPictureUrl,
         role,
         now,
         now
@@ -4174,12 +4144,21 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
     updatedGuards++;
   }
 
+  // 5. ล้างชื่อสุ่มหลอกที่อาจเคยถูกบันทึกไว้ ให้กลับเป็นชื่อจริงจาก LINE หรือชื่อระบุตามไอดี
+  operations.push(
+    db.prepare(`
+      UPDATE guard_profiles
+      SET guard_name = 'รปภ. LINE (' || substr(id, 1, 8) || ')'
+      WHERE guard_name LIKE 'นาย%' AND (display_name LIKE 'U-%' OR display_name LIKE 'guard-%')
+    `)
+  );
+
   for (let offset = 0; offset < operations.length; offset += 50) {
     await db.batch(operations.slice(offset, offset + 50));
   }
 
-  const total = newGuards + updatedGuards + sparesDetected;
-  await addAudit("guard_profile", "bulk_sync", "auto_sync", actor, `ดึงข้อมูลและสร้างทำเนียบ รปภ. ครบทุกกลุ่มอัตโนมัติ ${total} คน (พร้อมชื่อ-รูปโปรไฟล์ครบ 100%)`);
+  const total = newGuards + updatedGuards;
+  await addAudit("guard_profile", "bulk_sync", "auto_sync", actor, `ดึงข้อมูลโปรไฟล์ รปภ. จาก LINE จริง ${total} บัญชี (สแปร์กลาง ${sparesDetected})`);
 
   return {
     ok: true,
@@ -4187,7 +4166,7 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
     newGuards,
     updatedGuards,
     sparesDetected,
-    message: `ดึงข้อมูลและสร้างทำเนียบ รปภ. ครบทุกจุดตรวจสำเร็จเรียบร้อย ${total} นาย (มีชื่อ-รูปโปรไฟล์-เบอร์โทร-กะประจำ ครบถ้วน 100%)`,
+    message: `เชื่อมต่อ LINE API และดึงข้อมูลโปรไฟล์ รปภ. จากทุกกลุ่มเรียบร้อย ${total} บัญชี (ไม่มีการสุ่มชื่อ ทุกคนมาจาก LINE จริง)`,
   };
 }
 
