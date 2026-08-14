@@ -351,9 +351,8 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
     return sites.find((s) => s.id === selectedSiteId) || null;
   }, [sites, selectedSiteId]);
 
-  const totalEmployersCount = useMemo(() => {
-    return guards.filter((g) => g.role === "employer").length;
-  }, [guards]);
+  const totalGuardsCount = useMemo(() => guards.filter((g) => g.role !== "employer").length, [guards]);
+  const totalEmployersCount = useMemo(() => guards.filter((g) => g.role === "employer").length, [guards]);
 
   // Shift timings per site from database slots and linePointDetails
   const siteShiftTimings = useMemo(() => {
