@@ -273,13 +273,31 @@ function groupSites(slots: CoverageSlot[], registry: OperationalSite[], lineGrou
 }
 
 function siteStatusSummary(site: SiteCard) {
+  const slot = site.slots[0];
+  let parsedPayload: any = null;
+  if (slot?.source && slot.source.startsWith("{")) {
+    try {
+      parsedPayload = JSON.parse(slot.source);
+    } catch {}
+  }
+
+  const checkedCount = parsedPayload?.checkedCount ?? (site.status === "green" ? 1 : 0);
+  const target = parsedPayload?.target ?? (site.status === "green" ? 1 : 1);
+
   if (site.status === "green") {
-    return site.checkedAt ? `เข้าเวรแล้ว (${displayTime(site.checkedAt)})` : "เข้าเวรแล้ว ✓";
+    const timeStr = site.checkedAt ? ` (${displayTime(site.checkedAt)})` : "";
+    return target > 1 ? `✅ มาครบแล้ว (${checkedCount}/${target} คน)${timeStr}` : `เข้าเวรแล้ว ✓${timeStr}`;
   }
   if (site.status === "yellow") {
+    if (checkedCount > 0 && target > checkedCount) {
+      return `⏳ เข้าเวรแล้ว ${checkedCount}/${target} คน (รออีก ${target - checkedCount} คน)`;
+    }
     return site.nextDeadline ? `รอเข้าเวร (ก่อน ${site.nextDeadline})` : "รอรายงานตัว";
   }
   if (site.status === "red") {
+    if (checkedCount > 0 && target > checkedCount) {
+      return `🚨 ขาด ${target - checkedCount} คน (มาแล้ว ${checkedCount}/${target} คน)`;
+    }
     return site.nextDeadline ? `🚨 ขาดส่ง (กำหนด ${site.nextDeadline})` : "ยังไม่เข้าเวร";
   }
   return "ไม่ได้เปิดกะนี้";

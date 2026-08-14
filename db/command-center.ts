@@ -2242,46 +2242,79 @@ export async function evaluateShiftCheckIn(input: {
         
         const isSpareExplicit = cleanText && (/สแปร์|แทน|แทนเวร|สแปร์แทน/.test(cleanText));
         const isSpare = isSpareExplicit || registeredGuard?.role === "spare" || registeredGuard?.site_id === "all";
-        const guardName = registeredGuard?.guard_name || slot.assigned_guard;
+        const guardId = String(registeredGuard?.id || input.rawUserId || input.senderKey || "guard-anon").trim();
+        const guardName = registeredGuard?.guard_name || slot.assigned_guard || `รปภ. (${guardId.slice(-6)})`;
+        const guardPic = registeredGuard?.picture_url || null;
 
-          let guardTypeLabel = isSpare 
-            ? (guardName ? `สแปร์แทนเวร: ${guardName}` : "สแปร์แทนเวร") 
-            : (guardName ? `ประจำ (${guardName})` : "ประจำจุด");
-
-          let sourceText = `LINE รายงานตัว (${guardTypeLabel})`;
-          if (hasGuardEnterKeyword) {
-            sourceText = isSpare ? `LINE สแปร์เข้าแทนเวร (ว.4: ${guardName || "สแปร์"})` : `LINE รับมอบเวร (ว.4: ${guardTypeLabel})`;
-          } else if (isPhotoOrLocation && isGuardSender) {
-            sourceText = `LINE ภาพถ่าย รปภ. (${guardTypeLabel})`;
-          } else if (isPhotoOrLocation) {
-            sourceText = `LINE ส่งรูปถ่ายเข้าจุด (${guardTypeLabel})`;
+        // Parse existing checked-in guards from slot.source
+        let checkedInGuards: Array<{ id: string; name: string; time: string; pictureUrl?: string | null }> = [];
+        try {
+          if (slot.source && slot.source.startsWith("{")) {
+            const parsed = JSON.parse(slot.source);
+            if (Array.isArray(parsed.checkedIn)) checkedInGuards = parsed.checkedIn;
           }
+        } catch {}
 
-          await db.prepare(`
-            UPDATE coverage_slots 
-            SET state = 'confirmed',
-                reported_at = ?,
-                source = ?,
-                late_minutes = ?,
-                updated_at = ?
-            WHERE id = ?
-          `).bind(now.time, sourceText, lateMins, now.iso, slot.id).run();
-
-          await addAudit(
-            "coverage_slot", 
-            slot.id, 
-            isSpareExplicit ? "shift_checked_in_spare" : "shift_checked_in_regular", 
-            "LINE Webhook Multi-Guard Engine", 
-            `รปภ. เข้าเวรจุด ${slot.site_name} (${slot.post_name || "ป้อมประจำ"}) [${guardTypeLabel}] เวลา ${now.time}${lateMins > 0 ? ` (สาย ${lateMins} นาที)` : " (ตรงเวลา)"} · ${sourceText}`
-          );
-
-          return { 
-            checkedIn: true, 
-            siteName: slot.site_name, 
-            deadline: slot.deadline, 
-            lateMinutes: lateMins 
-          };
+        // Add this distinct guard ID if not already present
+        const existingIdx = checkedInGuards.findIndex((g) => g.id === guardId || g.name === guardName);
+        if (existingIdx >= 0) {
+          checkedInGuards[existingIdx].time = now.time;
+          if (guardPic) checkedInGuards[existingIdx].pictureUrl = guardPic;
+        } else {
+          checkedInGuards.push({ id: guardId, name: guardName, time: now.time, pictureUrl: guardPic });
         }
+
+        // Count total registered guards for this site and shift
+        const registeredCountRes = await db.prepare(`
+          SELECT COUNT(*) as count 
+          FROM guard_profiles 
+          WHERE site_id = ? AND preferred_shift IN (?, 'all') AND role != 'employer' AND active = 1
+        `).bind(group.site_id, slot.wave).first<{ count: number }>();
+        const totalRegistered = Number(registeredCountRes?.count || 0);
+
+        // Required target headcount (default: 1, or total registered if registered <= 4, or min(4, totalRegistered))
+        const requiredHeadcount = totalRegistered > 0 ? (totalRegistered <= 4 ? totalRegistered : 4) : 1;
+        const isFull = checkedInGuards.length >= requiredHeadcount;
+
+        const newState: CoverageState = isFull ? "confirmed" : (lateMins > 0 ? "missing" : "waiting");
+
+        const sourcePayload = JSON.stringify({
+          checkedIn: checkedInGuards,
+          checkedCount: checkedInGuards.length,
+          target: requiredHeadcount,
+          totalRegistered,
+          lastGuard: guardName,
+          isSpare,
+        });
+
+        await db.prepare(`
+          UPDATE coverage_slots 
+          SET state = ?,
+              reported_at = ?,
+              source = ?,
+              late_minutes = ?,
+              updated_at = ?
+          WHERE id = ?
+        `).bind(newState, now.time, sourcePayload, lateMins, now.iso, slot.id).run();
+
+        await addAudit(
+          "coverage_slot", 
+          slot.id, 
+          isFull ? "shift_full_attendance" : "shift_partial_checkin", 
+          "LINE Multi-Guard ID Check-in Engine", 
+          `รปภ. [${guardName}] เข้าเวรจุด ${slot.site_name} (${checkedInGuards.length}/${requiredHeadcount} คน) เวลา ${now.time}${lateMins > 0 ? ` (สาย ${lateMins} นาที)` : ""} · ${isFull ? "✅ มาครบแล้ว" : `⏳ รออีก ${requiredHeadcount - checkedInGuards.length} คน`}`
+        );
+
+        return { 
+          checkedIn: true, 
+          siteName: slot.site_name, 
+          deadline: slot.deadline, 
+          lateMinutes: lateMins,
+          checkedCount: checkedInGuards.length,
+          target: requiredHeadcount,
+          isFull
+        };
+      }
       }
 
     return { checkedIn: false };
@@ -4087,13 +4120,11 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
   const operations: any[] = [];
 
   for (const guard of discoveredGuards.values()) {
-    const isMultiGroup = guard.groupIds.size > 1 || guard.siteIds.size > 1;
-    const firstSiteId = Array.from(guard.siteIds)[0] || "all";
-    const siteId = isMultiGroup ? "all" : firstSiteId;
-    const role = isMultiGroup ? "spare" : "regular";
-    if (isMultiGroup) sparesDetected++;
+    const firstSiteId = Array.from(guard.siteIds)[0] || "site-default";
+    const siteId = firstSiteId;
+    const role = "regular";
 
-    const displayPicture = guard.pictureUrl || (isMultiGroup ? "🌐" : "👮‍♂️");
+    const displayPicture = guard.pictureUrl || "👮‍♂️";
 
     operations.push(
       db.prepare(`
@@ -4103,7 +4134,7 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
           ?, ?, ?, ?, ?, NULL, 'all', ?, 1, ?, ?
         )
         ON CONFLICT(id) DO UPDATE SET
-          site_id = CASE WHEN guard_profiles.site_id != 'all' AND excluded.site_id = 'all' THEN 'all' ELSE COALESCE(NULLIF(guard_profiles.site_id, ''), excluded.site_id) END,
+          site_id = COALESCE(NULLIF(guard_profiles.site_id, ''), excluded.site_id),
           guard_name = CASE 
             WHEN excluded.guard_name NOT LIKE 'รปภ. ประจำ%' AND excluded.guard_name NOT LIKE 'รปภ. สแปร์%' AND excluded.guard_name NOT LIKE 'U-%' AND excluded.guard_name NOT LIKE 'U%'
             THEN excluded.guard_name
@@ -4112,9 +4143,9 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
           display_name = COALESCE(NULLIF(excluded.display_name, ''), guard_profiles.display_name),
           picture_url = CASE 
             WHEN excluded.picture_url LIKE 'https://%' THEN excluded.picture_url 
-            ELSE COALESCE(NULLIF(guard_profiles.picture_url, '👮‍♂️'), NULLIF(guard_profiles.picture_url, '🌐'), excluded.picture_url) 
+            ELSE COALESCE(NULLIF(guard_profiles.picture_url, '👮‍♂️'), excluded.picture_url) 
           END,
-          role = CASE WHEN excluded.role = 'spare' THEN 'spare' ELSE guard_profiles.role END,
+          role = CASE WHEN guard_profiles.role = 'employer' THEN 'employer' ELSE COALESCE(guard_profiles.role, 'regular') END,
           active = 1,
           updated_at = excluded.updated_at
       `).bind(
