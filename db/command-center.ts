@@ -1275,7 +1275,7 @@ export async function saveLineWebhookEvent(input: {
     // differently by the App Hosting runtime and caused a 500 for every LINE
     // message after signature verification.
     db.prepare("INSERT OR IGNORE INTO line_webhook_events (id, group_id, event_type, message_type, sender_key, raw_user_id, received_at, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(eventId, groupId, input.eventType.slice(0, 48), input.messageType?.slice(0, 32) || null, input.senderKey?.slice(0, 32) || null, input.rawUserId?.slice(0, 64) || null, receivedAt, "Webhook ที่ตรวจสอบลายเซ็นแล้ว; ไม่เก็บข้อความในกลุ่ม"),
+      .bind(eventId, groupId, input.eventType.slice(0, 48), input.messageType?.slice(0, 32) || null, input.senderKey?.slice(0, 128) || null, input.rawUserId?.slice(0, 128) || null, receivedAt, "Webhook ที่ตรวจสอบลายเซ็นแล้ว; ไม่เก็บข้อความในกลุ่ม"),
     db.prepare("INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at) VALUES (?, ?, ?, ?, 'webhook', ?) ON CONFLICT(id) DO UPDATE SET group_name = CASE WHEN excluded.group_name LIKE 'LINE group %' AND line_group_registry.group_name NOT LIKE 'LINE group %' THEN line_group_registry.group_name ELSE excluded.group_name END, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), last_seen_at = excluded.last_seen_at, source = 'webhook', updated_at = excluded.updated_at")
       .bind(groupId, groupName, safePictureUrl, receivedAt, now),
   ]);
@@ -3438,6 +3438,7 @@ export async function confirmSlotFromLineCommand(input: {
 export type GuardProfile = {
   id: string;
   siteId: string;
+  siteIds?: string[];
   siteName?: string;
   guardName: string;
   displayName: string | null;
@@ -3462,8 +3463,6 @@ export async function purgePlaceholderGuardProfiles(actor = "admin"): Promise<{
     WHERE guard_name LIKE 'รปภ. ประจำ%' 
        OR guard_name LIKE 'รปภ. สแปร์กลาง%'
        OR id LIKE 'guard-line-point-%'
-       OR (guard_name LIKE 'รปภ. (U-%' AND (display_name IS NULL OR display_name = ''))
-       OR (guard_name LIKE 'รปภ. LINE (%' AND (display_name IS NULL OR display_name = ''))
   `).run();
 
   await addAudit("guard_profile", "all_placeholders", "purge", actor, `โละล้างข้อมูลจำลอง รปภ. เก่าทั้งหมด (${res.changes} รายการ)`);
@@ -3530,18 +3529,17 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
         lwe.raw_user_id,
         lwe.sender_key,
         lwe.group_id,
-        COALESCE(lg.site_id, lgr.site_id, '') as site_id
+        COALESCE(lg.site_id, '') as site_id
       FROM line_webhook_events lwe
       LEFT JOIN line_groups lg ON lwe.group_id = lg.id
-      LEFT JOIN line_group_registry lgr ON lwe.group_id = lgr.id
       LEFT JOIN guard_profiles gp ON (gp.id = lwe.raw_user_id OR gp.id = lwe.sender_key) AND gp.active = 1
       WHERE gp.id IS NULL
         AND (
-          (lwe.raw_user_id LIKE 'U%' AND length(lwe.raw_user_id) >= 30)
-          OR (lwe.sender_key LIKE 'U%' AND length(lwe.sender_key) >= 30)
+          (lwe.raw_user_id IS NOT NULL AND lwe.raw_user_id != '')
+          OR (lwe.sender_key IS NOT NULL AND lwe.sender_key != '')
         )
       GROUP BY COALESCE(NULLIF(lwe.raw_user_id, ''), lwe.sender_key), lwe.group_id
-      LIMIT 30
+      LIMIT 50
     `).all<any>()).results || [];
 
     for (const sender of unmappedSenders) {
@@ -3549,7 +3547,7 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
       if (!uId || (botUserId && uId === botUserId)) continue;
       const targetSiteId = sender.site_id || linePointSiteIdentifier(sender.group_id);
       
-      let fetchedName = `รปภ. (${uId.slice(-6)})`;
+      let fetchedName = `ผู้ส่ง (${uId.slice(-6)})`;
       let fetchedPic: string | null = null;
 
       if (lineToken && uId.startsWith("U") && uId.length >= 30) {
@@ -3572,9 +3570,6 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
         } catch {}
       }
 
-      // Check if this is the bot's name
-      if (fetchedName.toLowerCase().includes("bot") || fetchedName.includes("บอท")) continue;
-
       const now = bangkokNow().iso;
       await db.prepare(`
         INSERT INTO guard_profiles (id, site_id, guard_name, display_name, picture_url, preferred_shift, role, active, created_at, updated_at)
@@ -3591,20 +3586,45 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
     await db.prepare(`
       UPDATE guard_profiles
       SET site_id = (
-        SELECT COALESCE(NULLIF(lg.site_id, ''), NULLIF(lgr.site_id, ''), 'site-default')
+        SELECT COALESCE(NULLIF(lg.site_id, ''), 'site-default')
         FROM line_webhook_events lwe
         LEFT JOIN line_groups lg ON lwe.group_id = lg.id
-        LEFT JOIN line_group_registry lgr ON lwe.group_id = lgr.id
         WHERE (lwe.raw_user_id = guard_profiles.id OR lwe.sender_key = guard_profiles.id)
-          AND (lg.site_id IS NOT NULL OR lgr.site_id IS NOT NULL)
+          AND lg.site_id IS NOT NULL
         LIMIT 1
       ),
       role = CASE WHEN role = 'employer' THEN 'employer' ELSE 'regular' END
       WHERE site_id = 'all' OR role = 'spare'
     `).run().catch(() => {});
+  } catch (err: any) {
+    console.error("Error in getGuardProfiles auto-discovery:", err?.message || err);
+  }
+
+  // 2. Fetch all multi-group sender site mappings from webhook events
+  const userSiteMap = new Map<string, Set<string>>();
+  try {
+    const senderSiteMappings = (await db.prepare(`
+      SELECT DISTINCT
+        COALESCE(NULLIF(lwe.raw_user_id, ''), lwe.sender_key) as user_id,
+        COALESCE(NULLIF(lg.site_id, ''), lwe.group_id) as site_id
+      FROM line_webhook_events lwe
+      LEFT JOIN line_groups lg ON lwe.group_id = lg.id
+      WHERE (lwe.raw_user_id IS NOT NULL AND lwe.raw_user_id != '') 
+         OR (lwe.sender_key IS NOT NULL AND lwe.sender_key != '')
+    `).all<any>()).results || [];
+
+    for (const m of senderSiteMappings) {
+      const u = String(m.user_id || "").trim();
+      const s = String(m.site_id || "").trim();
+      if (u && s) {
+        const set = userSiteMap.get(u) || new Set<string>();
+        set.add(s);
+        userSiteMap.set(u, set);
+      }
+    }
   } catch {}
 
-  // 2. Fetch all active guard and employer profiles
+  // 3. Fetch all active guard and employer profiles
   let query = `
     SELECT gp.*, os.site_name
     FROM guard_profiles gp
@@ -3613,9 +3633,6 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
       AND gp.guard_name NOT LIKE 'รปภ. ประจำ%'
       AND gp.guard_name NOT LIKE 'รปภ. สแปร์กลาง%'
       AND gp.id NOT LIKE 'guard-line-point-%'
-      AND gp.guard_name NOT LIKE 'U-%'
-      AND gp.guard_name NOT LIKE '%bot%'
-      AND gp.guard_name NOT LIKE '%บอท%'
   `;
   const params: any[] = [];
   if (siteId === "employers_only") {
@@ -3630,12 +3647,11 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
   return rows
     .filter((r: any) => {
       const uId = String(r.id || "").trim();
-      const gName = String(r.guard_name || "").trim();
       if (botUserId && uId === botUserId) return false;
-      if (gName.toLowerCase().includes("bot") || gName.includes("บอท")) return false;
       return true;
     })
     .map((r: any) => {
+      const uId = String(r.id);
       let displayGuardName = String(r.guard_name || "").trim();
       const rawDisplayName = String(r.display_name || "").trim();
 
@@ -3643,11 +3659,17 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
         displayGuardName = rawDisplayName;
       }
 
+      const allSites = Array.from(userSiteMap.get(uId) || []);
+      if (r.site_id && !allSites.includes(r.site_id)) {
+        allSites.push(r.site_id);
+      }
+
       return {
-        id: String(r.id),
+        id: uId,
         siteId: String(r.site_id || "site-default"),
+        siteIds: allSites,
         siteName: r.site_name ? String(r.site_name) : "จุดตรวจประจำ",
-        guardName: displayGuardName || `ผู้ส่ง (${String(r.id).slice(-6)})`,
+        guardName: displayGuardName || `ผู้ส่ง (${uId.slice(-6)})`,
         displayName: r.display_name ? String(r.display_name) : null,
         pictureUrl: r.picture_url ? String(r.picture_url) : null,
         phoneNumber: r.phone_number ? String(r.phone_number) : null,
@@ -4056,12 +4078,7 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
     if (!sId) continue;
     const rawUid = String(s.raw_user_id || (sId.startsWith("U") && sId.length >= 30 ? sId : "")).trim();
     const lineProfile = rawUid ? profileCache.get(rawUid) : undefined;
-    if (!lineProfile?.displayName) {
-      // Skip legacy unverified hashes with no real LINE display name
-      continue;
-    }
-
-    const finalGuardName = lineProfile.displayName;
+    const finalGuardName = lineProfile?.displayName || (rawUid ? `ผู้ส่ง (${rawUid.slice(-6)})` : `ผู้ส่ง (${sId.slice(-6)})`);
 
     const targetSiteId = s.site_id || linePointSiteIdentifier(s.group_id);
     const existing = discoveredGuards.get(sId) || {
@@ -4071,16 +4088,18 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
       siteName: s.site_name,
       groupName: s.group_name,
       guardName: finalGuardName,
-      displayName: lineProfile.displayName,
-      pictureUrl: lineProfile.pictureUrl || null,
+      displayName: lineProfile?.displayName || null,
+      pictureUrl: lineProfile?.pictureUrl || null,
       source: "webhook_events",
     };
 
     existing.groupIds.add(String(s.group_id));
     existing.siteIds.add(targetSiteId);
-    existing.guardName = lineProfile.displayName;
-    existing.displayName = lineProfile.displayName;
-    existing.pictureUrl = lineProfile.pictureUrl || existing.pictureUrl;
+    if (lineProfile?.displayName) {
+      existing.guardName = lineProfile.displayName;
+      existing.displayName = lineProfile.displayName;
+      existing.pictureUrl = lineProfile.pictureUrl || existing.pictureUrl;
+    }
     discoveredGuards.set(sId, existing);
   }
 

@@ -353,12 +353,15 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
     return map;
   }, [data?.slots]);
 
-  // Guards belonging to the selected site
+  // Guards belonging to the selected site (or mapped to this site via webhook events)
   const siteGuards = useMemo(() => {
     if (activeTab === "employers") {
       return [];
     }
-    return guards.filter((g) => g.siteId === selectedSiteId && g.role !== "employer");
+    return guards.filter((g) => {
+      const belongs = g.siteId === selectedSiteId || (g.siteIds && g.siteIds.includes(selectedSiteId));
+      return belongs && g.role !== "employer";
+    });
   }, [guards, selectedSiteId, activeTab]);
 
   // Employers in the selected site (or all employers if activeTab === 'employers')
@@ -366,7 +369,10 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
     if (activeTab === "employers") {
       return guards.filter((g) => g.role === "employer");
     }
-    return guards.filter((g) => g.siteId === selectedSiteId && g.role === "employer");
+    return guards.filter((g) => {
+      const belongs = g.siteId === selectedSiteId || (g.siteIds && g.siteIds.includes(selectedSiteId));
+      return belongs && g.role === "employer";
+    });
   }, [guards, selectedSiteId, activeTab]);
 
   return (
@@ -554,8 +560,8 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
               <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
                 {filteredSites.map((site) => {
                   const isSelected = selectedSiteId === site.id;
-                  const siteGuardsCount = guards.filter((g) => g.siteId === site.id && g.role !== "employer").length;
-                  const siteEmpCount = guards.filter((g) => g.siteId === site.id && g.role === "employer").length;
+                  const siteGuardsCount = guards.filter((g) => (g.siteId === site.id || (g.siteIds && g.siteIds.includes(site.id))) && g.role !== "employer").length;
+                  const siteEmpCount = guards.filter((g) => (g.siteId === site.id || (g.siteIds && g.siteIds.includes(site.id))) && g.role === "employer").length;
 
                   return (
                     <div
@@ -719,8 +725,13 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                           </div>
 
                           {guard.displayName && (
-                            <div style={{ fontSize: "0.72rem", color: "#94a3b8", background: "#0b1220", padding: "0.25rem 0.5rem", borderRadius: "6px" }}>
-                              💬 LINE: {guard.displayName}
+                            <div style={{ fontSize: "0.72rem", color: "#94a3b8", background: "#0b1220", padding: "0.25rem 0.5rem", borderRadius: "6px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                              <span>💬 LINE: {guard.displayName}</span>
+                              {guard.siteIds && guard.siteIds.length > 1 && (
+                                <span style={{ color: "#38bdf8", fontWeight: 700, fontSize: "0.68rem" }}>
+                                  🌐 ส่งใน {guard.siteIds.length} จุด
+                                </span>
+                              )}
                             </div>
                           )}
 
