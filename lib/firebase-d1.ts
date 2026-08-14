@@ -1,7 +1,79 @@
-import Database from "better-sqlite3";
-
 type SqlValue = string | number | null | Uint8Array;
 type Row = Record<string, unknown>;
+
+interface SqliteDatabaseAdapter {
+  prepare(sql: string): {
+    all(...values: unknown[]): unknown[];
+    get(...values: unknown[]): unknown;
+    run(...values: unknown[]): { changes: number; lastInsertRowid: number | bigint };
+  };
+  exec(sql: string): void;
+  pragma?(sql: string): void;
+  transaction(fn: (...args: any[]) => any): (...args: any[]) => any;
+}
+
+class NodeSqliteAdapter implements SqliteDatabaseAdapter {
+  private raw: any;
+
+  constructor(rawInstance: any) {
+    this.raw = rawInstance;
+    try {
+      this.raw.exec("PRAGMA journal_mode = WAL;");
+    } catch {}
+  }
+
+  prepare(sql: string) {
+    const stmt = this.raw.prepare(sql);
+    return {
+      all: (...values: unknown[]) => stmt.all(...values),
+      get: (...values: unknown[]) => stmt.get(...values),
+      run: (...values: unknown[]) => stmt.run(...values),
+    };
+  }
+
+  exec(sql: string) {
+    return this.raw.exec(sql);
+  }
+
+  pragma(sql: string) {
+    try {
+      return this.raw.exec(`PRAGMA ${sql};`);
+    } catch {}
+  }
+
+  transaction(fn: (...args: any[]) => any) {
+    return (...args: any[]) => {
+      this.raw.exec("BEGIN");
+      try {
+        const result = fn(...args);
+        this.raw.exec("COMMIT");
+        return result;
+      } catch (err) {
+        this.raw.exec("ROLLBACK");
+        throw err;
+      }
+    };
+  }
+}
+
+async function createSqliteInstance(): Promise<SqliteDatabaseAdapter> {
+  try {
+    const sqliteModule = await import("node:sqlite");
+    if (sqliteModule && sqliteModule.DatabaseSync) {
+      return new NodeSqliteAdapter(new sqliteModule.DatabaseSync(":memory:"));
+    }
+  } catch {}
+
+  try {
+    const betterSqlite = await import("better-sqlite3");
+    const Database = betterSqlite.default || betterSqlite;
+    const db = new Database(":memory:");
+    try { db.pragma("journal_mode = WAL"); } catch {}
+    return db;
+  } catch (e) {
+    throw new Error("Cannot initialize SQLite database engine: " + String(e));
+  }
+}
 
 const TABLES = [
   "system_settings",
@@ -67,8 +139,12 @@ class FirestoreRest {
 
   constructor(private readonly projectId: string | undefined) {}
 
+  isConfigured() {
+    return Boolean(this.projectId && this.projectId.trim().length > 0);
+  }
+
   async list(table: TableName): Promise<RemoteDocument[] | null> {
-    if (!this.projectId) return null;
+    if (!this.isConfigured()) return null;
     const documents: RemoteDocument[] = [];
     let pageToken = "";
     do {
@@ -228,7 +304,7 @@ class FirebaseStatement {
 
 export class FirebaseD1Database {
   private remote: FirestoreRest | null = null;
-  private sqlite: Database.Database | null = null;
+  private sqlite: SqliteDatabaseAdapter | null = null;
   private hydrated = false;
   private initialized: Promise<void> | null = null;
   private lastHydratedAt = 0;
@@ -243,10 +319,6 @@ export class FirebaseD1Database {
 
   async batch(statements: FirebaseStatement[]) {
     await this.ensureSqlite();
-    // The schema contains `CREATE UNIQUE INDEX` as well as `CREATE TABLE`.
-    // Treat the complete startup migration as one schema operation; otherwise
-    // the first `CREATE UNIQUE INDEX` made a cold instance skip restoration
-    // from Firestore and the dashboard appeared empty.
     const isSchemaBatch = statements.length > 0 && statements.every((statement) =>
       /^\s*(?:(?:CREATE\s+(?:(?:UNIQUE|TEMPORARY)\s+)?(?:TABLE|INDEX)\b)|(?:ALTER\s+TABLE\b)|PRAGMA\b)/i
         .test((statement as unknown as { sql: string }).sql),
@@ -274,15 +346,8 @@ export class FirebaseD1Database {
 
     if (isSchemaBatch) {
       this.markReady();
-      // A startup is valid only after the persisted snapshot is available.
-      // Otherwise an empty in-memory SQLite database could overwrite the
-      // real LINE registry during a cold App Hosting revision.
       await this.hydrateRemote();
     } else if (affected.size) {
-      // App Hosting instances are ephemeral.  A background timer can be lost
-      // as soon as a request finishes, which made recently discovered LINE
-      // groups disappear after a new revision was deployed.  Commit the
-      // affected tables before reporting a successful write to the caller.
       await this.persist(this.diffSnapshots(before, this.snapshotTables([...affected])));
     }
     return { success: true, meta: { changes: statements.length } };
@@ -304,12 +369,9 @@ export class FirebaseD1Database {
     const affected = tableNames(sql);
     const before = affected.length ? this.snapshotTables(affected) : new Map<TableName, Map<string, Row>>();
     const result = this.sqlite!.prepare(sql).run(...values);
-    // D1 callers issue a number of idempotent synchronization statements on
-    // every request.  Do not open a Firestore write transaction when SQLite
-    // reports that nothing changed; this keeps the readiness path fast and
-    // avoids needless remote round-trips.
-    if (affected.length && result.changes > 0) await this.persist(this.diffSnapshots(before, this.snapshotTables(affected)));
-    return { success: true, meta: { changes: result.changes, last_row_id: result.lastInsertRowid } };
+    if (affected.length && result?.changes > 0) await this.persist(this.diffSnapshots(before, this.snapshotTables(affected)));
+    const changesCount = Number(result?.changes ?? 0);
+    return { success: true, changes: changesCount, meta: { changes: changesCount, last_row_id: Number(result?.lastInsertRowid ?? 0) } };
   }
 
   async refreshIfStale(maxAgeMs = 3000) {
@@ -325,9 +387,8 @@ export class FirebaseD1Database {
   private async ensureSqlite() {
     if (this.sqlite) return;
     if (!this.initialized) {
-      this.initialized = Promise.resolve().then(() => {
-        this.sqlite = new Database(":memory:");
-        this.sqlite.pragma("journal_mode = WAL");
+      this.initialized = createSqliteInstance().then((instance) => {
+        this.sqlite = instance;
       });
     }
     await this.initialized;
@@ -340,9 +401,6 @@ export class FirebaseD1Database {
       await this.hydrateRemote();
       return;
     }
-    // A webhook can arrive while the first request is still restoring the
-    // in-memory compatibility database.  Do not let that write persist a
-    // partial local snapshot over the complete Firestore collection.
     if (this.remoteHydration) await this.remoteHydration;
   }
 
@@ -373,33 +431,39 @@ export class FirebaseD1Database {
   }
 
   private async hydrateRemote() {
+    const remote = this.getRemote();
+    if (!remote.isConfigured()) {
+      this.lastHydratedAt = Date.now();
+      return;
+    }
+
     if (!this.remoteAvailable) {
       throw new Error("Firestore ยังไม่พร้อมสำหรับการกู้ข้อมูล");
     }
     if (this.remoteHydration) return this.remoteHydration;
     this.remoteHydration = (async () => {
-    await this.ensureSqlite();
-    for (const table of TABLES) {
-      const exists = this.sqlite!.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
-      if (!exists) continue;
-      const columns = (this.sqlite!.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((column) => column.name);
-      const snapshot = await this.withTimeout(this.getRemote().list(table));
-      if (!snapshot) throw new Error("ไม่สามารถอ่านข้อมูลจาก Firestore ได้");
-      if (snapshot.length && columns.length) {
-        const localCount = Number((this.sqlite!.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count?: number } | undefined)?.count ?? 0);
-        if (localCount > 0) continue;
-        const allowed = new Set(columns);
-        const insert = this.sqlite!.prepare(`INSERT OR REPLACE INTO ${table} (${columns.map((column) => `\"${column}\"`).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`);
-        const transaction = this.sqlite!.transaction((docs: Row[]) => {
-          for (const document of docs) {
-            const data = document;
-            insert.run(...columns.map((column) => allowed.has(column) ? normalizeValue(data[column]) : null));
-          }
-        });
-        transaction(snapshot.map((document) => document.data));
+      await this.ensureSqlite();
+      for (const table of TABLES) {
+        const exists = this.sqlite!.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+        if (!exists) continue;
+        const columns = (this.sqlite!.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((column) => column.name);
+        const snapshot = await this.withTimeout(remote.list(table));
+        if (!snapshot) continue;
+        if (snapshot.length && columns.length) {
+          const localCount = Number((this.sqlite!.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count?: number } | undefined)?.count ?? 0);
+          if (localCount > 0) continue;
+          const allowed = new Set(columns);
+          const insert = this.sqlite!.prepare(`INSERT OR REPLACE INTO ${table} (${columns.map((column) => `\"${column}\"`).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`);
+          const transaction = this.sqlite!.transaction((docs: Row[]) => {
+            for (const document of docs) {
+              const data = document;
+              insert.run(...columns.map((column) => allowed.has(column) ? normalizeValue(data[column]) : null));
+            }
+          });
+          transaction(snapshot.map((document) => document.data));
+        }
       }
-    }
-    this.lastHydratedAt = Date.now();
+      this.lastHydratedAt = Date.now();
     })();
     try {
       await this.remoteHydration;
@@ -444,12 +508,13 @@ export class FirebaseD1Database {
 
   private async persist(changes: RemoteChange[]) {
     if (!changes.length) return;
+    const remote = this.getRemote();
+    if (!remote.isConfigured()) return;
+
     if (!this.remoteAvailable) {
       throw new Error("Firestore ยังไม่พร้อมบันทึกข้อมูล");
     }
     this.enqueueRemote(changes);
-    // Recover after a transient quota/network error. Keeping dirty rows means
-    // a LINE retry or the next message can finish the prior persistence.
     this.writeQueue = this.writeQueue.catch(() => undefined).then(async () => {
       await this.ensureReady();
       if (!this.remoteAvailable) {
@@ -459,8 +524,8 @@ export class FirebaseD1Database {
         for (const [table, pending] of [...this.pendingRemote.entries()]) {
           for (const [key, row] of [...pending.entries()]) {
             const written = row === null
-              ? await this.getRemote().delete(table, documentId(key))
-              : await this.getRemote().set(table, documentId(key), {
+              ? await remote.delete(table, documentId(key))
+              : await remote.set(table, documentId(key), {
                 ...Object.fromEntries(Object.entries(row).map(([name, value]) => [name, firestoreValue(value)])),
                 row_key: key,
               });

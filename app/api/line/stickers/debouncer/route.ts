@@ -61,40 +61,64 @@ export async function POST(request: Request) {
       }
     }
     
-    // 1. ค้นหา event ปัจจุบันในฐานข้อมูลเพื่อดึง rowid และ sender_key
+    // 1. ค้นหา event ปัจจุบันในฐานข้อมูลเพื่อดึง rowid, raw_user_id และ sender_key
     const currentEvent = (await db.prepare(
-      "SELECT rowid, received_at, sender_key, message_type FROM line_webhook_events WHERE id = ?"
-    ).bind(eventId).first()) as { rowid: number; received_at: string; sender_key: string | null; message_type: string | null } | null;
+      "SELECT rowid, received_at, sender_key, raw_user_id, message_type FROM line_webhook_events WHERE id = ?"
+    ).bind(eventId).first()) as { rowid: number; received_at: string; sender_key: string | null; raw_user_id: string | null; message_type: string | null } | null;
 
-    // 1.5 ตรวจสอบว่าผู้ส่งข้อความนี้เป็น "นายจ้าง" ที่บันทึกไว้ในทำเนียบหรือไม่
-    // หากเป็นนายจ้างที่บันทึกไว้แล้ว ห้ามบอทส่งสติกเกอร์ตอบกลับคนนี้เด็ดขาด (แต่ถ้าเป็น รปภ. ให้ตอบตามปกติ)
-    if (currentEvent?.sender_key) {
-      const groupSite = (await db.prepare("SELECT site_id FROM line_groups WHERE id = ?").bind(groupId).first()) as { site_id?: string } | null;
-      const siteId = groupSite?.site_id || "all";
+    // 1.5 ตรวจสอบตัวตนผู้ส่ง (รปภ. vs นายจ้าง vs คนแปลกหน้า)
+    // เงื่อนไข:
+    // - ถ้ารปภ. ส่งมา -> ให้บอทตอบสติกเกอร์
+    // - ถ้านายจ้างส่ง หรือคนแปลกหน้าส่งมา -> ไม่ต้องตอบ เพื่อให้เห็นแชทและคุยงานสะดวก
+    const uId = currentEvent?.raw_user_id;
+    const sKey = currentEvent?.sender_key;
 
-      const employerProfile = (await db.prepare(`
-        SELECT guard_name, role 
+    let senderProfile: { id: string; guard_name: string; role: string } | null = null;
+
+    if (uId || sKey) {
+      senderProfile = (await db.prepare(`
+        SELECT id, guard_name, role 
         FROM guard_profiles 
         WHERE active = 1 
-          AND role = 'employer' 
-          AND (id = ? OR display_name = ?)
-          AND (site_id = ? OR site_id = 'all')
+          AND (
+            (id = ? AND ? != '') OR 
+            (id = ? AND ? != '') OR 
+            (display_name = ? AND ? != '') OR 
+            (display_name = ? AND ? != '')
+          )
         LIMIT 1
-      `).bind(currentEvent.sender_key, currentEvent.sender_key, siteId).first()) as { guard_name: string; role: string } | null;
+      `).bind(uId || "", uId || "", sKey || "", sKey || "", uId || "", uId || "", sKey || "", sKey || "").first()) as { id: string; guard_name: string; role: string } | null;
+    }
 
-      if (employerProfile) {
-        await logOutboundAction({
-          id: `skip-employer-${Date.now()}`,
-          groupId,
-          triggerEventId: eventId,
-          actionType: "auto-reply-close",
-          stickerPackageId: "11538",
-          stickerId: "51626520",
-          status: "skipped",
-          skipReason: `งดส่งสติกเกอร์: ข้อความส่งจากนายจ้าง "${employerProfile.guard_name}" ที่บันทึกไว้ในทำเนียบ เพื่อไม่ให้กลบแชทนายจ้าง`,
-        });
-        return Response.json({ ok: true, skipped: true, reason: "employer_message_no_sticker" });
-      }
+    // ถ้าพบนายจ้าง -> งดตอบเด็ดขาด
+    if (senderProfile && senderProfile.role === "employer") {
+      await logOutboundAction({
+        id: `skip-employer-${Date.now()}`,
+        groupId,
+        triggerEventId: eventId,
+        actionType: "auto-reply-close",
+        stickerPackageId: "11538",
+        stickerId: "51626520",
+        status: "skipped",
+        skipReason: `งดส่งสติกเกอร์: ผู้ส่งคือนายจ้าง/ลูกค้า "${senderProfile.guard_name}" (บอทเงียบ 100% เพื่อให้เห็นแชทและคุยงานสะดวก)`,
+      });
+      return Response.json({ ok: true, skipped: true, reason: "employer_message_no_sticker" });
+    }
+
+    // ถ้าไม่พบในทำเนียบ รปภ. (คนแปลกหน้า / บุคคลภายนอก) -> งดตอบเด็ดขาด
+    const isGuard = senderProfile && (senderProfile.role === "regular" || senderProfile.role === "spare" || senderProfile.role === "head_guard");
+    if (!isGuard) {
+      await logOutboundAction({
+        id: `skip-stranger-${Date.now()}`,
+        groupId,
+        triggerEventId: eventId,
+        actionType: "auto-reply-close",
+        stickerPackageId: "11538",
+        stickerId: "51626520",
+        status: "skipped",
+        skipReason: `งดส่งสติกเกอร์: ผู้ส่งเป็นคนแปลกหน้า/ยังไม่ได้ลงทะเบียนเป็น รปภ. ในทำเนียบ (บอทเงียบเพื่อไม่ให้รบกวนแชท)`,
+      });
+      return Response.json({ ok: true, skipped: true, reason: "stranger_no_sticker" });
     }
 
     if (currentEvent) {

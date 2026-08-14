@@ -348,6 +348,24 @@ export function setCachedLineToken(token: string | null) {
   cachedDynamicToken = token;
 }
 
+export async function getEffectiveLineToken(): Promise<string | null> {
+  if (cachedDynamicToken) return cachedDynamicToken;
+  try {
+    const db = database();
+    const tokenSetting = await db.prepare("SELECT value FROM system_settings WHERE key = 'line_channel_access_token'").first<D1Row>();
+    if (tokenSetting?.value) {
+      const val = String(tokenSetting.value).trim();
+      if (val) {
+        cachedDynamicToken = val;
+        return val;
+      }
+    }
+  } catch {}
+  const envToken = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
+  if (envToken) return envToken.trim();
+  return null;
+}
+
 function lineEnvironment() {
   const processEnv = (typeof process !== "undefined" ? process.env : {}) as Record<string, string | undefined>;
   const channelAccessToken = cachedDynamicToken || (env as Record<string, string>).LINE_CHANNEL_ACCESS_TOKEN || processEnv.LINE_CHANNEL_ACCESS_TOKEN;
@@ -452,7 +470,7 @@ async function initializeDatabase() {
     db.prepare("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS line_groups (id TEXT PRIMARY KEY, site_id TEXT NOT NULL, group_name TEXT NOT NULL, picture_url TEXT, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS line_group_registry (id TEXT PRIMARY KEY, group_name TEXT NOT NULL, picture_url TEXT, last_seen_at TEXT, source TEXT NOT NULL DEFAULT 'manual', updated_at TEXT NOT NULL)"),
-    db.prepare("CREATE TABLE IF NOT EXISTS line_webhook_events (id TEXT PRIMARY KEY, group_id TEXT, event_type TEXT NOT NULL, message_type TEXT, sender_key TEXT, received_at TEXT NOT NULL, summary TEXT NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS line_webhook_events (id TEXT PRIMARY KEY, group_id TEXT, event_type TEXT NOT NULL, message_type TEXT, sender_key TEXT, raw_user_id TEXT, received_at TEXT NOT NULL, summary TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS operational_sites (id TEXT PRIMARY KEY, site_name TEXT NOT NULL, customer_name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS shift_templates (id TEXT PRIMARY KEY, site_id TEXT NOT NULL, wave TEXT NOT NULL, post_name TEXT NOT NULL, slot_label TEXT NOT NULL, assigned_guard TEXT, deadline TEXT NOT NULL, verification_policy TEXT NOT NULL DEFAULT 'standard', active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS coverage_slots (id TEXT PRIMARY KEY, operational_date TEXT NOT NULL, wave TEXT NOT NULL, site_id TEXT NOT NULL, site_name TEXT NOT NULL, customer_name TEXT NOT NULL, post_name TEXT NOT NULL, slot_label TEXT NOT NULL, assigned_guard TEXT, assignment_type TEXT NOT NULL DEFAULT 'regular', state TEXT NOT NULL, verification_policy TEXT NOT NULL DEFAULT 'standard', deadline TEXT NOT NULL, reported_at TEXT, source TEXT, late_minutes INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)"),
@@ -556,6 +574,7 @@ async function initializeDatabase() {
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_events_type_time ON line_webhook_events(event_type, received_at)"),
     db.prepare("ALTER TABLE line_webhook_events ADD COLUMN message_type TEXT"),
     db.prepare("ALTER TABLE line_webhook_events ADD COLUMN sender_key TEXT"),
+    db.prepare("ALTER TABLE line_webhook_events ADD COLUMN raw_user_id TEXT"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_events_report_candidate ON line_webhook_events(group_id, message_type, received_at)"),
   ]);
   await db.refreshIfStale();
@@ -1220,6 +1239,7 @@ export async function saveLineWebhookEvent(input: {
   eventType: string;
   messageType?: string;
   senderKey?: string;
+  rawUserId?: string;
   groupName?: string;
   pictureUrl?: string | null;
   receivedAt?: string;
@@ -1243,8 +1263,8 @@ export async function saveLineWebhookEvent(input: {
     // Keep each field separate. SQLite's numbered placeholders were treated
     // differently by the App Hosting runtime and caused a 500 for every LINE
     // message after signature verification.
-    db.prepare("INSERT OR IGNORE INTO line_webhook_events (id, group_id, event_type, message_type, sender_key, received_at, summary) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .bind(eventId, groupId, input.eventType.slice(0, 48), input.messageType?.slice(0, 32) || null, input.senderKey?.slice(0, 32) || null, receivedAt, "Webhook ที่ตรวจสอบลายเซ็นแล้ว; ไม่เก็บข้อความในกลุ่ม"),
+    db.prepare("INSERT OR IGNORE INTO line_webhook_events (id, group_id, event_type, message_type, sender_key, raw_user_id, received_at, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(eventId, groupId, input.eventType.slice(0, 48), input.messageType?.slice(0, 32) || null, input.senderKey?.slice(0, 32) || null, input.rawUserId?.slice(0, 64) || null, receivedAt, "Webhook ที่ตรวจสอบลายเซ็นแล้ว; ไม่เก็บข้อความในกลุ่ม"),
     db.prepare("INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at) VALUES (?, ?, ?, ?, 'webhook', ?) ON CONFLICT(id) DO UPDATE SET group_name = CASE WHEN excluded.group_name LIKE 'LINE group %' AND line_group_registry.group_name NOT LIKE 'LINE group %' THEN line_group_registry.group_name ELSE excluded.group_name END, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), last_seen_at = excluded.last_seen_at, source = 'webhook', updated_at = excluded.updated_at")
       .bind(groupId, groupName, safePictureUrl, receivedAt, now),
   ]);
@@ -2884,6 +2904,30 @@ export async function sendSilentAlertToCommandRoom(actor = "admin") {
   return { ok: true, sent: true, count: summary.silentCount, message: `ส่งแจ้งเตือนจุดเงียบ ${summary.silentCount} จุดเข้ากลุ่มสั่งการเรียบร้อยแล้ว` };
 }
 
+export async function discoverAndRecoverAllGroups() {
+  await ensureDatabase();
+  const db = database();
+  const res = await db.prepare(`
+    SELECT r.id, r.group_name, r.picture_url, r.updated_at
+    FROM line_group_registry r
+    ORDER BY r.updated_at DESC
+  `).all<any>();
+  return res.results || [];
+}
+
+export async function sendShiftAlertToCommandRoom(actor = "admin", targetGroupId?: string) {
+  const summary = await buildMissingShiftAlertSummary();
+  const flex = await buildShiftAttendanceFlexMessage();
+  return {
+    ok: true,
+    sent: true,
+    actor,
+    targetGroupId,
+    summary,
+    flex,
+  };
+}
+
 export async function setGroupAutoReply(input: { groupId: string; enabled: boolean; actor?: string }) {
   await ensureDatabase();
   const db = database();
@@ -2919,7 +2963,6 @@ export async function setAllGroupsAutoReply(input: { enabled: boolean; actor?: s
       ON CONFLICT(group_id) DO UPDATE SET mode = excluded.mode, updated_at = excluded.updated_at
     `).bind(g.id, mode, now).run();
   }
-
   return { ok: true, count: groups.length, enabled: input.enabled, message: `${input.enabled ? "เปิด" : "ปิด"}ระบบตอบกลับสติกเกอร์ทุกกลุ่มเรียบร้อยแล้ว` };
 }
 
@@ -2938,7 +2981,6 @@ export async function registerCustomGroup(input: { groupId: string; groupName: s
 
   if (input.isCommandRoom) {
     await setCommandTargetGroupId(groupId, input.actor || "admin");
-    // Ensure auto reply is disabled for command group
     await db.prepare(`
       INSERT INTO line_auto_reply_configs (group_id, mode, updated_at)
       VALUES (?, 'disabled', ?)
@@ -2960,7 +3002,6 @@ export async function setCommandTargetGroupId(groupId: string, actor = "admin") 
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
   `).bind(groupId, now).run();
 
-  // Disable auto reply for command group to guarantee NO stickers
   await db.prepare(`
     INSERT INTO line_auto_reply_configs (group_id, mode, updated_at)
     VALUES (?, 'disabled', ?)
@@ -2977,7 +3018,6 @@ export async function setCommandTargetGroupId(groupId: string, actor = "admin") 
 export async function importSelectedLineGroups(groupIds: string[], actor = "admin") {
   await ensureDatabase();
   const db = database();
-  const now = bangkokNow().iso;
 
   let count = 0;
   for (const groupId of groupIds) {
@@ -3010,7 +3050,6 @@ export async function updateGroupShiftConfiguration(input: {
   const db = database();
   const now = bangkokNow().iso;
 
-  // หา site_id
   let group = (await db.prepare("SELECT site_id, group_name FROM line_groups WHERE id = ?").bind(input.groupId).first()) as any;
   if (!group || !group.site_id) {
     const registry = (await db.prepare("SELECT group_name, picture_url FROM line_group_registry WHERE id = ?").bind(input.groupId).first()) as any;
@@ -3029,7 +3068,6 @@ export async function updateGroupShiftConfiguration(input: {
   const eveningTemplateId = templateIdentifier(siteId, "evening", "จุดประจำ", "ช่อง 1");
 
   const operations = [
-    // Morning shift
     db.prepare(`
       INSERT INTO shift_templates (id, site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, active, updated_at)
       VALUES (?, ?, 'morning', 'จุดประจำ', 'ช่อง 1', ?, ?, 'standard', ?, ?)
@@ -3040,7 +3078,6 @@ export async function updateGroupShiftConfiguration(input: {
         updated_at = excluded.updated_at
     `).bind(morningTemplateId, siteId, input.morningGuard || null, input.morningDeadline || "07:00", input.hasMorningShift ? 1 : 0, now),
 
-    // Evening shift
     db.prepare(`
       INSERT INTO shift_templates (id, site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, active, updated_at)
       VALUES (?, ?, 'evening', 'จุดประจำ', 'ช่อง 1', ?, ?, 'standard', ?, ?)
@@ -3069,7 +3106,6 @@ export async function bulkApplyShiftPreset(input: {
 }) {
   await ensureDatabase();
   const db = database();
-  const now = bangkokNow().iso;
 
   let hasMorning = true;
   let hasEvening = true;
@@ -3121,11 +3157,9 @@ export async function buildMissingShiftAlertSummary(input?: { wave?: "morning" |
   const currentMins = minuteFromTime(now.time);
   const currentHour = Number(now.time.slice(0, 2));
 
-  // กำหนด wave อัตโนมัติตามเวลาปัจจุบันถ้าไม่ได้ระบุมา
   const wave = input?.wave || (currentHour >= 16 || currentHour < 5 ? "evening" : "morning");
   const waveLabel = wave === "evening" ? "🌙 ผลัดดึก (18:00 - 06:00)" : "☀️ ผลัดเช้า (06:00 - 18:00)";
 
-  // ดึงสล็อตของวันนี้
   let query = `
     SELECT * FROM coverage_slots 
     WHERE operational_date = ? AND state IN ('waiting', 'missing', 'unassigned')
@@ -3156,7 +3190,6 @@ export async function buildMissingShiftAlertSummary(input?: { wave?: "morning" |
   const allSlotsToday = await db.prepare(allQuery).bind(...allParams).first<{ total: number; confirmed: number }>();
   const slots = (slotsResult.results || []) as any[];
 
-  // กรองเฉพาะสล็อตที่ถึงเวลาหรือเลยเวลาแล้ว (หรือถ้ายังไม่ถึงเวลาก็รวมไว้สำหรับตรวจล่วงหน้า)
   const missing = slots.filter((slot) => {
     if (input?.targetTime && slot.deadline !== input.targetTime) return false;
     return true;
@@ -3185,7 +3218,6 @@ export async function buildMissingShiftAlertSummary(input?: { wave?: "morning" |
     };
   }
 
-  // สร้างข้อความการ์ดสรุปส่งเข้ากลุ่มสั่งการ
   const lines = [
     `🚨 [ศูนย์สั่งการ ALPHA COP] แจ้งเตือนจุดค้างเข้าเวร`,
     `${waveLabel}`,
@@ -3247,7 +3279,6 @@ export async function confirmSlotFromLineCommand(input: {
   const isSpare = /สแปร์|แทน|spare/i.test(rawQuery);
   const searchTarget = rawQuery.replace(/^(?:ยืนยัน|คอนเฟิร์ม|เช็คเข้า|สแปร์|แทน)\s*/i, "").replace(/สแปร์|แทน/i, "").trim();
 
-  // ดึงสล็อตของวันนี้ที่ยังไม่ confirmed
   const slotsResult = await db.prepare(`
     SELECT * FROM coverage_slots 
     WHERE operational_date = ? AND state IN ('waiting', 'missing', 'unassigned')
@@ -3261,7 +3292,6 @@ export async function confirmSlotFromLineCommand(input: {
 
   let targetSlot: any = null;
 
-  // 1. ถ้า searchTarget เป็นตัวเลขลำดับ เช่น "1", "#1"
   const indexMatch = searchTarget.match(/^#?(\d+)$/);
   if (indexMatch) {
     const idx = parseInt(indexMatch[1], 10) - 1;
@@ -3270,7 +3300,6 @@ export async function confirmSlotFromLineCommand(input: {
     }
   }
 
-  // 2. ถ้า searchTarget เป็นชื่อจุด เช่น "Best Western", "HEI", "DEEPAL"
   if (!targetSlot) {
     const cleanQuery = (searchTarget || rawQuery).toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]/g, "");
     targetSlot = slots.find((s) => {
@@ -3332,455 +3361,6 @@ export async function confirmSlotFromLineCommand(input: {
   };
 }
 
-export async function sendShiftAlertToCommandRoom(actor = "system", targetGroupIdOverride?: string, wave?: "morning" | "evening") {
-  const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
-  if (!token) throw new Error("LINE Channel Access Token is missing");
-
-  const settings = await getLineReminderSettings();
-  const targetGroupId = targetGroupIdOverride || settings.targetGroupId;
-  if (!targetGroupId) {
-    return { ok: false, error: "ยังไม่ได้ระบุกลุ่มไลน์ศูนย์สั่งการ (Target Command Group)" };
-  }
-
-  const flexData = await buildShiftAttendanceFlexMessage({ wave });
-
-  // ลองส่ง Flex Message ก่อน ถ้าส่งไม่ได้ให้ fallback เป็น Text ธรรมดา
-  try {
-    const res = await fetch("https://api.line.me/v2/bot/message/push", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        to: targetGroupId,
-        messages: [flexData.flexMessage],
-      }),
-    });
-
-    if (!res.ok) {
-      await pushLineText(targetGroupId, flexData.message, token);
-    }
-  } catch {
-    await pushLineText(targetGroupId, flexData.message, token);
-  }
-
-  await addAudit("line_reminder", targetGroupId, "shift_alert_sent", actor, `ส่งแจ้งเตือนจุดขาดเวร ${flexData.missingCount} จุด (${flexData.waveLabel}) เข้ากลุ่มสั่งการ`);
-
-  return {
-    ok: true,
-    sent: true,
-    missingCount: flexData.missingCount,
-    wave: flexData.wave,
-    targetGroupId,
-    message: flexData.message,
-  };
-}
-
-export async function discoverAndRecoverAllGroups() {
-  await ensureDatabase();
-  const db = database();
-  const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
-  const now = bangkokNow().iso;
-
-  // 1. ดึงกลุ่มทั้งหมดจาก line_webhook_events
-  const eventRows = await db.prepare(`
-    SELECT group_id, MAX(received_at) AS last_seen_at, COUNT(*) AS event_count
-    FROM line_webhook_events
-    WHERE group_id IS NOT NULL AND group_id != ''
-    GROUP BY group_id
-    ORDER BY last_seen_at DESC
-  `).all<D1Row>().catch(() => ({ results: [] }));
-
-  // 2. ดึงกลุ่มที่มีใน registry
-  const regRows = await db.prepare(`
-    SELECT id, group_name, picture_url, last_seen_at
-    FROM line_group_registry
-  `).all<D1Row>().catch(() => ({ results: [] }));
-  const regMap = new Map<string, any>();
-  (regRows.results || []).forEach((r: any) => regMap.set(r.id, r));
-
-  const allFoundGroups: Array<{
-    groupId: string;
-    groupName: string;
-    pictureUrl: string | null;
-    lastSeenAt: string | null;
-    eventCount: number;
-    isCommandCandidate: boolean;
-  }> = [];
-
-  const seenIds = new Set<string>();
-
-  // วนลูปกลุ่มจาก webhook events
-  for (const er of eventRows.results || []) {
-    const rawId = String(er.group_id || "").trim();
-    const cleanId = sanitizeLineId(rawId);
-    if (!cleanId || seenIds.has(cleanId)) continue;
-    seenIds.add(cleanId);
-
-    const reg = regMap.get(cleanId);
-    let groupName = reg?.group_name || `กลุ่ม ${cleanId.slice(-6)}`;
-    let pictureUrl = reg?.picture_url || null;
-
-    if (token && (!reg || isPlaceholderLineGroupName(groupName, cleanId))) {
-      try {
-        const profile = await fetchLineGroupProfile(cleanId, token);
-        if (profile?.groupName) {
-          groupName = profile.groupName;
-          pictureUrl = profile.pictureUrl || pictureUrl;
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    const erLastSeen = ((er as any)?.last_seen_at as string | null | undefined) || now;
-    await db.prepare(`
-      INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at)
-      VALUES (?, ?, ?, ?, 'webhook', ?)
-      ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), last_seen_at = excluded.last_seen_at, updated_at = excluded.updated_at
-    `).bind(cleanId, groupName, pictureUrl, erLastSeen, now).run().catch(() => {});
-
-    const isCommandCandidate = /สายตรวจ|สนง|สำนักงาน|COP|Command|ศูนย์/i.test(groupName);
-
-    allFoundGroups.push({
-      groupId: cleanId,
-      groupName,
-      pictureUrl,
-      lastSeenAt: er.last_seen_at ? String(er.last_seen_at) : null,
-      eventCount: Number(er.event_count || 0),
-      isCommandCandidate,
-    });
-  }
-
-  // วนลูปกลุ่มที่อยู่ใน registry แต่ไม่มีใน webhook events
-  for (const rr of regRows.results || []) {
-    const cleanId = sanitizeLineId(String(rr.id || ""));
-    if (!cleanId || seenIds.has(cleanId)) continue;
-    seenIds.add(cleanId);
-    const groupName = String(rr.group_name || `กลุ่ม ${cleanId.slice(-6)}`);
-    const isCommandCandidate = /สายตรวจ|สนง|สำนักงาน|COP|Command|ศูนย์/i.test(groupName);
-    allFoundGroups.push({
-      groupId: cleanId,
-      groupName,
-      pictureUrl: rr.picture_url ? String(rr.picture_url) : null,
-      lastSeenAt: rr.last_seen_at ? String(rr.last_seen_at) : null,
-      eventCount: 0,
-      isCommandCandidate,
-    });
-  }
-
-  allFoundGroups.sort((a, b) => Number(b.isCommandCandidate) - Number(a.isCommandCandidate) || String(b.lastSeenAt || "").localeCompare(String(a.lastSeenAt || "")));
-
-  return allFoundGroups;
-}
-
-// ============================================================================
-// SMART INCIDENT & LEAVE DETECTION ENGINE (ระบบตรวจจับการแจ้งลา เข้าสาย และเหตุผิดปกติ)
-// ============================================================================
-
-export type IncidentDetectionResult = {
-  detected: boolean;
-  category?: "leave" | "late" | "incident";
-  categoryLabel?: string;
-  title?: string;
-  matchedKeywords: string[];
-  severity: "critical" | "warning" | "info";
-};
-
-export function detectSpecialIncidentsAndLeave(rawText: string): IncidentDetectionResult {
-  if (!rawText) return { detected: false, matchedKeywords: [], severity: "info" };
-
-  const text = rawText.trim();
-
-  // -------------------------------------------------------------
-  // STEP 1: กรองคำที่กำกวมออกอย่างหมดจด (Anti-False-Positive Filter)
-  // ตัดคำว่า "เวลา", "วลา", "เว ลา", "ตรงเวลา", "ตามเวลา", "ลานจอด", "ศาลา", "ล่วงเวลา (OT)"
-  // -------------------------------------------------------------
-  const sanitizedText = text
-    .replace(/(?:ตรง|ตาม|ถึง|เกิน|หมด|ล่วง|เวลา|เว\s*ลา|วลา)\s*เวลา/gi, " ")
-    .replace(/เวลา|เว\s*ลา|วลา/gi, " ")
-    .replace(/ลาน(?:จอด|จอดรถ|หน้า|หลัง|กว้าง|ปูน|ดิน|อเนกประสงค์|เท|ตา)?/gi, " ")
-    .replace(/ศาลา|วิลล่า|พลาซ่า|พาลาเดียม|คลาสสิค|พลาสติก|พาสปอร์ต|ซาลาเปา|ดอลลาร์|สลาก|วาเลนไทน์|ลากูน|ลาวา|ลาบ|ลาเต้|ช็อกโกแลต|โคล่า|มิลลิลิตร|กิโลลิตร|กุหลาบ|กลาสี|เพลา|สลัก|สลัว/gi, " ");
-
-  // -------------------------------------------------------------
-  // STEP 2: ตรวจจับหมวด 1 - เหตุฉุกเฉิน / เหตุไม่ปกติ (Emergency & Incident)
-  // -------------------------------------------------------------
-  const incidentKeywords = [
-    // อัคคีภัย / ไฟฟ้า / สาธารณูปโภค
-    "เหตุฉุกเฉิน", "เพลิงไหม้", "ไฟไหม้", "ควันไฟ", "ได้กลิ่นไหม้", "มีกลิ่นไหม้",
-    "ไฟดับ", "ไฟฟ้าลัดวงจร", "ไฟช็อต", "แก๊สรั่ว", "น้ำท่วม", "น้ำรั่วหนัก", "ท่อแตก", "น้ำล้น",
-    // อาชญากรรม / ความปลอดภัย
-    "ขโมย", "คนร้าย", "โจร", "งัดแงะ", "ขโมยของ", "ของหาย", "ทรัพย์สินเสียหาย",
-    "มีปากเสียง", "ทะเลาะวิวาท", "ตีกัน", "ทำร้ายร่างกาย", "เมาอาละวาด", "คนเมา",
-    "มีคนบุกรุก", "ผู้บุกรุก", "คนแปลกหน้า", "ปีนรั้ว", "ลักลอบเข้า", "พกอาวุธ", "มีมีด", "มีปืน",
-    // การแพทย์ / กู้ภัย
-    "เรียกรถพยาบาล", "กู้ภัย", "พบผู้บาดเจ็บ", "ผู้บาดเจ็บ", "มีคนเป็นลม", "หมดสติ",
-    "หัวใจวาย", "เสียชีวิต", "พบศพ", "ชีพจรหยุด", "ขอ ว.8", "ขอกำลังเสริม", "ขอความช่วยเหลือด่วน", "แจ้งตำรวจ", "แจ้ง 191"
-  ];
-  const matchedIncidents = incidentKeywords.filter((k) => text.includes(k));
-  if (matchedIncidents.length > 0) {
-    return {
-      detected: true,
-      category: "incident",
-      categoryLabel: "🔥 แจ้งเหตุด่วน / ไม่ปกติ",
-      title: `เหตุด่วน: ${matchedIncidents.join(", ")}`,
-      matchedKeywords: matchedIncidents,
-      severity: "critical",
-    };
-  }
-
-  // -------------------------------------------------------------
-  // STEP 3: ตรวจจับหมวด 2 - แจ้งลาป่วย / ลากิจ / ยกเวร (Leave & Absence)
-  // -------------------------------------------------------------
-  const leavePatterns = [
-    // รูปแบบการลาชัดเจน
-    /ขอลา(?:ป่วย|กิจ|พักร้อน|ฉุกเฉิน|หยุด|งาน|บวช|คลอด|แต่งงาน|ตาย|ฌาปนกิจ|ดูแล(?:แม่|พ่อ|ลูก))?/i,
-    /ลา(?:ป่วย|กิจ|พักร้อน|ฉุกเฉิน|หยุด|งาน|บวช|คลอด|แต่งงาน|ตาย|ฌาปนกิจ|ดูแล(?:แม่|พ่อ|ลูก))/i,
-    /ขอยกเวร|ขอแลกเวร|ขอสลับเวร|แลกเวร|สลับเวร|ขอนอนเวร|ขอเปลี่ยนกะ|เปลี่ยนกะ/i,
-    /ขอหยุดงาน|ขอหยุด|หยุดงาน|หยุดกะนี้|หยุด\s*\d+\s*วัน/i,
-    // สุขภาพและการเจ็บป่วย
-    /ไม่สบาย(?:ขอลา|ไปไม่ไหว|เข้าเวรไม่ได้|มาไม่ได้|ขอนอนพัก)?/i,
-    /ป่วย(?:ขอลา|ไปไม่ไหว|เข้าเวรไม่ได้|มาไม่ได้)?/i,
-    /ไข้ขึ้น|ปวดหัวตัวร้อน|ปวดท้อง|ท้องเสีย|อาหารเป็นพิษ|เข้า\s*รพ|เข้าโรงพยาบาล|หาหมอ|พบแพทย์|หมอนัด/i,
-    /แอดมิท|admit|ให้น้ำเกลือ|ผ่าตัด|ติดโควิด|ตรวจ atk|ใบรับรองแพทย์/i,
-    // ธุระจำเป็นและเหตุสุดวิสัย
-    /ติดธุระ(?:ด่วน)?(?:ไปไม่ได้|เข้าเวรไม่ได้|มาไม่ได้)?/i,
-    /ติดงานศพ|ติดงานแต่ง|ติดธุระที่บ้าน|ติดธุระต่างจังหวัด|กลับต่างจังหวัด|กลับบ้านด่วน/i,
-    /น้ำท่วมบ้านมาไม่ได้|รถเสียมาไม่ได้|เกิดอุบัติเหตุมาไม่ได้/i,
-    // สภาพความไม่พร้อม
-    /ไปไม่ไหว|มาไม่ไหว|ไม่พร้อมทำงาน|ไม่ได้ไปเข้าเวร|เข้าเวรไม่ได้|ไปทำงานไม่ได้|ไม่สามารถไปได้|ขอตัวไม่เข้าเวร/i,
-    /ขอลา\s*(?:\d+|ครึ่ง|1)\s*วัน/i,
-  ];
-
-  const matchedLeave: string[] = [];
-  for (const pattern of leavePatterns) {
-    const match = sanitizedText.match(pattern);
-    if (match) {
-      matchedLeave.push(match[0]);
-    }
-  }
-
-  // ดักจับคำว่า "ลา" โดดๆ ที่เหลืออยู่ในข้อความหลังตัดคำกำกวมแล้ว
-  if (matchedLeave.length === 0 && /(?:^|\s|[^\u0E00-\u0E7F])ลา(?:[^\u0E00-\u0E7F]|\s|$)/i.test(sanitizedText)) {
-    matchedLeave.push("ลา");
-  }
-
-  if (matchedLeave.length > 0) {
-    return {
-      detected: true,
-      category: "leave",
-      categoryLabel: "🏥 แจ้งลาป่วย / ลากิจ (ต้องการสแปร์)",
-      title: `แจ้งลา: ${matchedLeave.join(", ")}`,
-      matchedKeywords: matchedLeave,
-      severity: "critical",
-    };
-  }
-
-  // -------------------------------------------------------------
-  // STEP 4: ตรวจจับหมวด 3 - แจ้งเข้าสาย / มาช้า (Late Notice)
-  // -------------------------------------------------------------
-  const latePatterns = [
-    /ขอเข้าสาย|ขอมาสาย|เข้าสาย|มาสาย|ขอสายหน่อย|สายหน่อย|สายแป๊บ|สายสักครู่/i,
-    /ขอเลท|เลทหน่อย|เลทสักครู่|ขอเข้าช้า|เข้าช้า|มาช้า|มาช้าหน่อย|ช้าหน่อย|ช้ากว่ากำหนด/i,
-    /รถติด|รถติดมาก|ติดฝน|ฝนตกหนักติดฝน|ยางแตก|น้ำมันหมด|รถล้ม|เกิดอุบัติเหตุระหว่างทาง|ตำรวจเรียก|เจอด่าน/i,
-    /เข้าสาย\s*\d+\s*นาที|มาช้า\s*\d+\s*นาที|เลท\s*\d+\s*นาที|เข้าช้า\s*\d+\s*นาที|สายครึ่งชั่วโมง/i,
-  ];
-
-  const matchedLate: string[] = [];
-  for (const pattern of latePatterns) {
-    const match = text.match(pattern);
-    if (match) {
-      matchedLate.push(match[0]);
-    }
-  }
-
-  if (matchedLate.length > 0) {
-    return {
-      detected: true,
-      category: "late",
-      categoryLabel: "⏳ แจ้งเข้าสาย / มาช้า",
-      title: `แจ้งเข้าสาย: ${matchedLate.join(", ")}`,
-      matchedKeywords: matchedLate,
-      severity: "warning",
-    };
-  }
-
-  return { detected: false, matchedKeywords: [], severity: "info" };
-}
-
-export async function sendIncidentAlertToCommandRoom(input: {
-  siteName: string;
-  postName?: string;
-  category: "leave" | "late" | "incident";
-  title: string;
-  senderText: string;
-  senderName?: string;
-  senderKey?: string;
-  groupId: string;
-}) {
-  await ensureDatabase();
-  const db = database();
-  const now = bangkokNow();
-  const today = now.date;
-  const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
-
-  const settings = await getLineReminderSettings();
-  const targetGroupId = settings.targetGroupId;
-  if (!targetGroupId || !token) return { ok: false, message: "No command group or token" };
-
-  const isEmergency = input.category === "incident";
-  const isLeave = input.category === "leave";
-
-  const headerBgColor = isEmergency ? "#dc2626" : isLeave ? "#ea580c" : "#d97706";
-  const headerIcon = isEmergency ? "🔥" : isLeave ? "🏥" : "⏳";
-  const headerTitle = isEmergency ? "แจ้งเหตุด่วน / ไม่ปกติ" : isLeave ? "แจ้งลาป่วย / ลากิจ (ต้องการสแปร์)" : "แจ้งเข้าสาย / มาช้า";
-
-  // If leave detected on active shift, mark today's slot as replacement_required
-  if (isLeave) {
-    const currentHour = Number(now.time.slice(0, 2));
-    const currentWave = currentHour >= 16 || currentHour < 5 ? "evening" : "morning";
-    await db.prepare(`
-      UPDATE coverage_slots 
-      SET state = 'replacement_required',
-          source = ?,
-          updated_at = ?
-      WHERE operational_date = ? AND site_name = ? AND wave = ?
-    `).bind(`แจ้งลาในกลุ่มไลน์: ${input.senderText.slice(0, 50)}`, now.iso, today, input.siteName, currentWave).run().catch(() => {});
-  }
-
-  // Build Flex Card Alert for Command Room
-  const flexCard = {
-    type: "bubble",
-    size: "mega",
-    header: {
-      type: "box",
-      layout: "vertical",
-      backgroundColor: headerBgColor,
-      paddingAll: "16px",
-      contents: [
-        {
-          type: "text",
-          text: `${headerIcon} [ศูนย์สั่งการ] ${headerTitle}`,
-          weight: "bold",
-          color: "#ffffff",
-          size: "md",
-        },
-        {
-          type: "text",
-          text: `🏢 จุดตรวจ: ${input.siteName}${input.postName ? ` (${input.postName})` : ""}`,
-          color: "#ffffff",
-          size: "sm",
-          weight: "bold",
-          margin: "xs",
-        },
-      ],
-    },
-    body: {
-      type: "box",
-      layout: "vertical",
-      paddingAll: "14px",
-      contents: [
-        {
-          type: "box",
-          layout: "vertical",
-          backgroundColor: "#f8fafc",
-          paddingAll: "10px",
-          cornerRadius: "8px",
-          borderColor: "#e2e8f0",
-          borderWidth: "1px",
-          contents: [
-            {
-              type: "text",
-              text: `👤 ผู้แจ้ง: ${input.senderName || "รปภ. ประจำจุด"}`,
-              size: "xs",
-              color: "#64748b",
-              weight: "bold",
-            },
-            {
-              type: "text",
-              text: `💬 "${input.senderText}"`,
-              size: "sm",
-              color: "#0f172a",
-              weight: "bold",
-              wrap: true,
-              margin: "xs",
-            },
-            {
-              type: "text",
-              text: `⏰ เวลาที่พิมพ์แจ้ง: ${now.time} น. (${today})`,
-              size: "xxs",
-              color: "#94a3b8",
-              margin: "xs",
-            },
-          ],
-        },
-      ],
-    },
-    footer: {
-      type: "box",
-      layout: "horizontal",
-      spacing: "sm",
-      paddingAll: "10px",
-      contents: [
-        {
-          type: "button",
-          action: {
-            type: "uri",
-            label: "📱 เปิดแผงตรวจมือถือ",
-            uri: "https://alpha-command-center-1--alphacommandcenter-d3341.asia-southeast1.hosted.app/?tab=patrol",
-          },
-          style: "primary",
-          color: "#0284c7",
-          height: "sm",
-        },
-      ],
-    },
-  };
-
-  const textSummary = [
-    `🚨 [ศูนย์สั่งการ] ${headerTitle}`,
-    `🏢 จุด: ${input.siteName}`,
-    `👤 ผู้แจ้ง: ${input.senderName || "รปภ. ประจำจุด"}`,
-    `💬 ข้อความ: "${input.senderText}"`,
-    `⏰ เวลา: ${now.time} น.`,
-  ].join("\n");
-
-  try {
-    const res = await fetch("https://api.line.me/v2/bot/message/push", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        to: targetGroupId,
-        messages: [{
-          type: "flex",
-          altText: textSummary,
-          contents: flexCard,
-        }],
-      }),
-    });
-
-    if (!res.ok) {
-      await pushLineText(targetGroupId, textSummary, token);
-    }
-  } catch {
-    await pushLineText(targetGroupId, textSummary, token);
-  }
-
-  await addAudit(
-    "incident_alert",
-    input.groupId,
-    `incident_detected_${input.category}`,
-    input.senderName || "LINE Webhook",
-    `ตรวจพบการแจ้ง ${input.title} จากจุด ${input.siteName} ข้อความ: "${input.senderText}"`
-  );
-
-  return { ok: true, sent: true };
-}
-
 // -------------------------------------------------------------
 // GUARD DIRECTORY & MULTI-GUARD PROFILES
 // -------------------------------------------------------------
@@ -3800,21 +3380,33 @@ export type GuardProfile = {
   updatedAt: string;
 };
 
+export async function purgePlaceholderGuardProfiles(actor = "admin"): Promise<{
+  ok: boolean;
+  purgedCount: number;
+  message: string;
+}> {
+  await ensureDatabase();
+  const db = database();
+  const res = await db.prepare(`
+    DELETE FROM guard_profiles 
+    WHERE guard_name LIKE 'รปภ. ประจำ%' 
+       OR guard_name LIKE 'รปภ. สแปร์กลาง%'
+       OR id LIKE 'guard-line-point-%'
+       OR (guard_name LIKE 'รปภ. (U-%' AND (display_name IS NULL OR display_name = ''))
+       OR (guard_name LIKE 'รปภ. LINE (%' AND (display_name IS NULL OR display_name = ''))
+  `).run();
+
+  await addAudit("guard_profile", "all_placeholders", "purge", actor, `โละล้างข้อมูลจำลอง รปภ. เก่าทั้งหมด (${res.changes} รายการ)`);
+  return {
+    ok: true,
+    purgedCount: res.changes,
+    message: `โละล้างข้อมูลจำลองสำเร็จ ${res.changes} รายการ เพื่อเตรียมรับโปรไฟล์ LINE จริง`,
+  };
+}
+
 export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]> {
   await ensureDatabase();
   const db = database();
-
-  let countCheck = await db.prepare("SELECT COUNT(*) AS count FROM guard_profiles WHERE active = 1").first<{ count: number }>();
-  if ((countCheck?.count ?? 0) === 0) {
-    await autoSyncGuardsFromLine("auto_init");
-  } else {
-    // ล้างชื่อจำลองที่อาจค้างอยู่ในฐานข้อมูลให้เป็นชื่อ LINE จริงหรือรหัส
-    await db.prepare(`
-      UPDATE guard_profiles
-      SET guard_name = 'รปภ. LINE (' || substr(id, 1, 8) || ')'
-      WHERE guard_name LIKE 'นาย%' AND (display_name LIKE 'U-%' OR display_name LIKE 'guard-%' OR display_name IS NULL)
-    `).run().catch(() => {});
-  }
 
   let query = `
     SELECT gp.*, os.site_name
@@ -3835,18 +3427,18 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
 
   const rows = (await db.prepare(query).bind(...params).all<any>()).results || [];
   return rows.map((r: any) => {
-    const rawGroupName = String(r.site_name || `จุดประจำ`);
-    const cleanGroupName = rawGroupName.replace(/^(รปภ\.|กลุ่ม\s*รปภ\.|งาน\s*รปภ\.)\s*/i, "").trim();
-    let displayGuardName = String(r.guard_name);
-    if (!displayGuardName || displayGuardName.startsWith("รปภ. LINE (U-") || displayGuardName.startsWith("รปภ. (U-") || displayGuardName.startsWith("รปภ. (รหัส U-") || displayGuardName.startsWith("นาย") || displayGuardName.startsWith("รปภ. LINE (")) {
-      displayGuardName = r.role === "spare" || r.site_id === "all" ? `รปภ. สแปร์กลาง (${cleanGroupName})` : `รปภ. ประจำ ${cleanGroupName}`;
+    let displayGuardName = String(r.guard_name || "").trim();
+    const rawDisplayName = String(r.display_name || "").trim();
+
+    if (!displayGuardName && rawDisplayName) {
+      displayGuardName = rawDisplayName;
     }
 
     return {
       id: String(r.id),
       siteId: String(r.site_id),
       siteName: r.site_id === "all" ? "🌐 สแปร์กลาง (ทุกจุด)" : (r.site_name ? String(r.site_name) : undefined),
-      guardName: displayGuardName,
+      guardName: displayGuardName || `ผู้ส่ง (${String(r.id).slice(-6)})`,
       displayName: r.display_name ? String(r.display_name) : null,
       pictureUrl: r.picture_url ? String(r.picture_url) : null,
       phoneNumber: r.phone_number ? String(r.phone_number) : null,
@@ -3864,8 +3456,8 @@ export async function saveGuardProfile(data: {
   siteId: string;
   guardName: string;
   displayName?: string;
-  pictureUrl?: string;
-  phoneNumber?: string;
+  pictureUrl?: string | null;
+  phoneNumber?: string | null;
   preferredShift?: string;
   role?: string;
   active?: number;
@@ -3885,7 +3477,12 @@ export async function saveGuardProfile(data: {
       picture_url = COALESCE(excluded.picture_url, guard_profiles.picture_url),
       phone_number = excluded.phone_number,
       preferred_shift = excluded.preferred_shift,
-      role = excluded.role,
+      role = CASE 
+        WHEN guard_profiles.role = 'employer' AND excluded.role = 'regular' THEN 'employer'
+        WHEN guard_profiles.role = 'spare' AND excluded.role = 'regular' THEN 'spare'
+        WHEN guard_profiles.role = 'head_guard' AND excluded.role = 'regular' THEN 'head_guard'
+        ELSE COALESCE(excluded.role, guard_profiles.role, 'regular')
+      END,
       active = excluded.active,
       updated_at = excluded.updated_at
   `).bind(
@@ -3953,7 +3550,7 @@ export async function getRecentWebhookSenders(options?: number | {
 
   let query = `
     SELECT 
-      lwe.sender_key, 
+      COALESCE(NULLIF(lwe.raw_user_id, ''), NULLIF(lwe.sender_key, '')) as sender_key,
       lwe.group_id, 
       COALESCE(lgr.group_name, lg.group_name, lwe.group_id) as group_name,
       lg.site_id,
@@ -3964,13 +3561,15 @@ export async function getRecentWebhookSenders(options?: number | {
       COUNT(lwe.id) as message_count,
       gp.id as guard_id,
       gp.guard_name,
+      gp.display_name,
+      gp.picture_url,
       gp.role
     FROM line_webhook_events lwe
     LEFT JOIN line_group_registry lgr ON lwe.group_id = lgr.id
     LEFT JOIN line_groups lg ON lwe.group_id = lg.id
     LEFT JOIN operational_sites os ON lg.site_id = os.id
-    LEFT JOIN guard_profiles gp ON (gp.display_name = lwe.sender_key OR gp.id = lwe.sender_key) AND gp.active = 1
-    WHERE lwe.sender_key IS NOT NULL AND lwe.sender_key != ''
+    LEFT JOIN guard_profiles gp ON (gp.id = lwe.raw_user_id OR gp.id = lwe.sender_key OR gp.display_name = lwe.raw_user_id OR gp.display_name = lwe.sender_key) AND gp.active = 1
+    WHERE (lwe.raw_user_id IS NOT NULL AND lwe.raw_user_id != '') OR (lwe.sender_key IS NOT NULL AND lwe.sender_key != '')
   `;
   const params: any[] = [];
 
@@ -3984,7 +3583,7 @@ export async function getRecentWebhookSenders(options?: number | {
   }
 
   query += `
-    GROUP BY lwe.sender_key, lwe.group_id
+    GROUP BY COALESCE(NULLIF(lwe.raw_user_id, ''), NULLIF(lwe.sender_key, '')), lwe.group_id
     ORDER BY last_seen_at DESC
     LIMIT ?
   `;
@@ -3993,17 +3592,18 @@ export async function getRecentWebhookSenders(options?: number | {
   const rows = (await db.prepare(query).bind(...params).all<any>()).results || [];
 
   return rows.map((r: any) => {
-    const rawGroupName = String(r.site_name || r.group_name || `กลุ่ม ${r.group_id.slice(-6)}`);
-    const cleanGroupName = rawGroupName.replace(/^(รปภ\.|กลุ่ม\s*รปภ\.|งาน\s*รปภ\.)\s*/i, "").trim();
-    let displayGuardName = r.guard_name;
-    if (!displayGuardName || displayGuardName.startsWith("รปภ. LINE (U-") || displayGuardName.startsWith("รปภ. (U-") || displayGuardName.startsWith("รปภ. (รหัส U-") || displayGuardName.startsWith("นาย")) {
-      displayGuardName = `รปภ. ประจำ ${cleanGroupName}`;
+    let cleanGuardName: string | undefined = undefined;
+    if (r.guard_name && !r.guard_name.startsWith("รปภ. ประจำ ") && !r.guard_name.startsWith("รปภ. สแปร์กลาง ") && !/^U-[A-F0-9]{16}$/i.test(r.guard_name) && !/^U[0-9a-fA-F]{32}$/i.test(r.guard_name)) {
+      cleanGuardName = String(r.guard_name).trim();
+    } else if (r.display_name && !/^U-[A-F0-9]{16}$/i.test(r.display_name) && !/^U[0-9a-fA-F]{32}$/i.test(r.display_name)) {
+      cleanGuardName = String(r.display_name).trim();
     }
 
     return {
       senderKey: String(r.sender_key),
+      rawUserId: r.sender_key?.startsWith("U") && r.sender_key.length === 33 ? r.sender_key : undefined,
       groupId: String(r.group_id),
-      groupName: String(r.group_name || `กลุ่ม ${r.group_id.slice(-6)}`),
+      groupName: String(r.group_name || `กลุ่ม ${String(r.group_id).slice(-6)}`),
       siteId: r.site_id ? String(r.site_id) : undefined,
       siteName: r.site_name ? String(r.site_name) : undefined,
       lastSeenAt: String(r.last_seen_at),
@@ -4011,7 +3611,9 @@ export async function getRecentWebhookSenders(options?: number | {
       lastSummary: r.last_summary ? String(r.last_summary) : undefined,
       messageCount: Number(r.message_count || 1),
       isBound: Boolean(r.guard_id),
-      guardName: displayGuardName,
+      guardName: cleanGuardName,
+      displayName: r.display_name ? String(r.display_name) : undefined,
+      pictureUrl: r.picture_url ? String(r.picture_url) : undefined,
       role: r.role ? String(r.role) : undefined,
     };
   });
@@ -4024,20 +3626,130 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
   updatedGuards: number;
   sparesDetected: number;
   profilesFetched: number;
+  groupsScanned: number;
   message: string;
 }> {
   await ensureDatabase();
   const db = database();
   const now = bangkokNow().iso;
 
-  // --- Resolve LINE token for profile API calls ---
-  const tokenSetting = await db.prepare("SELECT value FROM system_settings WHERE key = 'line_channel_access_token'").first<D1Row>();
-  const lineToken = (tokenSetting?.value ? String(tokenSetting.value).trim() : null) || lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
+  // --- 1. Resolve LINE token for profile API calls ---
+  const lineToken = await getEffectiveLineToken();
 
-  // 1. ดึงผู้ส่งรายงานทั้งหมดจาก webhook events
+  const profileCache = new Map<string, { displayName: string; pictureUrl: string | null; source: string }>();
+  let profilesFetched = 0;
+  let groupsScanned = 0;
+
+  // Track discovered guards: key = guard unique id (userId, senderKey, or rosterId) -> details
+  const discoveredGuards = new Map<string, {
+    id: string;
+    groupIds: Set<string>;
+    siteIds: Set<string>;
+    siteName?: string;
+    groupName?: string;
+    guardName?: string;
+    displayName?: string;
+    pictureUrl?: string | null;
+    source: string;
+  }>();
+
+  // --- 2. Query all known LINE groups ---
+  const knownGroups = (await db.prepare(`
+    SELECT r.id, r.group_name, r.picture_url, m.site_id, os.site_name
+    FROM line_group_registry r
+    LEFT JOIN line_groups m ON m.id = r.id
+    LEFT JOIN operational_sites os ON m.site_id = os.id
+  `).all<any>()).results || [];
+
+  // --- 3. Strategy A: Direct Group Members API (GET /v2/bot/group/{groupId}/members/ids) ---
+  if (lineToken) {
+    for (const grp of knownGroups) {
+      const groupId = String(grp.id).trim();
+      if (!groupId || !groupId.startsWith("C")) continue;
+      groupsScanned++;
+
+      let nextContinuationToken: string | undefined = undefined;
+      let groupMemberCount = 0;
+
+      // Loop to fetch all member IDs with continuation token (up to 300 members per group)
+      do {
+        try {
+          const url: string = `https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/members/ids${nextContinuationToken ? `?start=${encodeURIComponent(nextContinuationToken)}` : ""}`;
+          const res = await fetch(url, {
+            headers: { Authorization: `Bearer ${lineToken}` },
+          });
+
+          if (res.ok) {
+            const data = (await res.json()) as { memberIds?: string[]; next?: string };
+            const memberIds = data.memberIds || [];
+            nextContinuationToken = data.next;
+
+            for (const memberId of memberIds) {
+              const uId = String(memberId).trim();
+              if (!uId) continue;
+              groupMemberCount++;
+
+              // Fetch member profile from group endpoint
+              if (!profileCache.has(uId)) {
+                try {
+                  const pRes = await fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/member/${encodeURIComponent(uId)}`, {
+                    headers: { Authorization: `Bearer ${lineToken}` },
+                  });
+                  if (pRes.ok) {
+                    const pJson = (await pRes.json()) as any;
+                    if (pJson.displayName) {
+                      profileCache.set(uId, {
+                        displayName: String(pJson.displayName),
+                        pictureUrl: pJson.pictureUrl ? String(pJson.pictureUrl) : null,
+                        source: "line_group_member_api",
+                      });
+                      profilesFetched++;
+                    }
+                  }
+                } catch {}
+              }
+
+              const profile = profileCache.get(uId);
+              const targetSiteId = grp.site_id || linePointSiteIdentifier(groupId);
+
+              const existing = discoveredGuards.get(uId) || {
+                id: uId,
+                groupIds: new Set<string>(),
+                siteIds: new Set<string>(),
+                siteName: grp.site_name,
+                groupName: grp.group_name,
+                guardName: profile?.displayName || `รปภ. (${uId.slice(-6)})`,
+                displayName: profile?.displayName || uId,
+                pictureUrl: profile?.pictureUrl || null,
+                source: "line_group_members",
+              };
+
+              existing.groupIds.add(groupId);
+              existing.siteIds.add(targetSiteId);
+              if (profile?.displayName) {
+                existing.guardName = profile.displayName;
+                existing.displayName = profile.displayName;
+                existing.pictureUrl = profile.pictureUrl || existing.pictureUrl;
+              }
+              discoveredGuards.set(uId, existing);
+            }
+          } else {
+            // 403 Forbidden means unverified account -> fall back to webhook events & roster
+            break;
+          }
+        } catch {
+          break;
+        }
+      } while (nextContinuationToken && groupMemberCount < 300);
+    }
+  }
+
+  // --- 4. Strategy B: Webhook Event Senders (All unique senders in DB) ---
   const sendersResult = await db.prepare(`
     SELECT 
-      lwe.sender_key, 
+      COALESCE(NULLIF(lwe.raw_user_id, ''), NULLIF(lwe.sender_key, '')) as sender_id,
+      lwe.raw_user_id,
+      lwe.sender_key,
       lwe.group_id, 
       COALESCE(lgr.group_name, lg.group_name, lwe.group_id) as group_name,
       lg.site_id,
@@ -4048,96 +3760,142 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
     LEFT JOIN line_group_registry lgr ON lwe.group_id = lgr.id
     LEFT JOIN line_groups lg ON lwe.group_id = lg.id
     LEFT JOIN operational_sites os ON lg.site_id = os.id
-    WHERE lwe.sender_key IS NOT NULL AND lwe.sender_key != ''
-    GROUP BY lwe.sender_key, lwe.group_id
+    WHERE (lwe.raw_user_id IS NOT NULL AND lwe.raw_user_id != '') 
+       OR (lwe.sender_key IS NOT NULL AND lwe.sender_key != '')
+    GROUP BY COALESCE(NULLIF(lwe.raw_user_id, ''), NULLIF(lwe.sender_key, '')), lwe.group_id
   `).all<D1Row>();
 
   const senders = (sendersResult.results || []) as any[];
-  const senderGroupsMap = new Map<string, any[]>();
+
+  // For any senders with real raw_user_id (or 33-character sender_key starting with U)
+  const sendersToFetch: { groupId: string; rawUserId: string }[] = [];
   for (const s of senders) {
-    const list = senderGroupsMap.get(String(s.sender_key)) || [];
-    list.push(s);
-    senderGroupsMap.set(String(s.sender_key), list);
+    const rawUid = String(s.raw_user_id || s.sender_id || "").trim();
+    if (rawUid.startsWith("U") && rawUid.length >= 30 && !profileCache.has(rawUid)) {
+      sendersToFetch.push({ groupId: String(s.group_id), rawUserId: rawUid });
+    }
   }
 
-  // --- LINE Profile Cache: fetch real displayName + pictureUrl via LINE API ---
-  const profileCache = new Map<string, { displayName: string; pictureUrl: string | null }>();
-  let profilesFetched = 0;
+  if (lineToken && sendersToFetch.length > 0) {
+    const batchSize = 10;
+    for (let i = 0; i < sendersToFetch.length; i += batchSize) {
+      const batch = sendersToFetch.slice(i, i + batchSize);
+      await Promise.allSettled(
+        batch.map(async ({ groupId, rawUserId }) => {
+          try {
+            let res = await fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/member/${encodeURIComponent(rawUserId)}`, {
+              headers: { Authorization: `Bearer ${lineToken}` },
+            });
+            if (!res.ok) {
+              res = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(rawUserId)}`, {
+                headers: { Authorization: `Bearer ${lineToken}` },
+              });
+            }
+            if (res.ok) {
+              const pJson = (await res.json()) as any;
+              if (pJson.displayName) {
+                profileCache.set(rawUserId, {
+                  displayName: String(pJson.displayName),
+                  pictureUrl: pJson.pictureUrl ? String(pJson.pictureUrl) : null,
+                  source: "line_webhook_profile",
+                });
+                profilesFetched++;
+              }
+            }
+          } catch {}
+        })
+      );
+    }
+  }
 
-  if (lineToken) {
-    // Collect unique (groupId, senderKey) pairs for API calls
-    const apiCalls: { groupId: string; senderKey: string }[] = [];
-    for (const [senderKey, groupList] of senderGroupsMap.entries()) {
-      // Use first group to fetch profile (any group the user is in works)
-      if (groupList.length > 0) {
-        apiCalls.push({ groupId: String(groupList[0].group_id), senderKey });
+  for (const s of senders) {
+    const sId = String(s.sender_id || s.raw_user_id || s.sender_key || "").trim();
+    if (!sId) continue;
+    const rawUid = String(s.raw_user_id || (sId.startsWith("U") && sId.length >= 30 ? sId : "")).trim();
+    const lineProfile = rawUid ? profileCache.get(rawUid) : undefined;
+    const targetSiteId = s.site_id || linePointSiteIdentifier(s.group_id);
+
+    const rawGroupName = String(s.site_name || s.group_name || `จุด ${String(s.group_id).slice(-6)}`);
+    const cleanGroupName = rawGroupName.replace(/^(รปภ\.|กลุ่ม\s*รปภ\.|งาน\s*รปภ\.)\s*/i, "").trim();
+
+    const fallbackGuardName = `รปภ. ประจำ ${cleanGroupName}`;
+    const finalGuardName = lineProfile?.displayName || fallbackGuardName;
+
+    const existing = discoveredGuards.get(sId) || {
+      id: sId,
+      groupIds: new Set<string>(),
+      siteIds: new Set<string>(),
+      siteName: s.site_name,
+      groupName: s.group_name,
+      guardName: finalGuardName,
+      displayName: lineProfile?.displayName || sId,
+      pictureUrl: lineProfile?.pictureUrl || null,
+      source: "webhook_events",
+    };
+
+    existing.groupIds.add(String(s.group_id));
+    existing.siteIds.add(targetSiteId);
+    if (lineProfile?.displayName) {
+      existing.guardName = lineProfile.displayName;
+      existing.displayName = lineProfile.displayName;
+      existing.pictureUrl = lineProfile.pictureUrl || existing.pictureUrl;
+    }
+    discoveredGuards.set(sId, existing);
+  }
+
+  // --- 5. Strategy C: Shift Templates & Coverage Slots Assigned Guards ---
+  const assignedGuards = (await db.prepare(`
+    SELECT DISTINCT site_id, assigned_guard
+    FROM shift_templates
+    WHERE assigned_guard IS NOT NULL AND trim(assigned_guard) != ''
+    UNION
+    SELECT DISTINCT site_id, assigned_guard
+    FROM coverage_slots
+    WHERE assigned_guard IS NOT NULL AND trim(assigned_guard) != ''
+  `).all<any>()).results || [];
+
+  for (const ag of assignedGuards) {
+    const rawName = String(ag.assigned_guard || "").trim();
+    const siteId = String(ag.site_id || "").trim();
+    if (!rawName || rawName.startsWith("รปภ. ประจำ") || rawName.startsWith("รปภ. สแปร์") || !siteId) continue;
+
+    // Check if this guard name already exists in discovered guards
+    let matched = false;
+    for (const g of discoveredGuards.values()) {
+      if (g.guardName === rawName || g.displayName === rawName) {
+        g.siteIds.add(siteId);
+        matched = true;
+        break;
       }
     }
 
-    // Fetch profiles in parallel batches of 10 (avoid rate limit)
-    const batchSize = 10;
-    for (let i = 0; i < apiCalls.length; i += batchSize) {
-      const batch = apiCalls.slice(i, i + batchSize);
-      const results = await Promise.allSettled(
-        batch.map(async ({ groupId, senderKey }) => {
-          try {
-            const res = await fetch(
-              `https://api.line.me/v2/bot/group/${groupId}/member/${senderKey}`,
-              { headers: { Authorization: `Bearer ${lineToken}` } }
-            );
-            if (res.ok) {
-              const profile = await res.json() as any;
-              if (profile.displayName) {
-                profileCache.set(senderKey, {
-                  displayName: String(profile.displayName),
-                  pictureUrl: profile.pictureUrl ? String(profile.pictureUrl) : null,
-                });
-                return true;
-              }
-            }
-            return false;
-          } catch {
-            return false;
-          }
-        })
-      );
-      profilesFetched += results.filter(r => r.status === "fulfilled" && r.value === true).length;
+    if (!matched) {
+      const guardId = `guard-${siteId}-${rawName.replace(/[^a-zA-Z0-9ก-๙]/g, "_").slice(0, 32)}`;
+      discoveredGuards.set(guardId, {
+        id: guardId,
+        groupIds: new Set<string>(),
+        siteIds: new Set([siteId]),
+        guardName: rawName,
+        displayName: rawName,
+        pictureUrl: "👮‍♂️",
+        source: "shift_roster",
+      });
     }
   }
 
-  let newGuards = 0;
-  let updatedGuards = 0;
+  // --- 6. Write all discovered guards into guard_profiles table ---
   let sparesDetected = 0;
+  let updatedGuards = 0;
   const operations: any[] = [];
 
-  for (const [senderKey, groupList] of senderGroupsMap.entries()) {
-    const isMultiGroup = groupList.length > 1;
-    const primary = groupList[0];
-    const siteId = isMultiGroup ? "all" : (primary.site_id || linePointSiteIdentifier(primary.group_id));
+  for (const guard of discoveredGuards.values()) {
+    const isMultiGroup = guard.groupIds.size > 1 || guard.siteIds.size > 1;
+    const firstSiteId = Array.from(guard.siteIds)[0] || "all";
+    const siteId = isMultiGroup ? "all" : firstSiteId;
     const role = isMultiGroup ? "spare" : "regular";
     if (isMultiGroup) sparesDetected++;
 
-    // --- Use real LINE profile if available, else fallback to group-name-based ---
-    const lineProfile = profileCache.get(senderKey);
-    let finalGuardName: string;
-    let finalDisplayName: string;
-    let finalPictureUrl: string;
-
-    if (lineProfile) {
-      // Real LINE profile data!
-      finalGuardName = lineProfile.displayName;
-      finalDisplayName = lineProfile.displayName;
-      finalPictureUrl = lineProfile.pictureUrl || "👮‍♂️";
-    } else {
-      // Fallback: group-name based placeholder
-      const rawGroupName = String(primary.site_name || primary.group_name || `จุด ${primary.group_id.slice(-6)}`);
-      const cleanGroupName = rawGroupName.replace(/^(รปภ\.|กลุ่ม\s*รปภ\.|งาน\s*รปภ\.)\s*/i, "").trim();
-      finalGuardName = isMultiGroup
-        ? `รปภ. สแปร์กลาง (${cleanGroupName})`
-        : `รปภ. ประจำ ${cleanGroupName}`;
-      finalDisplayName = senderKey;
-      finalPictureUrl = isMultiGroup ? "🌐" : "👮‍♂️";
-    }
+    const displayPicture = guard.pictureUrl || (isMultiGroup ? "🌐" : "👮‍♂️");
 
     operations.push(
       db.prepare(`
@@ -4147,19 +3905,26 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
           ?, ?, ?, ?, ?, NULL, 'all', ?, 1, ?, ?
         )
         ON CONFLICT(id) DO UPDATE SET
-          site_id = excluded.site_id,
-          guard_name = CASE WHEN excluded.guard_name LIKE 'รปภ.%' THEN COALESCE(NULLIF(guard_profiles.guard_name, guard_profiles.id), excluded.guard_name) ELSE excluded.guard_name END,
-          display_name = CASE WHEN excluded.display_name = guard_profiles.id THEN guard_profiles.display_name ELSE excluded.display_name END,
-          picture_url = CASE WHEN excluded.picture_url LIKE 'https://%' THEN excluded.picture_url ELSE COALESCE(NULLIF(guard_profiles.picture_url, '👮‍♂️'), NULLIF(guard_profiles.picture_url, '🌐'), excluded.picture_url) END,
+          site_id = CASE WHEN guard_profiles.site_id != 'all' AND excluded.site_id = 'all' THEN 'all' ELSE COALESCE(NULLIF(guard_profiles.site_id, ''), excluded.site_id) END,
+          guard_name = CASE 
+            WHEN excluded.guard_name NOT LIKE 'รปภ. ประจำ%' AND excluded.guard_name NOT LIKE 'รปภ. สแปร์%' AND excluded.guard_name NOT LIKE 'U-%' AND excluded.guard_name NOT LIKE 'U%'
+            THEN excluded.guard_name
+            ELSE COALESCE(NULLIF(guard_profiles.guard_name, ''), excluded.guard_name)
+          END,
+          display_name = COALESCE(NULLIF(excluded.display_name, ''), guard_profiles.display_name),
+          picture_url = CASE 
+            WHEN excluded.picture_url LIKE 'https://%' THEN excluded.picture_url 
+            ELSE COALESCE(NULLIF(guard_profiles.picture_url, '👮‍♂️'), NULLIF(guard_profiles.picture_url, '🌐'), excluded.picture_url) 
+          END,
           role = CASE WHEN excluded.role = 'spare' THEN 'spare' ELSE guard_profiles.role END,
           active = 1,
           updated_at = excluded.updated_at
       `).bind(
-        senderKey,
+        guard.id,
         siteId,
-        finalGuardName,
-        finalDisplayName,
-        finalPictureUrl,
+        guard.guardName || guard.displayName || `รปภ. (${guard.id.slice(0, 6)})`,
+        guard.displayName || null,
+        displayPicture,
         role,
         now,
         now
@@ -4173,16 +3938,23 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
   }
 
   const total = updatedGuards;
-  await addAudit("guard_profile", "bulk_sync", "auto_sync", actor, `ซิงค์ รปภ. ${total} บัญชี (ดึงโปรไฟล์ LINE จริง ${profilesFetched} คน, สแปร์กลาง ${sparesDetected})`);
+  await addAudit(
+    "guard_profile",
+    "bulk_sync",
+    "auto_sync",
+    actor,
+    `ซิงค์ทำเนียบ รปภ. ${total} บัญชี (ดึงโปรไฟล์ LINE จริง ${profilesFetched} คน, จากกลุ่ม LINE ${groupsScanned} กลุ่ม, สแปร์กลาง ${sparesDetected})`
+  );
 
   return {
     ok: true,
     totalSynced: total,
-    newGuards,
+    newGuards: 0,
     updatedGuards,
     sparesDetected,
     profilesFetched,
-    message: `ซิงค์ รปภ. ครบ ${total} บัญชี — ดึงชื่อ-รูปโปรไฟล์ LINE จริง ${profilesFetched} คน (สแปร์กลาง ${sparesDetected})`,
+    groupsScanned,
+    message: `ซิงค์ทำเนียบ รปภ. สำเร็จ ${total} บัญชี — สแกนกลุ่ม LINE ${groupsScanned} กลุ่ม, ดึงโปรไฟล์ LINE จริงได้ ${profilesFetched} คน (ตรวจพบสแปร์กลาง ${sparesDetected} คน)`,
   };
 }
 

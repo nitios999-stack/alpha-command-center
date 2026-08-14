@@ -20,6 +20,7 @@ type GuardProfile = {
 
 type RecentSender = {
   senderKey: string;
+  rawUserId?: string;
   groupId: string;
   groupName: string;
   siteId?: string;
@@ -30,6 +31,8 @@ type RecentSender = {
   messageCount: number;
   isBound: boolean;
   guardName?: string;
+  displayName?: string;
+  pictureUrl?: string | null;
   role?: string;
 };
 
@@ -82,7 +85,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
       });
       const json = await res.json();
       if (res.ok && json.ok) {
-        setMessage(`🎉 เชื่อมต่อ LINE API สำเร็จ! บอท: ${json.botName || json.basicId} (ระบบกำลังดึงโปรไฟล์ รปภ. ทั้งหมด)`);
+        setMessage(`🎉 เชื่อมต่อ LINE API สำเร็จ! บอท: ${json.botName || json.basicId} (ระบบเริ่มซิงค์โปรไฟล์ LINE จริง)`);
         setTokenInput("");
         setShowTokenSetting(false);
         await checkTokenStatus();
@@ -126,9 +129,8 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
   };
 
   const handleAutoSyncGuards = async () => {
-    if (!confirm("⚡ ต้องการให้ระบบดึงข้อมูล ชื่อ-รูปโปรไฟล์-ไอดี ของ รปภ. ทุกคนที่เคยส่งรายงานในทุกกลุ่ม LINE อัตโนมัติเลยหรือไม่?\n\n(ระบบจะค้นหาและลงทะเบียนให้อัตโนมัติ 100% โดยที่คุณไม่ต้องพิมพ์หรือค้นหาเองเลย)")) return;
     setSyncing(true);
-    setMessage("⏳ กำลังเชื่อมต่อ LINE API และดึงข้อมูล รปภ. จากทุกกลุ่ม...");
+    setMessage("⏳ กำลังเชื่อมต่อ LINE API ดึงชื่อ-รูปโปรไฟล์จริงทุกคนในทุกกลุ่ม LINE...");
     try {
       const res = await fetch("/api/guards", {
         method: "POST",
@@ -149,6 +151,29 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
     setSyncing(false);
   };
 
+  const handlePurgePlaceholders = async () => {
+    if (!confirm("⚠️ ต้องการโละล้างข้อมูลจำลอง/ชื่อชั่วคราวเก่าทั้งหมดใช่หรือไม่?\n\n(ระบบจะลบเฉพาะรายการจำลองที่ชื่อ 'รปภ. ประจำ...' และไอดีตัวอย่าง เพื่อเตรียมรับโปรไฟล์ LINE จริงของทุกคน)")) return;
+    setSyncing(true);
+    try {
+      const res = await fetch("/api/guards", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "wipe_placeholders" }),
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setMessage(`🗑️ ${data.message}`);
+        await loadGuards();
+        onRefresh();
+      } else {
+        setMessage(`❌ ไม่สามารถล้างได้: ${data.error || "เกิดข้อผิดพลาด"}`);
+      }
+    } catch {
+      setMessage("❌ เกิดข้อผิดพลาดในการเชื่อมต่อ");
+    }
+    setSyncing(false);
+  };
+
   useEffect(() => {
     loadGuards();
     checkTokenStatus();
@@ -158,9 +183,9 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
     setEditingGuard(null);
     const initialSite = defaultSiteId || (senderPrefill?.siteId || (sites[0]?.id ?? ""));
     setFormSiteId(initialSite);
-    setFormName(senderPrefill?.guardName || (senderPrefill ? `รปภ. (${senderPrefill.senderKey.slice(0, 6)})` : ""));
-    setFormDisplayName(senderPrefill?.senderKey || "");
-    setFormPictureUrl("");
+    setFormName(senderPrefill?.guardName || (senderPrefill ? (senderPrefill.displayName || `รปภ. (${senderPrefill.senderKey.slice(0, 6)})`) : ""));
+    setFormDisplayName(senderPrefill?.rawUserId || senderPrefill?.senderKey || "");
+    setFormPictureUrl(senderPrefill?.pictureUrl || "");
     setFormPhone("");
     setFormShift(senderPrefill?.role === "spare" ? "all" : "all");
     setFormRole(senderPrefill?.role === "spare" ? "spare" : senderPrefill?.role === "employer" ? "employer" : "regular");
@@ -188,21 +213,25 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
   ) => {
     const siteIdToUse = isGlobalSpare ? "all" : (sender.siteId || formSiteId || sites[0]?.id || "all");
     const roleLabel = isGlobalSpare 
-      ? "สแปร์กลาง (ทุกกลุ่ม)" 
+      ? "สแปร์กลาง (บอทตอบสติกเกอร์)" 
       : role === "employer"
-      ? "นายจ้าง/ผู้ว่าจ้าง (งดตอบสติกเกอร์)"
+      ? "นายจ้าง/ลูกค้า (บอทเงียบ 100%)"
       : role === "spare" 
       ? "สแปร์ประจำจุด" 
       : shift === "morning" 
-      ? "กะเช้า" 
-      : "กะดึก";
-    const defaultName = role === "employer" ? `นายจ้าง (${sender.senderKey.slice(0, 6)})` : `รปภ. ${sender.senderKey.slice(0, 6)}`;
+      ? "รปภ. กะเช้า" 
+      : "รปภ. กะดึก";
+    
+    const resolvedName = sender.guardName || sender.displayName || (role === "employer" ? `นายจ้าง (${sender.senderKey.slice(0, 6)})` : `รปภ. (${sender.senderKey.slice(0, 6)})`);
+    const idToUse = sender.rawUserId || sender.senderKey;
 
     try {
       const payload = {
+        id: idToUse,
         siteId: siteIdToUse,
-        guardName: sender.guardName || defaultName,
-        displayName: sender.senderKey,
+        guardName: resolvedName,
+        displayName: sender.displayName || sender.guardName || resolvedName,
+        pictureUrl: sender.pictureUrl || undefined,
         preferredShift: shift,
         role: isGlobalSpare ? "spare" : role,
       };
@@ -214,7 +243,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
       });
 
       if (res.ok) {
-        setMessage(`ผูก ${sender.senderKey.slice(0, 6)} เป็น ${roleLabel} สำเร็จแล้ว!`);
+        setMessage(`ผูก "${resolvedName}" เป็น ${roleLabel} สำเร็จแล้ว!`);
         loadGuards();
         onRefresh();
       } else {
@@ -223,6 +252,35 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
       }
     } catch {
       alert("เกิดข้อผิดพลาดในการผูกตัวตน");
+    }
+  };
+
+  const handleToggleRole = async (guard: GuardProfile, newRole: "regular" | "spare" | "employer") => {
+    try {
+      const payload = {
+        id: guard.id,
+        siteId: newRole === "spare" ? "all" : guard.siteId,
+        guardName: guard.guardName,
+        displayName: guard.displayName,
+        pictureUrl: guard.pictureUrl,
+        phoneNumber: guard.phoneNumber,
+        preferredShift: guard.preferredShift,
+        role: newRole,
+      };
+
+      const res = await fetch("/api/guards", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        setMessage(`เปลี่ยนบทบาท "${guard.guardName}" เป็น ${newRole === 'employer' ? '👔 นายจ้าง (บอทเงียบ 100%)' : '👮‍♂️ รปภ. (บอทตอบ)'} สำเร็จ`);
+        loadGuards();
+        onRefresh();
+      }
+    } catch {
+      alert("เกิดข้อผิดพลาดในการเปลี่ยนบทบาท");
     }
   };
 
@@ -235,7 +293,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
 
     try {
       const payload = {
-        id: editingGuard?.id,
+        id: editingGuard?.id || formDisplayName.trim() || undefined,
         siteId: formSiteId,
         guardName: formName.trim(),
         displayName: formDisplayName.trim() || undefined,
@@ -253,7 +311,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
 
       if (res.ok) {
         setShowModal(false);
-        setMessage("บันทึกข้อมูล รปภ. เรียบร้อยแล้ว");
+        setMessage("บันทึกข้อมูลเรียบร้อยแล้ว");
         loadGuards();
         onRefresh();
       } else {
@@ -266,7 +324,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
   };
 
   const handleDelete = async (guard: GuardProfile) => {
-    if (!confirm(`ลบหรือปิดใช้งาน รปภ. “${guard.guardName}” ใช่หรือไม่?`)) return;
+    if (!confirm(`ลบหรือปิดใช้งาน “${guard.guardName}” ใช่หรือไม่?`)) return;
     try {
       const res = await fetch(`/api/guards?id=${encodeURIComponent(guard.id)}`, { method: "DELETE" });
       if (res.ok) {
@@ -324,10 +382,10 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.75rem", background: "#0b1220", padding: "1.25rem", borderRadius: "14px", border: "1px solid #1e293b" }}>
         <div>
           <h2 style={{ margin: 0, fontSize: "1.3rem", fontWeight: 800, color: "#ffffff", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <span>👮</span> ทำเนียบ รปภ. ประจำจุด & สแปร์กลาง (Multi-Guard & Global Spare Engine)
+            <span>👮</span> ทำเนียบ รปภ. จริง & คัดแยกนายจ้าง (Smart Profile & Anti-Spam Classification)
           </h2>
           <p style={{ margin: "0.3rem 0 0 0", color: "#94a3b8", fontSize: "0.85rem" }}>
-            จัดการ รปภ. กะเช้า/กะดึก และ <strong>สแปร์กลาง (1 LINE บัญชีเดียวแทนได้ทุกกลุ่ม)</strong> พร้อมระบบดึงชื่อ-รูปจากกลุ่ม LINE สดแบบ 1-Click
+            ดึงโปรไฟล์ LINE จริงเพื่อคัดแยก <strong>รปภ. (บอทตอบสติกเกอร์เข้าเวร)</strong> ออกจาก <strong>นายจ้าง/คนแปลกหน้า (บอทเงียบ 100% ไม่กวนแชท)</strong>
           </p>
         </div>
 
@@ -351,8 +409,30 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
             }}
           >
             <span>{syncing ? "⏳" : "⚡"}</span>
-            <span>{syncing ? "กำลังดึงข้อมูลจาก LINE..." : "ดึงชื่อ-รูป รปภ. ทั้งหมดอัตโนมัติ (1-Click)"}</span>
+            <span>{syncing ? "กำลังดึงโปรไฟล์ LINE..." : "ดึงโปรไฟล์ LINE จริงทุกคน (Live Sync)"}</span>
           </button>
+
+          <button
+            onClick={handlePurgePlaceholders}
+            disabled={syncing}
+            style={{
+              background: "transparent",
+              color: "#f87171",
+              border: "1px solid #dc2626",
+              padding: "0.6rem 0.95rem",
+              borderRadius: "8px",
+              fontWeight: 800,
+              cursor: syncing ? "wait" : "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: "0.4rem",
+              fontSize: "0.88rem",
+            }}
+          >
+            <span>🗑️</span>
+            <span>โละข้อมูลจำลองเก่า (Reset Placeholders)</span>
+          </button>
+
           <button
             onClick={() => setShowTokenSetting((s) => !s)}
             style={{
@@ -370,14 +450,16 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
             }}
           >
             <span>{tokenStatus?.valid ? "🟢" : "🔑"}</span>
-            <span>{tokenStatus?.valid ? `LINE Token: ${tokenStatus.botName || tokenStatus.basicId || "เชื่อมแล้ว"}` : "ตั้งค่า LINE Token (จำเป็น)"}</span>
+            <span>{tokenStatus?.valid ? `LINE Bot: ${tokenStatus.botName || tokenStatus.basicId || "เชื่อมแล้ว"}` : "ตั้งค่า LINE Token (จำเป็น)"}</span>
           </button>
+
           <button
             onClick={() => openAddModal()}
             style={{ background: "#0284c7", color: "#ffffff", border: "none", padding: "0.6rem 1.1rem", borderRadius: "8px", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.88rem" }}
           >
-            <span>➕</span> เพิ่ม รปภ. ใหม่
+            <span>➕</span> เพิ่ม รปภ. / นายจ้าง
           </button>
+
           <button
             onClick={loadGuards}
             disabled={loading || syncing}
@@ -385,6 +467,39 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
           >
             {loading ? "🔄..." : "🔄 รีเฟรช"}
           </button>
+        </div>
+      </div>
+
+      {/* SMART BOT POLICY BANNER */}
+      <div style={{ background: "linear-gradient(135deg, #0f172a, #1e1b4b)", border: "1.5px solid #4338ca", borderRadius: "14px", padding: "1rem 1.25rem", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.75rem" }}>
+        <div style={{ display: "flex", gap: "1.5rem", flexWrap: "wrap", alignItems: "center" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span style={{ fontSize: "1.3rem" }}>👮‍♂️</span>
+            <div>
+              <div style={{ fontSize: "0.86rem", fontWeight: 800, color: "#34d399" }}>รปภ. ประจำ / สแปร์กลาง</div>
+              <div style={{ fontSize: "0.74rem", color: "#a7f3d0" }}>บอทส่งสติกเกอร์ตอบรับ และบันทึกเวลาเข้าเวร</div>
+            </div>
+          </div>
+
+          <div style={{ width: "1px", height: "30px", background: "rgba(255,255,255,0.15)" }} />
+
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span style={{ fontSize: "1.3rem" }}>👔</span>
+            <div>
+              <div style={{ fontSize: "0.86rem", fontWeight: 800, color: "#f87171" }}>นายจ้าง / ลูกค้า (Employer)</div>
+              <div style={{ fontSize: "0.74rem", color: "#fca5a5" }}>บอทเงียบ 100% (งดตอบสติกเกอร์) เพื่อเปิดทางให้เห็นแชทคุยงาน</div>
+            </div>
+          </div>
+
+          <div style={{ width: "1px", height: "30px", background: "rgba(255,255,255,0.15)" }} />
+
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span style={{ fontSize: "1.3rem" }}>❓</span>
+            <div>
+              <div style={{ fontSize: "0.86rem", fontWeight: 800, color: "#cbd5e1" }}>คนแปลกหน้า / ยังไม่ระบุ</div>
+              <div style={{ fontSize: "0.74rem", color: "#94a3b8" }}>บอทเงียบ 100% ไม่ตอบอัตโนมัติ</div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -457,6 +572,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
             >
               <option value="all">🌐 ดูทุกจุดตรวจ & สแปร์กลางทั้งหมด ({sites.length} จุด)</option>
               <option value="spares_only">🔄 สแปร์กลาง / สแปร์แทนเวร (เฉพาะสแปร์)</option>
+              <option value="employers_only">👔 นายจ้าง / ผู้ว่าจ้าง (เฉพาะนายจ้าง)</option>
               {sites.map((site) => (
                 <option key={site.id} value={site.id}>
                   🏢 {site.siteName} ({site.customerName})
@@ -467,7 +583,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
 
           <div style={{ flex: 1, minWidth: "220px" }}>
             <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 800, color: "#94a3b8", marginBottom: "0.3rem" }}>
-              🔍 ค้นหาชื่อ รปภ. / เบอร์โทร / User ID
+              🔍 ค้นหาชื่อ รปภ. / นายจ้าง / เบอร์โทร
             </label>
             <input
               type="text"
@@ -494,7 +610,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
               cursor: "pointer",
             }}
           >
-            📋 ทำเนียบทั้งหมด ({guards.length})
+            📋 ทั้งหมด ({guards.length})
           </button>
           <button
             onClick={() => setActiveTab("regular")}
@@ -509,7 +625,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
               cursor: "pointer",
             }}
           >
-            🛡️ คนประจำตามจุด ({regularGuardsCount})
+            👮‍♂️ รปภ. ประจำจุด ({regularGuardsCount})
           </button>
           <button
             onClick={() => setActiveTab("spares")}
@@ -524,7 +640,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
               cursor: "pointer",
             }}
           >
-            🌐 สแปร์กลาง / ทุกกลุ่ม ({globalSparesCount})
+            🌐 สแปร์กลาง ({globalSparesCount})
           </button>
           <button
             onClick={() => setActiveTab("employers")}
@@ -568,7 +684,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                 <span>📡</span> ตรวจพบผู้ส่งรายงานในกลุ่ม LINE ({recentSenders.length} บัญชี)
               </span>
               <span style={{ color: "#c7d2fe", fontSize: "0.78rem" }}>
-                คลิกปุ่มด่วนด้านล่างเพื่อผูกเป็นกะเช้า/กะดึก หรือสแปร์กลางใน 1 คลิก ไม่ต้องพิมพ์ยาว
+                คลิกปุ่มด้านล่างเพื่อคัดแยกเป็น <strong>รปภ. (บอทตอบ)</strong> หรือ <strong>นายจ้าง (บอทเงียบ 100%)</strong>
               </span>
             </div>
 
@@ -590,56 +706,72 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
               }}
             >
               <span>{syncing ? "⏳" : "⚡"}</span>
-              <span>{syncing ? "กำลังนำเข้า..." : "นำเข้าทุกคนในรายการนี้ทั้งหมด (Auto-Bind All)"}</span>
+              <span>{syncing ? "กำลังดึงข้อมูล..." : "ดึงโปรไฟล์ LINE จริงทุกคน (Auto-Fetch)"}</span>
             </button>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: "0.75rem" }}>
-            {recentSenders.slice(0, 18).map((sender) => {
-              const shortId = sender.senderKey.slice(0, 6);
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(330px, 1fr))", gap: "0.75rem" }}>
+            {recentSenders.slice(0, 30).map((sender) => {
               const isBound = sender.isBound;
-              const rawName = sender.siteName || sender.groupName || `จุด ${shortId}`;
-              const cleanName = rawName.replace(/^(รปภ\.|กลุ่ม\s*รปภ\.|งาน\s*รปภ\.)\s*/i, "").trim();
-              const fallbackName = `รปภ. ประจำ ${cleanName}`;
-              const displayTitle = sender.guardName && !sender.guardName.startsWith("รปภ. LINE (U-") && !sender.guardName.startsWith("รปภ. (U-") && !sender.guardName.startsWith("รปภ. (รหัส U-") && !sender.guardName.startsWith("นาย")
-                ? sender.guardName
-                : fallbackName;
+              const hasRealName = Boolean(sender.guardName && !sender.guardName.startsWith("รปภ. ประจำ") && !sender.guardName.startsWith("รปภ. สแปร์") && !/^U-[A-F0-9]{16}$/i.test(sender.guardName) && !/^U[0-9a-fA-F]{32}$/i.test(sender.guardName));
+              
+              const displayTitle = hasRealName 
+                ? sender.guardName!
+                : (sender.displayName && !/^U-[A-F0-9]{16}$/i.test(sender.displayName) && !/^U[0-9a-fA-F]{32}$/i.test(sender.displayName))
+                ? sender.displayName
+                : (sender.rawUserId ? `LINE Member (${sender.rawUserId.slice(0, 8)})` : `LINE Member (${sender.senderKey.slice(0, 6)})`);
+              
+              const isEmployer = sender.role === "employer";
+              const isSpare = sender.role === "spare";
+              const isRegular = sender.role === "regular" || sender.role === "head_guard";
+              const roleTag = isEmployer 
+                ? "👔 นายจ้าง (งดตอบบอท)" 
+                : isSpare 
+                ? "🌐 สแปร์กลาง (บอทตอบ)" 
+                : isRegular 
+                ? "👮‍♂️ รปภ. (บอทตอบ)" 
+                : "❓ ยังไม่ระบุ (บอทเงียบ 100%)";
+              const roleTagColor = isEmployer ? "#f43f5e" : isSpare ? "#38bdf8" : isRegular ? "#10b981" : "#94a3b8";
 
               return (
                 <div
                   key={sender.senderKey + sender.groupId}
                   style={{
-                    background: isBound ? "#1e1e38" : "#312e81",
-                    border: `1px solid ${isBound ? "#4b5563" : "#6366f1"}`,
-                    borderRadius: "10px",
-                    padding: "0.75rem 0.9rem",
+                    background: isEmployer ? "#20121d" : isBound ? "#1e1e38" : "#312e81",
+                    border: `1.5px solid ${isEmployer ? "#f43f5e" : isBound ? "#4b5563" : "#6366f1"}`,
+                    borderRadius: "12px",
+                    padding: "0.85rem",
                     display: "flex",
                     flexDirection: "column",
-                    gap: "0.5rem",
+                    gap: "0.6rem",
                   }}
                 >
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.5rem" }}>
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={{ fontSize: "0.88rem", fontWeight: 800, color: "#ffffff", display: "flex", alignItems: "center", gap: "0.35rem" }}>
-                        <span>👤</span>
-                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {displayTitle}
-                        </span>
+                  <div style={{ display: "flex", gap: "0.65rem", alignItems: "center" }}>
+                    {/* AVATAR */}
+                    {sender.pictureUrl && sender.pictureUrl.startsWith("http") ? (
+                      <img
+                        src={sender.pictureUrl}
+                        alt={displayTitle}
+                        style={{ width: "44px", height: "44px", borderRadius: "50%", objectFit: "cover", border: `2px solid ${roleTagColor}` }}
+                      />
+                    ) : (
+                      <div style={{ width: "44px", height: "44px", borderRadius: "50%", background: isEmployer ? "#4c0519" : isBound ? "#1e293b" : "#4338ca", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.3rem", border: `2px solid ${roleTagColor}` }}>
+                        {isEmployer ? "👔" : isBound ? "👮‍♂️" : "👤"}
                       </div>
-                      <div style={{ fontSize: "0.72rem", color: "#a5b4fc", marginTop: "0.15rem" }}>
+                    )}
+
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontSize: "0.92rem", fontWeight: 800, color: "#ffffff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {displayTitle}
+                      </div>
+                      <div style={{ fontSize: "0.72rem", color: "#a5b4fc", marginTop: "0.1rem" }}>
                         🏢 {sender.siteName || sender.groupName} · ส่งมา {sender.messageCount} ครั้ง
                       </div>
                     </div>
 
-                    {isBound ? (
-                      <span style={{ background: "#064e3b", color: "#a7f3d0", padding: "0.15rem 0.45rem", borderRadius: "8px", fontSize: "0.68rem", fontWeight: 800 }}>
-                        ✅ ผูกแล้ว
-                      </span>
-                    ) : (
-                      <span style={{ background: "#4338ca", color: "#e0e7ff", padding: "0.15rem 0.45rem", borderRadius: "8px", fontSize: "0.68rem", fontWeight: 800 }}>
-                        ⭐ บัญชีใหม่
-                      </span>
-                    )}
+                    <span style={{ background: "rgba(0,0,0,0.3)", color: roleTagColor, border: `1px solid ${roleTagColor}`, padding: "0.15rem 0.45rem", borderRadius: "8px", fontSize: "0.68rem", fontWeight: 800, whiteSpace: "nowrap" }}>
+                      {roleTag}
+                    </span>
                   </div>
 
                   {/* 1-CLICK QUICK BIND BUTTONS */}
@@ -666,13 +798,13 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                       onClick={() => handleQuickBind(sender, "employer", "all")}
                       style={{ background: "#e11d48", color: "#ffffff", border: "none", padding: "0.3rem 0.55rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer" }}
                     >
-                      👔 นายจ้าง (งดตอบสติกเกอร์)
+                      👔 นายจ้าง (งดตอบบอท)
                     </button>
                     <button
                       onClick={() => openAddModal(sender.siteId, sender)}
                       style={{ background: "transparent", border: "1px solid #a5b4fc", color: "#c7d2fe", padding: "0.3rem 0.55rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 700, cursor: "pointer", marginLeft: "auto" }}
                     >
-                      ✏️ แต่งชื่อ/รูป
+                      ✏️ แต่งชื่อ
                     </button>
                   </div>
                 </div>
@@ -682,15 +814,15 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
         </div>
       )}
 
-      {/* GUARDS DIRECTORY GRID */}
+      {/* GUARDS & EMPLOYERS DIRECTORY GRID */}
       {activeTab !== "discovery" && (
         <>
           {filteredGuards.length === 0 ? (
             <div style={{ background: "#0b1220", border: "1px dashed #334155", borderRadius: "14px", padding: "3.5rem", textAlign: "center", color: "#64748b" }}>
               <div style={{ fontSize: "2.5rem", marginBottom: "0.5rem" }}>👮</div>
-              <div style={{ fontSize: "1.05rem", fontWeight: 700, color: "#94a3b8" }}>ยังไม่มีข้อมูล รปภ. ในหมวดที่เลือก</div>
+              <div style={{ fontSize: "1.05rem", fontWeight: 700, color: "#94a3b8" }}>ยังไม่มีข้อมูลในหมวดที่เลือก</div>
               <p style={{ fontSize: "0.85rem", marginTop: "0.3rem" }}>
-                กดปุ่ม "เพิ่ม รปภ. ใหม่" หรือคลิกปุ่มผูกด่วนจากบัญชีที่ส่งรายงานสดด้านบน
+                กดปุ่ม "ดึงโปรไฟล์ LINE จริงทุกคน" หรือคลิกปุ่มผูกด่วนจากบัญชีที่ส่งรายงานสดด้านบน
               </p>
             </div>
           ) : (
@@ -709,12 +841,12 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                   ? "🌙 กะดึก" 
                   : "🔄 ทั้งสองกะ";
                 const roleLabel = isEmployer 
-                  ? "👔 นายจ้าง / ลูกค้า (งดตอบสติกเกอร์)" 
+                  ? "👔 นายจ้าง (งดตอบสติกเกอร์)" 
                   : guard.role === "head_guard" 
                   ? "👑 หัวหน้าชุด" 
                   : isGlobalSpare 
                   ? "🌐 สแปร์กลาง (ทุกกลุ่ม)" 
-                  : "🛡️ คนประจำ";
+                  : "🛡️ รปภ. ประจำจุด";
                 const roleColor = isEmployer ? "#f43f5e" : guard.role === "head_guard" ? "#f59e0b" : isGlobalSpare ? "#38bdf8" : "#10b981";
 
                 return (
@@ -740,8 +872,8 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                           style={{ width: "50px", height: "50px", borderRadius: "50%", objectFit: "cover", border: `2px solid ${roleColor}` }}
                         />
                       ) : (
-                        <div style={{ width: "50px", height: "50px", borderRadius: "50%", background: isGlobalSpare ? "#0369a1" : "#1e293b", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.5rem", border: `2px solid ${roleColor}` }}>
-                          {guard.pictureUrl || (isGlobalSpare ? "🌐" : "👮")}
+                        <div style={{ width: "50px", height: "50px", borderRadius: "50%", background: isEmployer ? "#4c0519" : isGlobalSpare ? "#0369a1" : "#1e293b", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.5rem", border: `2px solid ${roleColor}` }}>
+                          {guard.pictureUrl || (isEmployer ? "👔" : isGlobalSpare ? "🌐" : "👮")}
                         </div>
                       )}
 
@@ -770,24 +902,44 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                       )}
                       {guard.displayName && (
                         <span style={{ background: "#1e293b", color: "#a5b4fc", padding: "0.2rem 0.5rem", borderRadius: "6px" }}>
-                          💬 LINE ID: {guard.displayName}
+                          💬 {guard.displayName}
                         </span>
                       )}
                     </div>
 
-                    <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.4rem", borderTop: "1px solid #1e293b", paddingTop: "0.6rem" }}>
-                      <button
-                        onClick={() => openEditModal(guard)}
-                        style={{ background: "#1e293b", border: "1px solid #334155", color: "#cbd5e1", padding: "0.35rem 0.7rem", borderRadius: "6px", fontSize: "0.78rem", fontWeight: 700, cursor: "pointer" }}
-                      >
-                        ✏️ แก้ไข
-                      </button>
-                      <button
-                        onClick={() => handleDelete(guard)}
-                        style={{ background: "transparent", border: "1px solid #ef4444", color: "#f87171", padding: "0.35rem 0.6rem", borderRadius: "6px", fontSize: "0.78rem", fontWeight: 700, cursor: "pointer" }}
-                      >
-                        🗑️ ลบ
-                      </button>
+                    {/* ACTIONS & ROLE SWITCHER */}
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid #1e293b", paddingTop: "0.6rem", gap: "0.4rem", flexWrap: "wrap" }}>
+                      {/* QUICK ROLE TOGGLE */}
+                      {isEmployer ? (
+                        <button
+                          onClick={() => handleToggleRole(guard, "regular")}
+                          style={{ background: "#065f46", color: "#a7f3d0", border: "1px solid #059669", padding: "0.3rem 0.6rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer" }}
+                        >
+                          👮‍♂️ เปลี่ยนเป็น รปภ. (เปิดบอทตอบ)
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => handleToggleRole(guard, "employer")}
+                          style={{ background: "#881337", color: "#fecdd3", border: "1px solid #e11d48", padding: "0.3rem 0.6rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer" }}
+                        >
+                          👔 เปลี่ยนเป็นนายจ้าง (งดตอบบอท)
+                        </button>
+                      )}
+
+                      <div style={{ display: "flex", gap: "0.4rem", marginLeft: "auto" }}>
+                        <button
+                          onClick={() => openEditModal(guard)}
+                          style={{ background: "#1e293b", border: "1px solid #334155", color: "#cbd5e1", padding: "0.3rem 0.6rem", borderRadius: "6px", fontSize: "0.75rem", fontWeight: 700, cursor: "pointer" }}
+                        >
+                          ✏️ แก้ไข
+                        </button>
+                        <button
+                          onClick={() => handleDelete(guard)}
+                          style={{ background: "transparent", border: "1px solid #ef4444", color: "#f87171", padding: "0.3rem 0.5rem", borderRadius: "6px", fontSize: "0.75rem", fontWeight: 700, cursor: "pointer" }}
+                        >
+                          🗑️ ลบ
+                        </button>
+                      </div>
                     </div>
                   </div>
                 );
@@ -802,12 +954,12 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: "1rem" }}>
           <div style={{ background: "#0f172a", border: "1.5px solid #334155", borderRadius: "16px", padding: "1.5rem", width: "100%", maxWidth: "500px", boxShadow: "0 10px 25px rgba(0,0,0,0.5)" }}>
             <h3 style={{ margin: "0 0 1rem 0", color: "#ffffff", fontSize: "1.15rem", fontWeight: 800 }}>
-              {editingGuard ? "✏️ แก้ไขข้อมูล รปภ." : "➕ เพิ่ม รปภ. ประจำจุด / สแปร์กลาง"}
+              {editingGuard ? "✏️ แก้ไขข้อมูล" : "➕ เพิ่ม รปภ. / นายจ้าง"}
             </h3>
 
             <form onSubmit={handleSave} style={{ display: "flex", flexDirection: "column", gap: "0.85rem" }}>
               <div>
-                <label style={{ display: "block", color: "#94a3b8", fontSize: "0.8rem", fontWeight: 700, marginBottom: "0.3rem" }}>จุดตรวจประจำ *</label>
+                <label style={{ display: "block", color: "#94a3b8", fontSize: "0.8rem", fontWeight: 700, marginBottom: "0.3rem" }}>จุดตรวจประจำ / สังกัด *</label>
                 <select
                   value={formSiteId}
                   onChange={(e) => {
@@ -829,10 +981,10 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
               </div>
 
               <div>
-                <label style={{ display: "block", color: "#94a3b8", fontSize: "0.8rem", fontWeight: 700, marginBottom: "0.3rem" }}>ชื่อ-นามสกุล หรือชื่อเรียก รปภ. *</label>
+                <label style={{ display: "block", color: "#94a3b8", fontSize: "0.8rem", fontWeight: 700, marginBottom: "0.3rem" }}>ชื่อ-นามสกุล หรือชื่อเรียก *</label>
                 <input
                   type="text"
-                  placeholder="เช่น นายสมหมาย ใจกล้า (สแปร์)"
+                  placeholder="เช่น นายสมชาย, คุณมานพ (ลูกค้า)"
                   value={formName}
                   onChange={(e) => setFormName(e.target.value)}
                   required
@@ -855,16 +1007,16 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                 </div>
 
                 <div>
-                  <label style={{ display: "block", color: "#94a3b8", fontSize: "0.8rem", fontWeight: 700, marginBottom: "0.3rem" }}>ประเภทกำลังพล</label>
+                  <label style={{ display: "block", color: "#94a3b8", fontSize: "0.8rem", fontWeight: 700, marginBottom: "0.3rem" }}>บทบาท / สิทธิ์การตอบของบอท *</label>
                   <select
                     value={formRole}
                     onChange={(e) => setFormRole(e.target.value as any)}
-                    style={{ width: "100%", background: "#1e293b", border: "1px solid #334155", color: "#ffffff", padding: "0.55rem", borderRadius: "8px", fontSize: "0.88rem" }}
+                    style={{ width: "100%", background: "#1e293b", border: "1px solid #334155", color: "#ffffff", padding: "0.55rem", borderRadius: "8px", fontSize: "0.88rem", fontWeight: 700 }}
                   >
-                    <option value="regular">🛡️ คนประจำจุด</option>
-                    <option value="spare">🔄 สแปร์แทนเวร (กลาง/ประจำ)</option>
-                    <option value="head_guard">👑 หัวหน้าชุด/ป้อม</option>
-                    <option value="employer">👔 นายจ้าง / ผู้ว่าจ้าง (งดตอบสติกเกอร์)</option>
+                    <option value="regular">🛡️ รปภ. ประจำจุด (บอทตอบสติกเกอร์)</option>
+                    <option value="spare">🔄 รปภ. สแปร์กลาง (บอทตอบสติกเกอร์)</option>
+                    <option value="head_guard">👑 หัวหน้าชุด (บอทตอบสติกเกอร์)</option>
+                    <option value="employer">👔 นายจ้าง / ลูกค้า (งดตอบสติกเกอร์ 100%)</option>
                   </select>
                 </div>
               </div>
@@ -882,10 +1034,10 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                 </div>
 
                 <div>
-                  <label style={{ display: "block", color: "#94a3b8", fontSize: "0.8rem", fontWeight: 700, marginBottom: "0.3rem" }}>LINE User ID / Sender Key</label>
+                  <label style={{ display: "block", color: "#94a3b8", fontSize: "0.8rem", fontWeight: 700, marginBottom: "0.3rem" }}>LINE User ID / Display Name</label>
                   <input
                     type="text"
-                    placeholder="เช่น U-97E9 หรือ User ID"
+                    placeholder="เช่น U4af... หรือชื่อไลน์"
                     value={formDisplayName}
                     onChange={(e) => setFormDisplayName(e.target.value)}
                     style={{ width: "100%", background: "#1e293b", border: "1px solid #334155", color: "#ffffff", padding: "0.55rem", borderRadius: "8px", fontSize: "0.88rem" }}
