@@ -485,6 +485,12 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
             {recentSenders.slice(0, 18).map((sender) => {
               const shortId = sender.senderKey.slice(0, 6);
               const isBound = sender.isBound;
+              const rawName = sender.siteName || sender.groupName || `จุด ${shortId}`;
+              const cleanName = rawName.replace(/^(รปภ\.|กลุ่ม\s*รปภ\.|งาน\s*รปภ\.)\s*/i, "").trim();
+              const fallbackName = `รปภ. ประจำ ${cleanName}`;
+              const displayTitle = sender.guardName && !sender.guardName.startsWith("รปภ. LINE (U-") && !sender.guardName.startsWith("รปภ. (U-") && !sender.guardName.startsWith("รปภ. (รหัส U-") && !sender.guardName.startsWith("นาย")
+                ? sender.guardName
+                : fallbackName;
 
               return (
                 <div
@@ -504,7 +510,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                       <div style={{ fontSize: "0.88rem", fontWeight: 800, color: "#ffffff", display: "flex", alignItems: "center", gap: "0.35rem" }}>
                         <span>👤</span>
                         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {sender.guardName || `รปภ. (รหัส ${shortId})`}
+                          {displayTitle}
                         </span>
                       </div>
                       <div style={{ fontSize: "0.72rem", color: "#a5b4fc", marginTop: "0.15rem" }}>

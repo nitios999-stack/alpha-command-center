@@ -795,9 +795,6 @@ export async function getDashboard() {
   const current = bangkokNow();
   const today = current.date;
 
-  // Keep coverage_slots deadlines synchronized with shift_templates configuration
-  await syncTodayCoverageSlotsFromTemplates(today);
-
   const slotResult = await db.prepare("SELECT * FROM coverage_slots WHERE operational_date = ? ORDER BY wave, site_name, post_name, slot_label").bind(today).all<D1Row>();
   const siteResult = await db.prepare("SELECT * FROM operational_sites ORDER BY active DESC, site_name").all<D1Row>();
   const lineGroupResult = await db.prepare("SELECT r.id, m.site_id, r.group_name, r.picture_url, r.last_seen_at, r.source, (SELECT e.event_type FROM line_webhook_events e WHERE e.group_id = r.id ORDER BY e.received_at DESC LIMIT 1) AS last_event_type, (SELECT COUNT(*) FROM line_webhook_events e WHERE e.group_id = r.id) AS event_count FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id ORDER BY CASE WHEN m.site_id IS NULL THEN 0 ELSE 1 END, r.group_name").all<D1Row>();
@@ -3980,20 +3977,29 @@ export async function getRecentWebhookSenders(options?: number | {
 
   const rows = (await db.prepare(query).bind(...params).all<any>()).results || [];
 
-  return rows.map((r: any) => ({
-    senderKey: String(r.sender_key),
-    groupId: String(r.group_id),
-    groupName: String(r.group_name || `กลุ่ม ${r.group_id.slice(-6)}`),
-    siteId: r.site_id ? String(r.site_id) : undefined,
-    siteName: r.site_name ? String(r.site_name) : undefined,
-    lastSeenAt: String(r.last_seen_at),
-    messageType: r.message_type ? String(r.message_type) : undefined,
-    lastSummary: r.last_summary ? String(r.last_summary) : undefined,
-    messageCount: Number(r.message_count || 1),
-    isBound: Boolean(r.guard_id),
-    guardName: r.guard_name ? String(r.guard_name) : undefined,
-    role: r.role ? String(r.role) : undefined,
-  }));
+  return rows.map((r: any) => {
+    const rawGroupName = String(r.site_name || r.group_name || `กลุ่ม ${r.group_id.slice(-6)}`);
+    const cleanGroupName = rawGroupName.replace(/^(รปภ\.|กลุ่ม\s*รปภ\.|งาน\s*รปภ\.)\s*/i, "").trim();
+    let displayGuardName = r.guard_name;
+    if (!displayGuardName || displayGuardName.startsWith("รปภ. LINE (U-") || displayGuardName.startsWith("รปภ. (U-") || displayGuardName.startsWith("รปภ. (รหัส U-") || displayGuardName.startsWith("นาย")) {
+      displayGuardName = `รปภ. ประจำ ${cleanGroupName}`;
+    }
+
+    return {
+      senderKey: String(r.sender_key),
+      groupId: String(r.group_id),
+      groupName: String(r.group_name || `กลุ่ม ${r.group_id.slice(-6)}`),
+      siteId: r.site_id ? String(r.site_id) : undefined,
+      siteName: r.site_name ? String(r.site_name) : undefined,
+      lastSeenAt: String(r.last_seen_at),
+      messageType: r.message_type ? String(r.message_type) : undefined,
+      lastSummary: r.last_summary ? String(r.last_summary) : undefined,
+      messageCount: Number(r.message_count || 1),
+      isBound: Boolean(r.guard_id),
+      guardName: displayGuardName,
+      role: r.role ? String(r.role) : undefined,
+    };
+  });
 }
 
 export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
@@ -4006,14 +4012,9 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
 }> {
   await ensureDatabase();
   const db = database();
-  const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
   const now = bangkokNow().iso;
 
-  // 1. ดึงกลุ่ม LINE ทั้งหมดที่มีในระบบ
-  const groupsResult = await db.prepare("SELECT * FROM line_groups").all<D1Row>();
-  const groups = (groupsResult.results || []) as any[];
-
-  // 2. ดึงผู้ส่งรายงานทั้งหมดจาก webhook events
+  // 1. ดึงผู้ส่งรายงานทั้งหมดจาก webhook events
   const sendersResult = await db.prepare(`
     SELECT 
       lwe.sender_key, 
@@ -4043,102 +4044,21 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
   let updatedGuards = 0;
   let sparesDetected = 0;
   const operations: any[] = [];
-  const processedUserIds = new Set<string>();
 
-  // 3. ถ้ามี LINE Access Token: พยายามดึงสมาชิกจริงทุกคนในแต่ละกลุ่ม LINE ผ่าน LINE Bot API
-  if (token) {
-    for (const group of groups) {
-      const groupId = group.id;
-      const siteId = group.site_id || linePointSiteIdentifier(groupId);
-
-      try {
-        // ดึงรายการ memberIds ทั้งหมดในกลุ่มจาก LINE API
-        const membersRes = await fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/members/ids`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-
-        if (membersRes.ok) {
-          const membersJson = await membersRes.json() as any;
-          const memberIds = (membersJson.memberIds || []) as string[];
-
-          for (const memberId of memberIds) {
-            if (processedUserIds.has(memberId)) continue;
-            processedUserIds.add(memberId);
-
-            // ดึงข้อมูลโปรไฟล์จริง (ชื่อ Display Name และรูป Profile Picture)
-            const profileRes = await fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/member/${encodeURIComponent(memberId)}`, {
-              headers: { Authorization: `Bearer ${token}` },
-            });
-
-            if (profileRes.ok) {
-              const profile = await profileRes.json() as any;
-              const realName = profile.displayName || `รปภ. LINE (${memberId.slice(-6)})`;
-              const pictureUrl = profile.pictureUrl || null;
-
-              operations.push(
-                db.prepare(`
-                  INSERT INTO guard_profiles (
-                    id, site_id, guard_name, display_name, picture_url, phone_number, preferred_shift, role, active, created_at, updated_at
-                  ) VALUES (
-                    ?, ?, ?, ?, ?, NULL, 'all', 'regular', 1, ?, ?
-                  )
-                  ON CONFLICT(id) DO UPDATE SET
-                    guard_name = excluded.guard_name,
-                    display_name = excluded.display_name,
-                    picture_url = COALESCE(excluded.picture_url, guard_profiles.picture_url),
-                    active = 1,
-                    updated_at = excluded.updated_at
-                `).bind(memberId, siteId, realName, profile.displayName || memberId, pictureUrl, now, now)
-              );
-              newGuards++;
-            }
-          }
-        }
-      } catch {
-        // ข้ามหากกลุ่มนั้นดึง members/ids ไม่สำเร็จ
-      }
-    }
-  }
-
-  // 4. ประมวลผลบัญชีผู้ส่งรายงานที่ตรวจพบใน LINE Webhook Events
   for (const [senderKey, groupList] of senderGroupsMap.entries()) {
-    if (processedUserIds.has(senderKey)) continue;
-    processedUserIds.add(senderKey);
-
     const isMultiGroup = groupList.length > 1;
     const primary = groupList[0];
     const siteId = isMultiGroup ? "all" : (primary.site_id || linePointSiteIdentifier(primary.group_id));
     const role = isMultiGroup ? "spare" : "regular";
     if (isMultiGroup) sparesDetected++;
 
-    let realDisplayName: string | null = null;
-    let realPictureUrl: string | null = null;
+    const rawGroupName = String(primary.site_name || primary.group_name || `จุด ${primary.group_id.slice(-6)}`);
+    const cleanGroupName = rawGroupName.replace(/^(รปภ\.|กลุ่ม\s*รปภ\.|งาน\s*รปภ\.)\s*/i, "").trim();
+    const finalGuardName = isMultiGroup 
+      ? `รปภ. สแปร์กลาง (${cleanGroupName})` 
+      : `รปภ. ประจำ ${cleanGroupName}`;
 
-    // ลองดึง Profile จาก LINE API หาก senderKey เป็น LINE User ID
-    if (token) {
-      try {
-        const pRes = await fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(primary.group_id)}/member/${encodeURIComponent(senderKey)}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (pRes.ok) {
-          const p = await pRes.json() as any;
-          if (p.displayName) realDisplayName = p.displayName;
-          if (p.pictureUrl) realPictureUrl = p.pictureUrl;
-        } else {
-          const uRes = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(senderKey)}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (uRes.ok) {
-            const u = await uRes.json() as any;
-            if (u.displayName) realDisplayName = u.displayName;
-            if (u.pictureUrl) realPictureUrl = u.pictureUrl;
-          }
-        }
-      } catch {}
-    }
-
-    const shortKey = senderKey.slice(0, 8);
-    const finalGuardName = realDisplayName || `รปภ. LINE (${shortKey})`;
+    const avatar = isMultiGroup ? "🌐" : "👮‍♂️";
 
     operations.push(
       db.prepare(`
@@ -4148,9 +4068,10 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
           ?, ?, ?, ?, ?, NULL, 'all', ?, 1, ?, ?
         )
         ON CONFLICT(id) DO UPDATE SET
-          guard_name = CASE WHEN excluded.guard_name NOT LIKE 'รปภ. LINE (%' THEN excluded.guard_name ELSE guard_profiles.guard_name END,
+          site_id = excluded.site_id,
+          guard_name = excluded.guard_name,
           display_name = excluded.display_name,
-          picture_url = COALESCE(excluded.picture_url, guard_profiles.picture_url),
+          picture_url = COALESCE(guard_profiles.picture_url, excluded.picture_url),
           role = CASE WHEN excluded.role = 'spare' THEN 'spare' ELSE guard_profiles.role END,
           active = 1,
           updated_at = excluded.updated_at
@@ -4158,8 +4079,8 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
         senderKey,
         siteId,
         finalGuardName,
-        realDisplayName || senderKey,
-        realPictureUrl,
+        senderKey,
+        avatar,
         role,
         now,
         now
@@ -4168,21 +4089,12 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
     updatedGuards++;
   }
 
-  // 5. ล้างชื่อสุ่มหลอกที่อาจเคยถูกบันทึกไว้ ให้กลับเป็นชื่อจริงจาก LINE หรือชื่อระบุตามไอดี
-  operations.push(
-    db.prepare(`
-      UPDATE guard_profiles
-      SET guard_name = 'รปภ. LINE (' || substr(id, 1, 8) || ')'
-      WHERE guard_name LIKE 'นาย%' AND (display_name LIKE 'U-%' OR display_name LIKE 'guard-%')
-    `)
-  );
-
   for (let offset = 0; offset < operations.length; offset += 50) {
     await db.batch(operations.slice(offset, offset + 50));
   }
 
-  const total = newGuards + updatedGuards;
-  await addAudit("guard_profile", "bulk_sync", "auto_sync", actor, `ดึงข้อมูลโปรไฟล์ รปภ. จาก LINE จริง ${total} บัญชี (สแปร์กลาง ${sparesDetected})`);
+  const total = updatedGuards;
+  await addAudit("guard_profile", "bulk_sync", "auto_sync", actor, `ซิงค์และบันทึกชื่อ รปภ. ประจำจุดตรวจอัตโนมัติ ${total} บัญชี (สแปร์กลาง ${sparesDetected})`);
 
   return {
     ok: true,
@@ -4190,7 +4102,7 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
     newGuards,
     updatedGuards,
     sparesDetected,
-    message: `เชื่อมต่อ LINE API และดึงข้อมูลโปรไฟล์ รปภ. จากทุกกลุ่มเรียบร้อย ${total} บัญชี (ไม่มีการสุ่มชื่อ ทุกคนมาจาก LINE จริง)`,
+    message: `ซิงค์และสร้างชื่อ รปภ. ประจำจุดตรวจครบถ้วน ${total} บัญชีเรียบร้อย (ระบุตามชื่อกลุ่มจุดตรวจจริง)`,
   };
 }
 
