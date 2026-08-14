@@ -294,44 +294,7 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
 
       const trimmedText = (group.text || "").trim();
 
-      // -------------------------------------------------------------
-      // 2. ตรวจจับการแจ้งลา เข้าสาย และเหตุด่วนไม่ปกติ (Real-Time Incident & Leave Alert)
-      // -------------------------------------------------------------
-      if (trimmedText) {
-        const incidentCheck = detectSpecialIncidentsAndLeave(trimmedText);
-        if (incidentCheck.detected) {
-          const groupMeta = (saved[idx] as any)?.group;
-          const siteName = groupMeta?.groupName || `กลุ่ม ${group.groupId.slice(-6)}`;
-
-          await sendIncidentAlertToCommandRoom({
-            siteName,
-            category: incidentCheck.category || "incident",
-            title: incidentCheck.title || incidentCheck.categoryLabel || "เหตุการณ์",
-            senderText: trimmedText,
-            senderName: group.senderKey ? `รปภ. (รหัส ${group.senderKey.slice(0, 6)})` : "รปภ. ในกลุ่ม",
-            senderKey: group.senderKey,
-            groupId: group.groupId,
-          });
-
-          if (incidentCheck.category === "leave") {
-            await fetch("https://api.line.me/v2/bot/message/reply", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${accessToken}`,
-              },
-              body: JSON.stringify({
-                replyToken: group.replyToken,
-                messages: [{
-                  type: "text",
-                  text: `ศูนย์สั่งการได้รับแจ้งการลาของคุณแล้ว และได้ส่งเรื่องประสานงานจัดกำลังพลเรียบร้อยแล้วครับ 🫡`,
-                }],
-              }),
-            }).catch(() => {});
-            continue;
-          }
-        }
-      }
+      // (ระบบตรวจเหตุด่วนและตรวจแจ้งลาถูกปิดไว้ตามความต้องการ)
 
       // -------------------------------------------------------------
       // 3. ตรวจจับคำสั่งขอดูสรุปจุดเข้าเวร (ส่งการ์ด Flex Message พร้อมปุ่มกด)

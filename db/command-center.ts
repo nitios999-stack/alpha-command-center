@@ -3828,20 +3828,29 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
   query += " ORDER BY CASE WHEN gp.role = 'employer' THEN 2 WHEN gp.site_id = 'all' THEN 1 ELSE 0 END, os.site_name ASC, gp.role ASC, gp.guard_name ASC";
 
   const rows = (await db.prepare(query).bind(...params).all<any>()).results || [];
-  return rows.map((r: any) => ({
-    id: String(r.id),
-    siteId: String(r.site_id),
-    siteName: r.site_id === "all" ? "🌐 สแปร์กลาง (ทุกจุด)" : (r.site_name ? String(r.site_name) : undefined),
-    guardName: String(r.guard_name),
-    displayName: r.display_name ? String(r.display_name) : null,
-    pictureUrl: r.picture_url ? String(r.picture_url) : null,
-    phoneNumber: r.phone_number ? String(r.phone_number) : null,
-    preferredShift: (r.preferred_shift || "all") as "morning" | "evening" | "all",
-    role: (r.role || "regular") as "regular" | "spare" | "head_guard" | "employer",
-    active: Number(r.active ?? 1),
-    createdAt: String(r.created_at || ""),
-    updatedAt: String(r.updated_at || ""),
-  }));
+  return rows.map((r: any) => {
+    const rawGroupName = String(r.site_name || `จุดประจำ`);
+    const cleanGroupName = rawGroupName.replace(/^(รปภ\.|กลุ่ม\s*รปภ\.|งาน\s*รปภ\.)\s*/i, "").trim();
+    let displayGuardName = String(r.guard_name);
+    if (!displayGuardName || displayGuardName.startsWith("รปภ. LINE (U-") || displayGuardName.startsWith("รปภ. (U-") || displayGuardName.startsWith("รปภ. (รหัส U-") || displayGuardName.startsWith("นาย") || displayGuardName.startsWith("รปภ. LINE (")) {
+      displayGuardName = r.role === "spare" || r.site_id === "all" ? `รปภ. สแปร์กลาง (${cleanGroupName})` : `รปภ. ประจำ ${cleanGroupName}`;
+    }
+
+    return {
+      id: String(r.id),
+      siteId: String(r.site_id),
+      siteName: r.site_id === "all" ? "🌐 สแปร์กลาง (ทุกจุด)" : (r.site_name ? String(r.site_name) : undefined),
+      guardName: displayGuardName,
+      displayName: r.display_name ? String(r.display_name) : null,
+      pictureUrl: r.picture_url ? String(r.picture_url) : null,
+      phoneNumber: r.phone_number ? String(r.phone_number) : null,
+      preferredShift: (r.preferred_shift || "all") as "morning" | "evening" | "all",
+      role: (r.role || "regular") as "regular" | "spare" | "head_guard" | "employer",
+      active: Number(r.active ?? 1),
+      createdAt: String(r.created_at || ""),
+      updatedAt: String(r.updated_at || ""),
+    };
+  });
 }
 
 export async function saveGuardProfile(data: {
