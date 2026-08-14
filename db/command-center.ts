@@ -3404,6 +3404,45 @@ export async function purgePlaceholderGuardProfiles(actor = "admin"): Promise<{
   };
 }
 
+export async function purgeAllLegacyEventsAndPlaceholders(actor = "admin"): Promise<{
+  ok: boolean;
+  purgedGuards: number;
+  purgedEvents: number;
+  message: string;
+}> {
+  await ensureDatabase();
+  const db = database();
+  
+  // 1. Delete all fake placeholder guards
+  const gRes = await db.prepare(`
+    DELETE FROM guard_profiles 
+    WHERE guard_name LIKE 'รปภ. ประจำ%' 
+       OR guard_name LIKE 'รปภ. สแปร์กลาง%'
+       OR id LIKE 'guard-line-point-%'
+       OR (guard_name LIKE 'รปภ. (U-%' AND (display_name IS NULL OR display_name = ''))
+       OR (guard_name LIKE 'รปภ. LINE (%' AND (display_name IS NULL OR display_name = ''))
+       OR (display_name LIKE 'U-%' AND (picture_url IS NULL OR picture_url = ''))
+  `).run();
+
+  // 2. Delete legacy webhook events that do not have a real raw_user_id (hashed only)
+  const eRes = await db.prepare(`
+    DELETE FROM line_webhook_events 
+    WHERE raw_user_id IS NULL OR raw_user_id = '' OR raw_user_id LIKE 'U-%'
+  `).run();
+
+  const countG = Number(gRes.changes || 0);
+  const countE = Number(eRes.changes || 0);
+
+  await addAudit("system", "clean_reset", "purge_all", actor, `โละล้างข้อมูลประวัติเก่าและข้อมูลจำลองทั้งหมด (${countG} โปรไฟล์, ${countE} อีเวนต์)`);
+
+  return {
+    ok: true,
+    purgedGuards: countG,
+    purgedEvents: countE,
+    message: `โละล้างประวัติจำลองและแชทเก่าเรียบร้อย (${countG} โปรไฟล์, ${countE} รายการ) พร้อมรับข้อมูลโปรไฟล์จริง`,
+  };
+}
+
 export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]> {
   await ensureDatabase();
   const db = database();

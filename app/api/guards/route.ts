@@ -1,4 +1,4 @@
-import { getGuardProfiles, saveGuardProfile, deleteGuardProfile, getRecentWebhookSenders, autoSyncGuardsFromLine, purgePlaceholderGuardProfiles } from "../../../db/command-center";
+import { getGuardProfiles, saveGuardProfile, deleteGuardProfile, getRecentWebhookSenders, autoSyncGuardsFromLine, purgePlaceholderGuardProfiles, purgeAllLegacyEventsAndPlaceholders } from "../../../db/command-center";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,6 +29,11 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
+
+    if (body.action === "purge_all_legacy" || body.action === "hard_reset") {
+      const result = await purgeAllLegacyEventsAndPlaceholders(body.actor || "admin");
+      return Response.json(result);
+    }
 
     if (body.action === "wipe_placeholders" || body.action === "purge_placeholders" || body.action === "reset_all") {
       const result = await purgePlaceholderGuardProfiles(body.actor || "admin");
