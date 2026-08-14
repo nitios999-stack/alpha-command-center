@@ -3580,11 +3580,28 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
         INSERT INTO guard_profiles (id, site_id, guard_name, display_name, picture_url, preferred_shift, role, active, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, 'all', 'regular', 1, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
+          site_id = COALESCE(NULLIF(guard_profiles.site_id, ''), excluded.site_id),
           display_name = COALESCE(excluded.display_name, guard_profiles.display_name),
           picture_url = COALESCE(excluded.picture_url, guard_profiles.picture_url),
           updated_at = excluded.updated_at
       `).bind(uId, targetSiteId, fetchedName, fetchedName, fetchedPic, now, now).run();
     }
+
+    // Re-map any legacy 'all' / 'spare' guards back to their actual site
+    await db.prepare(`
+      UPDATE guard_profiles
+      SET site_id = (
+        SELECT COALESCE(NULLIF(lg.site_id, ''), NULLIF(lgr.site_id, ''), 'site-default')
+        FROM line_webhook_events lwe
+        LEFT JOIN line_groups lg ON lwe.group_id = lg.id
+        LEFT JOIN line_group_registry lgr ON lwe.group_id = lgr.id
+        WHERE (lwe.raw_user_id = guard_profiles.id OR lwe.sender_key = guard_profiles.id)
+          AND (lg.site_id IS NOT NULL OR lgr.site_id IS NOT NULL)
+        LIMIT 1
+      ),
+      role = CASE WHEN role = 'employer' THEN 'employer' ELSE 'regular' END
+      WHERE site_id = 'all' OR role = 'spare'
+    `).run().catch(() => {});
   } catch {}
 
   // 2. Fetch all active guard and employer profiles
@@ -3601,15 +3618,13 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
       AND gp.guard_name NOT LIKE '%บอท%'
   `;
   const params: any[] = [];
-  if (siteId === "spares_only") {
-    query += " AND (gp.role = 'spare' OR gp.site_id = 'all')";
-  } else if (siteId === "employers_only") {
+  if (siteId === "employers_only") {
     query += " AND gp.role = 'employer'";
   } else if (siteId && siteId !== "all") {
-    query += " AND (gp.site_id = ? OR gp.site_id = 'all' OR gp.role = 'spare' OR gp.role = 'employer')";
+    query += " AND (gp.site_id = ? OR gp.role = 'employer')";
     params.push(siteId);
   }
-  query += " ORDER BY CASE WHEN gp.role = 'employer' THEN 2 WHEN gp.site_id = 'all' THEN 1 ELSE 0 END, os.site_name ASC, gp.role ASC, gp.guard_name ASC";
+  query += " ORDER BY CASE WHEN gp.role = 'employer' THEN 1 ELSE 0 END, os.site_name ASC, gp.role ASC, gp.guard_name ASC";
 
   const rows = (await db.prepare(query).bind(...params).all<any>()).results || [];
   return rows
@@ -3630,8 +3645,8 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
 
       return {
         id: String(r.id),
-        siteId: String(r.site_id),
-        siteName: r.site_id === "all" ? "🌐 สแปร์กลาง (ทุกจุด)" : (r.site_name ? String(r.site_name) : undefined),
+        siteId: String(r.site_id || "site-default"),
+        siteName: r.site_name ? String(r.site_name) : "จุดตรวจประจำ",
         guardName: displayGuardName || `ผู้ส่ง (${String(r.id).slice(-6)})`,
         displayName: r.display_name ? String(r.display_name) : null,
         pictureUrl: r.picture_url ? String(r.picture_url) : null,
