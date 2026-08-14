@@ -177,6 +177,7 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
               INSERT INTO guard_profiles (id, site_id, guard_name, display_name, picture_url, preferred_shift, role, active, created_at, updated_at)
               VALUES (?, ?, ?, ?, ?, 'all', 'regular', 1, ?, ?)
               ON CONFLICT(id) DO UPDATE SET
+                guard_name = CASE WHEN guard_profiles.guard_name LIKE 'ผู้ส่ง (%' OR guard_profiles.guard_name LIKE 'รปภ. (%' THEN excluded.guard_name ELSE guard_profiles.guard_name END,
                 display_name = COALESCE(excluded.display_name, guard_profiles.display_name),
                 picture_url = COALESCE(excluded.picture_url, guard_profiles.picture_url),
                 updated_at = excluded.updated_at

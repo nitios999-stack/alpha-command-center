@@ -3575,11 +3575,44 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
         INSERT INTO guard_profiles (id, site_id, guard_name, display_name, picture_url, preferred_shift, role, active, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, 'all', 'regular', 1, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
+          guard_name = CASE WHEN guard_profiles.guard_name LIKE 'ผู้ส่ง (%' OR guard_profiles.guard_name LIKE 'รปภ. (%' THEN excluded.guard_name ELSE guard_profiles.guard_name END,
           site_id = COALESCE(NULLIF(guard_profiles.site_id, ''), excluded.site_id),
           display_name = COALESCE(excluded.display_name, guard_profiles.display_name),
           picture_url = COALESCE(excluded.picture_url, guard_profiles.picture_url),
           updated_at = excluded.updated_at
       `).bind(uId, targetSiteId, fetchedName, fetchedName, fetchedPic, now, now).run();
+    }
+
+    // Resolve any existing profiles with placeholder names in background batch
+    if (lineToken) {
+      const pendingProfiles = (await db.prepare(`
+        SELECT id, site_id FROM guard_profiles 
+        WHERE (guard_name LIKE 'ผู้ส่ง (%' OR display_name LIKE 'ผู้ส่ง (%' OR display_name IS NULL)
+          AND id LIKE 'U%' AND length(id) >= 30
+        LIMIT 10
+      `).all<any>()).results || [];
+
+      for (const p of pendingProfiles) {
+        try {
+          const res = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(p.id)}`, {
+            headers: { Authorization: `Bearer ${lineToken}` },
+          });
+          if (res.ok) {
+            const pJson = (await res.json()) as any;
+            if (pJson.displayName) {
+              const nowIso = bangkokNow().iso;
+              await db.prepare(`
+                UPDATE guard_profiles 
+                SET guard_name = CASE WHEN guard_name LIKE 'ผู้ส่ง (%' THEN ? ELSE guard_name END,
+                    display_name = ?,
+                    picture_url = COALESCE(?, picture_url),
+                    updated_at = ?
+                WHERE id = ?
+              `).bind(pJson.displayName, pJson.displayName, pJson.pictureUrl || null, nowIso, p.id).run();
+            }
+          }
+        } catch {}
+      }
     }
 
     // Re-map any legacy 'all' / 'spare' guards back to their actual site

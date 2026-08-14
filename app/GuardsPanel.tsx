@@ -49,9 +49,12 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
   const [loading, setLoading] = useState(true);
   const [selectedSiteId, setSelectedSiteId] = useState<string>("all");
   const [activeTab, setActiveTab] = useState<"sites" | "employers">("sites");
+  const [siteMemberFilter, setSiteMemberFilter] = useState<"all" | "guards" | "employers">("all");
   const [siteSearch, setSiteSearch] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [autoPollActive, setAutoPollActive] = useState(true);
+  const [lastSyncTime, setLastSyncTime] = useState<string>("");
   const [showTokenSetting, setShowTokenSetting] = useState(false);
   const [tokenInput, setTokenInput] = useState("");
   const [tokenStatus, setTokenStatus] = useState<{ configured: boolean; valid: boolean; botName?: string; basicId?: string; error?: string } | null>(null);
@@ -70,20 +73,33 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
 
   const sites = data?.sites || [];
 
-  const loadGuards = async () => {
-    setLoading(true);
+  const loadGuards = async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const res = await fetch(`/api/guards?includeSenders=true`);
       if (res.ok) {
         const json = await res.json();
         setGuards(json.guards || []);
         setRecentSenders(json.recentSenders || []);
+        setLastSyncTime(new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
       }
     } catch {
-      setMessage("เกิดข้อผิดพลาดในการโหลดข้อมูล");
+      if (!silent) setMessage("เกิดข้อผิดพลาดในการโหลดข้อมูล");
     }
-    setLoading(false);
+    if (!silent) setLoading(false);
   };
+
+  useEffect(() => {
+    loadGuards(false);
+    checkTokenStatus();
+
+    // Auto live polling every 6 seconds to capture new reports and profile pictures continuously
+    const pollInterval = setInterval(() => {
+      loadGuards(true);
+    }, 6000);
+
+    return () => clearInterval(pollInterval);
+  }, []);
 
   const checkTokenStatus = async () => {
     try {
@@ -695,6 +711,57 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
             </button>
           </div>
 
+          {/* SUB-FILTER TABS (ALL / GUARDS / EMPLOYERS) */}
+          {(siteGuards.length > 0 || siteEmployers.length > 0) && (
+            <div style={{ display: "flex", gap: "0.4rem", borderBottom: "1px solid #1e293b", paddingBottom: "0.6rem", alignItems: "center", flexWrap: "wrap" }}>
+              <button
+                onClick={() => setSiteMemberFilter("all")}
+                style={{
+                  background: siteMemberFilter === "all" ? "#38bdf8" : "#1e293b",
+                  color: siteMemberFilter === "all" ? "#0f172a" : "#cbd5e1",
+                  border: "none",
+                  padding: "0.35rem 0.75rem",
+                  borderRadius: "6px",
+                  fontSize: "0.76rem",
+                  fontWeight: 800,
+                  cursor: "pointer",
+                }}
+              >
+                📋 แสดงทุกคน ({siteGuards.length + siteEmployers.length})
+              </button>
+              <button
+                onClick={() => setSiteMemberFilter("guards")}
+                style={{
+                  background: siteMemberFilter === "guards" ? "#10b981" : "#1e293b",
+                  color: siteMemberFilter === "guards" ? "#0f172a" : "#a7f3d0",
+                  border: "none",
+                  padding: "0.35rem 0.75rem",
+                  borderRadius: "6px",
+                  fontSize: "0.76rem",
+                  fontWeight: 800,
+                  cursor: "pointer",
+                }}
+              >
+                👮‍♂️ รปภ. ประจำจุด ({siteGuards.length})
+              </button>
+              <button
+                onClick={() => setSiteMemberFilter("employers")}
+                style={{
+                  background: siteMemberFilter === "employers" ? "#f43f5e" : "#1e293b",
+                  color: siteMemberFilter === "employers" ? "#ffffff" : "#fca5a5",
+                  border: "none",
+                  padding: "0.35rem 0.75rem",
+                  borderRadius: "6px",
+                  fontSize: "0.76rem",
+                  fontWeight: 800,
+                  cursor: "pointer",
+                }}
+              >
+                👤 บุคคลทั่วไป / นายจ้าง ({siteEmployers.length})
+              </button>
+            </div>
+          )}
+
           {/* MEMBERS LIST */}
           {siteGuards.length === 0 && siteEmployers.length === 0 ? (
             <div style={{ background: "#0b1220", border: "1px dashed #334155", borderRadius: "12px", padding: "3rem 1.5rem", textAlign: "center", color: "#64748b" }}>
@@ -708,7 +775,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
             <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
               
               {/* GUARDS SECTION */}
-              {siteGuards.length > 0 && (
+              {siteGuards.length > 0 && siteMemberFilter !== "employers" && (
                 <div>
                   <div style={{ fontSize: "0.82rem", fontWeight: 800, color: "#34d399", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.35rem" }}>
                     <span>👮‍♂️</span>
@@ -746,7 +813,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                                 {guard.guardName}
                               </div>
                               <div style={{ fontSize: "0.74rem", color: "#a7f3d0", fontWeight: 700 }}>
-                                {shiftLabel}
+                                {shiftLabel} · 👮‍♂️ รปภ. ประจำจุด
                               </div>
                             </div>
                           </div>
@@ -820,9 +887,11 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.3rem" }}>
                               <button
                                 onClick={() => handleToggleRole(guard, "employer")}
-                                style={{ background: "#881337", color: "#fecdd3", border: "1px solid #e11d48", padding: "0.25rem 0.55rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer" }}
+                                style={{ background: "#4c0519", color: "#fecdd3", border: "1px solid #e11d48", padding: "0.28rem 0.6rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.25rem" }}
+                                title="ปรับเป็นบุคคลทั่วไป/นายจ้าง บอทจะงดตอบสติกเกอร์ 100%"
                               >
-                                👔 ปรับเป็นนายจ้าง
+                                <span>👤</span>
+                                <span>ปรับเป็นบุคคลทั่วไป / นายจ้าง</span>
                               </button>
 
                               <div style={{ display: "flex", gap: "0.3rem" }}>
@@ -849,11 +918,11 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
               )}
 
               {/* EMPLOYERS SECTION */}
-              {siteEmployers.length > 0 && (
-                <div style={{ marginTop: siteGuards.length > 0 ? "0.75rem" : 0 }}>
+              {siteEmployers.length > 0 && siteMemberFilter !== "guards" && (
+                <div style={{ marginTop: siteGuards.length > 0 && siteMemberFilter === "all" ? "0.75rem" : 0 }}>
                   <div style={{ fontSize: "0.82rem", fontWeight: 800, color: "#f87171", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.35rem" }}>
                     <span>👔</span>
-                    <span>นายจ้าง / ลูกค้าในกลุ่มนี้ ({siteEmployers.length} คน) — บอทเงียบ 100%</span>
+                    <span>บุคคลทั่วไป / นายจ้างในกลุ่มนี้ ({siteEmployers.length} คน) — บอทเงียบ 100%</span>
                   </div>
 
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "0.75rem" }}>
@@ -884,18 +953,31 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                               {emp.guardName}
                             </div>
                             <div style={{ fontSize: "0.74rem", color: "#fca5a5", fontWeight: 700 }}>
-                              นายจ้าง / ผู้ว่าจ้าง (บอทเงียบ 100%)
+                              👤 บุคคลทั่วไป / นายจ้าง (บอทเงียบ 100%)
                             </div>
                           </div>
                         </div>
+
+                        {emp.displayName && (
+                          <div style={{ fontSize: "0.72rem", color: "#94a3b8", background: "#0b1220", padding: "0.25rem 0.5rem", borderRadius: "6px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <span>💬 LINE: {emp.displayName}</span>
+                            {emp.siteIds && emp.siteIds.length > 1 && (
+                              <span style={{ color: "#38bdf8", fontWeight: 700, fontSize: "0.68rem" }}>
+                                🌐 ส่งใน {emp.siteIds.length} จุด
+                              </span>
+                            )}
+                          </div>
+                        )}
 
                         {/* ACTION BUTTONS */}
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: "0.5rem", gap: "0.3rem" }}>
                           <button
                             onClick={() => handleToggleRole(emp, "regular")}
-                            style={{ background: "#065f46", color: "#a7f3d0", border: "1px solid #059669", padding: "0.25rem 0.55rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer" }}
+                            style={{ background: "#064e3b", color: "#a7f3d0", border: "1px solid #10b981", padding: "0.28rem 0.6rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.25rem" }}
+                            title="ยืนยันเป็น รปภ. ประจำจุด เพื่อเปิดระบบบอทตอบรับและเช็คเวร"
                           >
-                            👮‍♂️ ปรับเป็น รปภ.
+                            <span>👮‍♂️</span>
+                            <span>ยืนยันเป็น รปภ. (เปิดบอทตอบ)</span>
                           </button>
 
                           <div style={{ display: "flex", gap: "0.3rem" }}>
@@ -985,9 +1067,10 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                     onChange={(e) => setFormRole(e.target.value as any)}
                     style={{ width: "100%", background: "#1e293b", border: "1px solid #334155", color: "#ffffff", padding: "0.55rem", borderRadius: "8px", fontSize: "0.88rem", fontWeight: 700 }}
                   >
-                    <option value="regular">🛡️ รปภ. ประจำจุด (บอทตอบ)</option>
-                    <option value="spare">🔄 รปภ. สแปร์กลาง (บอทตอบ)</option>
-                    <option value="employer">👔 นายจ้าง / ลูกค้า (งดตอบ 100%)</option>
+                    <option value="regular">🛡️ รปภ. ประจำจุด (บอทตรวจเวร & ตอบรับสติกเกอร์)</option>
+                    <option value="spare">🔄 รปภ. สแปร์กลาง (บอทตรวจเวร & ตอบรับสติกเกอร์)</option>
+                    <option value="head_guard">👮‍♂️ หัวหน้าชุด / สายตรวจ (บอทตรวจเวร & ตอบรับ)</option>
+                    <option value="employer">👤 บุคคลทั่วไป / นายจ้าง / ลูกค้า (บอทเงียบ 100%)</option>
                   </select>
                 </div>
               </div>
