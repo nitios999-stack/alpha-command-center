@@ -239,9 +239,9 @@ function groupSites(slots: CoverageSlot[], registry: OperationalSite[], lineGrou
     groups.set(slot.siteId, existing);
   });
   const registryById = new Map(activeRegistry.map((site) => [site.id, site]));
-  const lineGroupBySite = new Map(lineGroups.filter((group): group is LineGroup & { siteId: string } => Boolean(group.siteId)).map((group) => [group.siteId, group]));
-  const siteIds = new Set([...activeRegistry.map((site) => site.id), ...groups.keys()]);
-  return Array.from(siteIds)
+  // Only display sites that actually have configured shift slots in this wave
+  const siteIds = Array.from(groups.keys());
+  return siteIds
     .map((id) => {
       const grouped = groups.get(id) ?? [];
       const registered = registryById.get(id);

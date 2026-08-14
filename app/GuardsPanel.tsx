@@ -339,9 +339,25 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
     return guards.filter((g) => g.role === "employer").length;
   }, [guards]);
 
-  // Shift timings per site from database slots
+  // Shift timings per site from database slots and linePointDetails
   const siteShiftTimings = useMemo(() => {
     const map = new Map<string, { morning?: string; evening?: string }>();
+    
+    // Check linePointDetails (which reflects shift_templates for all groups/sites)
+    if (data?.linePointDetails && data?.lineGroups) {
+      for (const grp of data.lineGroups) {
+        if (!grp.siteId) continue;
+        const detail = data.linePointDetails[grp.id];
+        if (detail) {
+          const existing = map.get(grp.siteId) || {};
+          if (detail.morning?.deadline) existing.morning = detail.morning.deadline;
+          if (detail.evening?.deadline) existing.evening = detail.evening.deadline;
+          map.set(grp.siteId, existing);
+        }
+      }
+    }
+
+    // Also check active coverage slots
     if (data?.slots) {
       for (const slot of data.slots) {
         const existing = map.get(slot.siteId) || {};
@@ -351,7 +367,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
       }
     }
     return map;
-  }, [data?.slots]);
+  }, [data?.slots, data?.linePointDetails, data?.lineGroups]);
 
   // Guards belonging to the selected site (or mapped to this site via webhook events)
   const siteGuards = useMemo(() => {
@@ -645,13 +661,24 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                   {/* SHIFT TIMINGS BANNER (LOADED DIRECTLY FROM DATABASE) */}
                   {(() => {
                     const timings = siteShiftTimings.get(selectedSiteId);
-                    const morningTime = timings?.morning || "07:00";
-                    const eveningTime = timings?.evening || "19:00";
+                    const hasMorning = Boolean(timings?.morning);
+                    const hasEvening = Boolean(timings?.evening);
+
+                    if (!hasMorning && !hasEvening) {
+                      return (
+                        <div style={{ display: "flex", gap: "0.5rem", background: "#0b1220", padding: "0.25rem 0.6rem", borderRadius: "6px", border: "1px solid #1e293b", fontSize: "0.76rem", color: "#94a3b8" }}>
+                          ⚙️ ยังไม่เปิดเวลากะ
+                        </div>
+                      );
+                    }
+
                     return (
-                      <div style={{ display: "flex", gap: "0.5rem", background: "#0b1220", padding: "0.25rem 0.6rem", borderRadius: "6px", border: "1px solid #1e293b", fontSize: "0.76rem" }}>
-                        <span style={{ color: "#fde047", fontWeight: 700 }}>☀️ กะเช้า ({morningTime})</span>
-                        <span style={{ color: "#475569" }}>|</span>
-                        <span style={{ color: "#a5b4fc", fontWeight: 700 }}>🌙 กะดึก ({eveningTime})</span>
+                      <div style={{ display: "flex", gap: "0.5rem", background: "#0b1220", padding: "0.25rem 0.6rem", borderRadius: "6px", border: "1px solid #1e293b", fontSize: "0.76rem", alignItems: "center" }}>
+                        {hasMorning && <span style={{ color: "#fde047", fontWeight: 700 }}>☀️ กะเช้า ({timings?.morning})</span>}
+                        {hasMorning && hasEvening && <span style={{ color: "#475569" }}>|</span>}
+                        {hasEvening && <span style={{ color: "#a5b4fc", fontWeight: 700 }}>🌙 กะดึก ({timings?.evening})</span>}
+                        {!hasMorning && hasEvening && <span style={{ color: "#64748b", fontSize: "0.7rem" }}>(ไม่มีกะเช้า)</span>}
+                        {hasMorning && !hasEvening && <span style={{ color: "#64748b", fontSize: "0.7rem" }}>(ไม่มีกะดึก)</span>}
                       </div>
                     );
                   })()}
