@@ -7,7 +7,7 @@
   ],
   "apphosting": [
     {
-      "backendId": "alpha-command-center",
+      "backendId": "alpha-command-center-1",
       "rootDir": ".",
       "ignore": [
         "node_modules",
@@ -19,16 +19,22 @@
     }
   ],
   "hosting": {
-    "public": "dist/client",
+    "public": "public",
     "ignore": [
       "firebase.json",
       "**/.*",
       "**/node_modules/**"
     ],
-    "rewrites": [
+    "redirects": [
       {
-        "source": "**",
-        "destination": "/index.html"
+        "source": "/",
+        "destination": "https://alpha-command-center-1--alphacommandcenter-d3341.asia-southeast1.hosted.app/",
+        "type": 302
+      },
+      {
+        "source": "/**",
+        "destination": "https://alpha-command-center-1--alphacommandcenter-d3341.asia-southeast1.hosted.app/:splat",
+        "type": 302
       }
     ]
   }
