@@ -1,4 +1,4 @@
-import { getFirebaseD1Database } from "../lib/firebase-d1";
+import { getFirebaseD1Database } from "../lib/firebase-d1.ts";
 import { createHash, randomUUID } from "node:crypto";
 
 const env = Object.assign({ DB: true }, (typeof process !== "undefined" ? process.env : {})) as Record<string, any>;
@@ -735,7 +735,7 @@ export async function syncTodayCoverageSlotsFromTemplates(operationalDate?: stri
   const date = operationalDate || now.date;
   const nowIso = now.iso;
 
-  // 1. Fetch active shift templates joined with site names
+  // 1. Fetch active shift templates joined with active site names
   const templatesResult = await db.prepare(`
     SELECT st.*, os.site_name, os.customer_name 
     FROM shift_templates st
@@ -744,26 +744,37 @@ export async function syncTodayCoverageSlotsFromTemplates(operationalDate?: stri
   `).all<D1Row>();
 
   const templates = (templatesResult.results || []) as any[];
-  if (!templates.length) return;
-
   const operations: any[] = [];
 
   for (const t of templates) {
-    const slotId = `slot-${date}-${t.wave}-${t.site_id}-${t.post_name}-${t.slot_label}`.replace(/[^a-zA-Z0-9_-]/g, "_");
-    const cleanDeadline = String(t.deadline || (t.wave === "morning" ? "06:00" : "18:00")).trim();
+    const slotId = `slot-${date}-${t.wave}-${t.site_id}`.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const cleanDeadline = String(t.deadline || (t.wave === "morning" ? "07:00" : "19:00")).trim();
     const assignedGuard = t.assigned_guard ? String(t.assigned_guard).trim() : null;
 
-    // Update deadline on existing slots for this site/wave/date
+    // Update deadline and metadata on existing slots for this site/wave/date
     operations.push(
       db.prepare(`
         UPDATE coverage_slots 
         SET deadline = ?, 
             site_name = ?, 
             customer_name = ?,
+            post_name = ?,
+            slot_label = ?,
             assigned_guard = COALESCE(coverage_slots.assigned_guard, ?),
             updated_at = ?
         WHERE site_id = ? AND wave = ? AND operational_date = ?
-      `).bind(cleanDeadline, String(t.site_name), String(t.customer_name), assignedGuard, nowIso, String(t.site_id), String(t.wave), date)
+      `).bind(
+        cleanDeadline, 
+        String(t.site_name), 
+        String(t.customer_name), 
+        String(t.post_name || "จุดประจำ"),
+        String(t.slot_label || "ช่อง 1"),
+        assignedGuard, 
+        nowIso, 
+        String(t.site_id), 
+        String(t.wave), 
+        date
+      )
     );
 
     // Insert slot if it does not exist yet today
@@ -798,11 +809,11 @@ export async function syncTodayCoverageSlotsFromTemplates(operationalDate?: stri
     await db.batch(operations.slice(offset, offset + 50));
   }
 
-  // Prune today's waiting slots for deactivated or removed shift templates
+  // 2. Prune today's unconfirmed slots (waiting, missing, unassigned) for deactivated or removed shift templates
   await db.prepare(`
     DELETE FROM coverage_slots
     WHERE operational_date = ?
-      AND state = 'waiting'
+      AND state IN ('waiting', 'missing', 'unassigned')
       AND NOT EXISTS (
         SELECT 1 FROM shift_templates st
         JOIN operational_sites os ON st.site_id = os.id
@@ -2179,15 +2190,27 @@ export async function evaluateShiftCheckIn(input: {
         return cleanText.includes(cleanKw);
       });
 
-      // LAYER 4: ตรวจสอบรูปภาพ + กรอบเวลาที่สมจริง (Tight Realistic Shift Window)
-      // รูปภาพทั่วไป: อนุญาตก่อนเวลาเริ่มกะได้ไม่เกิน 30 นาที (เช่น กะ 18:00 น. เริ่มนับตั้งแต่ 17:30 น.)
-      // หากส่งก่อน 17:30 น. (เช่น 16:30 น.) จะถือว่าเป็นภาพตรวจตราของกะเช้า ไม่นำมายืนยันกะดึกล่วงหน้า
-      // เว้นแต่จะมีคำว่า "รับมอบเวร" หรือ "ว.4 เข้าเวร" ชัดเจน จึงจะยอมรับก่อนเวลาได้ถึง 45 นาที (17:15 น.)
-      const windowStart = hasGuardEnterKeyword ? deadlineMins - 45 : deadlineMins - 30;
-      const windowEnd = deadlineMins + 240; // หลังเวลาไม่เกิน 4 ชั่วโมง
+      // LAYER 4: ตรวจสอบรูปภาพ + กรอบเวลาที่สมจริง (Realistic Shift Check-in Window)
+      // กะเช้า: รองรับการรายงานตัวตั้งแต่ 05:00 ถึงช่วงสาย
+      // กะดึก: รองรับการรายงานตัวตั้งแต่ 16:30 ถึงช่วงดึก
+      const isMorningSlot = slot.wave === "morning";
+      const isEveningSlot = slot.wave === "evening";
 
-      if (currentMinutes < windowStart || currentMinutes > windowEnd) {
-        // อยู่นอกกรอบเวลารายงานตัวเข้าเวร -> เป็นการตรวจตราตามปกติของกะปัจจุบัน ข้ามไป
+      let inShiftTimeWindow = false;
+      if (isMorningSlot) {
+        // ผลัดเช้า (05:00 - 12:00)
+        inShiftTimeWindow = currentMinutes >= (5 * 60) && currentMinutes <= (12 * 60);
+      } else if (isEveningSlot) {
+        // ผลัดดึก (16:30 - 23:59 หรือ 00:00 - 05:00)
+        inShiftTimeWindow = currentMinutes >= (16 * 60 + 30) || currentMinutes <= (5 * 60);
+      } else {
+        const windowStart = hasGuardEnterKeyword ? deadlineMins - 120 : deadlineMins - 90;
+        const windowEnd = deadlineMins + 360;
+        inShiftTimeWindow = currentMinutes >= windowStart && currentMinutes <= windowEnd;
+      }
+
+      if (!inShiftTimeWindow) {
+        // อยู่นอกกรอบเวลารายงานตัวเข้าเวรของกะนี้ ข้ามไป
         continue;
       }
 
@@ -3088,6 +3111,20 @@ export async function updateGroupShiftConfiguration(input: {
         updated_at = excluded.updated_at
     `).bind(eveningTemplateId, siteId, input.eveningGuard || null, input.eveningDeadline || "19:00", input.hasEveningShift ? 1 : 0, now),
   ];
+
+  if (!input.hasMorningShift) {
+    operations.push(
+      db.prepare("DELETE FROM coverage_slots WHERE site_id = ? AND wave = 'morning' AND state IN ('waiting', 'missing', 'unassigned')")
+        .bind(siteId)
+    );
+  }
+
+  if (!input.hasEveningShift) {
+    operations.push(
+      db.prepare("DELETE FROM coverage_slots WHERE site_id = ? AND wave = 'evening' AND state IN ('waiting', 'missing', 'unassigned')")
+        .bind(siteId)
+    );
+  }
 
   await db.batch(operations);
   await syncTodayCoverageSlotsFromTemplates();

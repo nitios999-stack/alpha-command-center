@@ -175,6 +175,12 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
   useEffect(() => {
     loadGuards();
     checkTokenStatus();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void loadGuards();
+      }
+    }, 8_000);
+    return () => window.clearInterval(timer);
   }, []);
 
   // Set default selected site

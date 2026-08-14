@@ -314,14 +314,19 @@ export function ShiftsPanel() {
 
   const handleUpdateShift = async (groupId: string, updates: any) => {
     setSavingId(groupId);
+    // Optimistic UI update
+    setConfigs((prev) =>
+      prev.map((c) => (c.groupId === groupId ? { ...c, ...updates } : c))
+    );
+
     try {
       const target = configs.find((c) => c.groupId === groupId);
       const payload = {
         groupId,
-        hasMorningShift: updates.hasMorningShift !== undefined ? updates.hasMorningShift : target.hasMorningShift,
-        morningDeadline: updates.morningDeadline !== undefined ? updates.morningDeadline : target.morningDeadline,
-        hasEveningShift: updates.hasEveningShift !== undefined ? updates.hasEveningShift : target.hasEveningShift,
-        eveningDeadline: updates.eveningDeadline !== undefined ? updates.eveningDeadline : target.eveningDeadline,
+        hasMorningShift: updates.hasMorningShift !== undefined ? updates.hasMorningShift : target?.hasMorningShift,
+        morningDeadline: updates.morningDeadline !== undefined ? updates.morningDeadline : target?.morningDeadline,
+        hasEveningShift: updates.hasEveningShift !== undefined ? updates.hasEveningShift : target?.hasEveningShift,
+        eveningDeadline: updates.eveningDeadline !== undefined ? updates.eveningDeadline : target?.eveningDeadline,
         actor: "web-admin",
       };
 
@@ -332,15 +337,14 @@ export function ShiftsPanel() {
       });
 
       if (res.ok) {
-        setConfigs((prev) =>
-          prev.map((c) => (c.groupId === groupId ? { ...c, ...payload } : c))
-        );
         setMessage("✅ บันทึกเวลากะเรียบร้อยแล้ว");
       } else {
         setMessage("❌ บันทึกไม่สำเร็จ");
+        await fetchConfigs();
       }
     } catch {
       setMessage("❌ เกิดข้อผิดพลาดในการบันทึก");
+      await fetchConfigs();
     }
     setSavingId(null);
   };

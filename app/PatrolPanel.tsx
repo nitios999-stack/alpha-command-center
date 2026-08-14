@@ -11,7 +11,14 @@ type PatrolPanelProps = {
 };
 
 export default function PatrolPanel({ data, loading, onRefresh, onAction }: PatrolPanelProps) {
-  const [wave, setWave] = useState<"morning" | "evening" | "all">("morning");
+  const [wave, setWave] = useState<"morning" | "evening" | "all">(() => {
+    try {
+      const hour = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Bangkok", hour: "2-digit", hour12: false }).format(new Date()));
+      return (hour >= 16 || hour < 5) ? "evening" : "morning";
+    } catch {
+      return "morning";
+    }
+  });
   const [filterTab, setFilterTab] = useState<"pending" | "confirmed" | "all">("pending");
   const [search, setSearch] = useState("");
   const [currentTime, setCurrentTime] = useState("");

@@ -134,10 +134,11 @@ function readFirestoreDocument(document: unknown): Row {
 }
 
 class FirestoreRest {
-  private token: string | null = null;
-  private tokenExpiresAt = 0;
+  readonly projectId: string | undefined;
 
-  constructor(private readonly projectId: string | undefined) {}
+  constructor(projectId: string | undefined) {
+    this.projectId = projectId;
+  }
 
   isConfigured() {
     return Boolean(this.projectId && this.projectId.trim().length > 0);
@@ -281,8 +282,13 @@ function normalizeValue(value: unknown): SqlValue {
 
 class FirebaseStatement {
   private values: SqlValue[] = [];
+  readonly owner: FirebaseD1Database;
+  readonly sql: string;
 
-  constructor(private readonly owner: FirebaseD1Database, private readonly sql: string) {}
+  constructor(owner: FirebaseD1Database, sql: string) {
+    this.owner = owner;
+    this.sql = sql;
+  }
 
   bind(...values: SqlValue[]) {
     this.values = values;

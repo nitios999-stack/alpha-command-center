@@ -224,8 +224,8 @@ const slotText: Record<SlotState, string> = {
 
 function deriveSiteStatus(slots: CoverageSlot[]): SiteStatus {
   if (!slots.length) return "gray";
+  if (slots.some((slot) => slot.state === "confirmed")) return "green";
   if (slots.some((slot) => ["missing", "unassigned", "replacement_required"].includes(slot.state))) return "red";
-  if (slots.every((slot) => slot.state === "confirmed")) return "green";
   return "yellow";
 }
 
@@ -274,15 +274,15 @@ function groupSites(slots: CoverageSlot[], registry: OperationalSite[], lineGrou
 
 function siteStatusSummary(site: SiteCard) {
   if (site.status === "green") {
-    return site.lateCount > 0 ? `ครบ • สาย ${site.lateCount}` : "ครบกำลัง";
+    return site.checkedAt ? `เข้าเวรแล้ว (${displayTime(site.checkedAt)})` : "เข้าเวรแล้ว ✓";
   }
   if (site.status === "yellow") {
-    return `รอยืนยัน ${site.slots.filter((slot) => slot.state !== "confirmed").length}`;
+    return site.nextDeadline ? `รอเข้าเวร (ก่อน ${site.nextDeadline})` : "รอรายงานตัว";
   }
   if (site.status === "red") {
-    return `ขาด/ต้องจัด ${site.slots.filter((slot) => ["missing", "unassigned", "replacement_required"].includes(slot.state)).length}`;
+    return site.nextDeadline ? `🚨 ขาดส่ง (กำหนด ${site.nextDeadline})` : "ยังไม่เข้าเวร";
   }
-  return "ยังไม่มีอัตรา";
+  return "ไม่ได้เปิดกะนี้";
 }
 
 function lineGroupLabel(group: LineGroup | null | undefined) {
@@ -904,7 +904,15 @@ export default function Home() {
       }
     }
   }, []);
-  const [wave, setWave] = useState<"morning" | "evening">("morning");
+
+  const [wave, setWave] = useState<"morning" | "evening">(() => {
+    try {
+      const hour = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Bangkok", hour: "2-digit", hour12: false }).format(new Date()));
+      return (hour >= 16 || hour < 5) ? "evening" : "morning";
+    } catch {
+      return "morning";
+    }
+  });
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -1526,19 +1534,11 @@ export default function Home() {
         <div className="command-tabs-group">
           <button
             type="button"
-            className={`command-tab ${tab === "reports" ? "active" : ""}`}
-            onClick={() => setTab("reports")}
-          >
-            <span className="tab-icon">📋</span>
-            <span>ตรวจรายงาน</span>
-          </button>
-          <button
-            type="button"
             className={`command-tab ${tab === "ops" ? "active" : ""}`}
             onClick={() => setTab("ops")}
           >
-            <span className="tab-icon">🛡️</span>
-            <span>เข้าเวรวันนี้</span>
+            <span className="tab-icon">📊</span>
+            <span>ภาพรวมตรวจเวร</span>
           </button>
           <button
             type="button"
@@ -1550,37 +1550,37 @@ export default function Home() {
           </button>
           <button
             type="button"
+            className={`command-tab ${tab === "guards" ? "active" : ""}`}
+            onClick={() => setTab("guards")}
+          >
+            <span className="tab-icon">👮</span>
+            <span>ทำเนียบ รปภ. & นายจ้าง</span>
+          </button>
+          <button
+            type="button"
+            className={`command-tab ${tab === "patrol" ? "active" : ""}`}
+            onClick={() => setTab("patrol")}
+          >
+            <span className="tab-icon">🛡️</span>
+            <span>ตรวจภาพถ่าย</span>
+          </button>
+          <button
+            type="button"
             className={`command-tab ${tab === "stickers" ? "active" : ""}`}
             onClick={() => setTab("stickers")}
           >
             <span className="tab-icon">🤖</span>
-            <span>สติกเกอร์ตอบกลับ</span>
-          </button>
-          <button
-            type="button"
-            className={`command-tab ${tab === "line" ? "active" : ""}`}
-            onClick={() => setTab("line")}
-          >
-            <span className="tab-icon">💬</span>
-            <span>เชื่อมต่อ LINE OA</span>
-          </button>
-          <button
-            type="button"
-            className={`command-tab ${tab === "setup" ? "active" : ""}`}
-            onClick={() => setTab("setup")}
-          >
-            <span className="tab-icon">⚙️</span>
-            <span>ตั้งค่าอัตรา</span>
+            <span>บอทสั่งการ</span>
           </button>
           <button
             type="button"
             className={`command-tab ${tab === "inquiries" ? "active" : ""}`}
             onClick={() => setTab("inquiries")}
             style={{
-              background: tab === "inquiries" ? "#dc2626" : "rgba(220, 38, 38, 0.15)",
-              color: tab === "inquiries" ? "#ffffff" : "#fca5a5",
-              border: tab === "inquiries" ? "1px solid #ef4444" : "1px solid rgba(239, 68, 68, 0.3)",
-              fontWeight: 800,
+              background: tab === "inquiries" ? "#dc2626" : "rgba(220, 38, 38, 0.12)",
+              color: tab === "inquiries" ? "#ffffff" : "#f87171",
+              borderColor: tab === "inquiries" ? "#ef4444" : "rgba(239, 68, 68, 0.25)",
+              fontWeight: 700,
             }}
           >
             <span className="tab-icon">💬</span>
@@ -1588,11 +1588,19 @@ export default function Home() {
           </button>
           <button
             type="button"
-            className={`command-tab ${tab === "guards" ? "active" : ""}`}
-            onClick={() => setTab("guards")}
+            className={`command-tab ${tab === "reports" ? "active" : ""}`}
+            onClick={() => setTab("reports")}
           >
-            <span className="tab-icon">👮</span>
-            <span>ทำเนียบ รปภ.</span>
+            <span className="tab-icon">📋</span>
+            <span>ตรวจความเคลื่อนไหว</span>
+          </button>
+          <button
+            type="button"
+            className={`command-tab ${tab === "line" ? "active" : ""}`}
+            onClick={() => setTab("line")}
+          >
+            <span className="tab-icon">🏢</span>
+            <span>กลุ่ม LINE ({data?.lineGroups.length ?? 0})</span>
           </button>
           <button
             type="button"
@@ -1601,20 +1609,6 @@ export default function Home() {
           >
             <span className="tab-icon">💳</span>
             <span>วางบิล</span>
-          </button>
-          <button
-            type="button"
-            className={`command-tab ${tab === "patrol" ? "active" : ""}`}
-            onClick={() => setTab("patrol")}
-            style={{
-              background: tab === "patrol" ? "#0284c7" : "linear-gradient(135deg, #0284c7, #0369a1)",
-              color: "#ffffff",
-              fontWeight: 800,
-              boxShadow: "0 2px 8px rgba(2, 132, 199, 0.3)",
-            }}
-          >
-            <span className="tab-icon">📱</span>
-            <span>แผงตรวจมือถือ</span>
           </button>
         </div>
 
