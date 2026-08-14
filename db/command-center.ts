@@ -3452,6 +3452,10 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
     FROM guard_profiles gp
     LEFT JOIN operational_sites os ON gp.site_id = os.id
     WHERE gp.active = 1
+      AND gp.guard_name NOT LIKE 'รปภ. ประจำ%'
+      AND gp.guard_name NOT LIKE 'รปภ. สแปร์กลาง%'
+      AND gp.id NOT LIKE 'guard-line-point-%'
+      AND gp.guard_name NOT LIKE 'U-%'
   `;
   const params: any[] = [];
   if (siteId === "spares_only") {
@@ -3629,6 +3633,45 @@ export async function getRecentWebhookSenders(options?: number | {
   params.push(limit);
 
   const rows = (await db.prepare(query).bind(...params).all<any>()).results || [];
+
+  const lineToken = await getEffectiveLineToken();
+  const sendersToFetch: { groupId: string; rawUserId: string; row: any }[] = [];
+
+  for (const r of rows) {
+    const rawUid = String(r.sender_key || "").trim();
+    if (rawUid.startsWith("U") && rawUid.length === 33 && (!r.display_name || r.display_name.startsWith("U-") || !r.picture_url)) {
+      sendersToFetch.push({ groupId: String(r.group_id), rawUserId: rawUid, row: r });
+    }
+  }
+
+  if (lineToken && sendersToFetch.length > 0) {
+    await Promise.allSettled(
+      sendersToFetch.slice(0, 20).map(async ({ groupId, rawUserId, row }) => {
+        try {
+          let res = await fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/member/${encodeURIComponent(rawUserId)}`, {
+            headers: { Authorization: `Bearer ${lineToken}` },
+          });
+          if (!res.ok) {
+            res = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(rawUserId)}`, {
+              headers: { Authorization: `Bearer ${lineToken}` },
+            });
+          }
+          if (res.ok) {
+            const pJson = await res.json();
+            if (pJson.displayName) {
+              row.display_name = pJson.displayName;
+              row.picture_url = pJson.pictureUrl || null;
+              await db.prepare(`
+                UPDATE guard_profiles 
+                SET display_name = ?, picture_url = COALESCE(?, picture_url), updated_at = ?
+                WHERE id = ? OR display_name = ?
+              `).bind(pJson.displayName, pJson.pictureUrl || null, bangkokNow().iso, rawUserId, rawUserId).run();
+            }
+          }
+        } catch {}
+      })
+    );
+  }
 
   return rows.map((r: any) => {
     let cleanGuardName: string | undefined = undefined;
@@ -3852,14 +3895,14 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
     if (!sId) continue;
     const rawUid = String(s.raw_user_id || (sId.startsWith("U") && sId.length >= 30 ? sId : "")).trim();
     const lineProfile = rawUid ? profileCache.get(rawUid) : undefined;
+    if (!lineProfile?.displayName) {
+      // Skip legacy unverified hashes with no real LINE display name
+      continue;
+    }
+
+    const finalGuardName = lineProfile.displayName;
+
     const targetSiteId = s.site_id || linePointSiteIdentifier(s.group_id);
-
-    const rawGroupName = String(s.site_name || s.group_name || `จุด ${String(s.group_id).slice(-6)}`);
-    const cleanGroupName = rawGroupName.replace(/^(รปภ\.|กลุ่ม\s*รปภ\.|งาน\s*รปภ\.)\s*/i, "").trim();
-
-    const fallbackGuardName = `รปภ. ประจำ ${cleanGroupName}`;
-    const finalGuardName = lineProfile?.displayName || fallbackGuardName;
-
     const existing = discoveredGuards.get(sId) || {
       id: sId,
       groupIds: new Set<string>(),
@@ -3867,18 +3910,16 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
       siteName: s.site_name,
       groupName: s.group_name,
       guardName: finalGuardName,
-      displayName: lineProfile?.displayName || sId,
-      pictureUrl: lineProfile?.pictureUrl || null,
+      displayName: lineProfile.displayName,
+      pictureUrl: lineProfile.pictureUrl || null,
       source: "webhook_events",
     };
 
     existing.groupIds.add(String(s.group_id));
     existing.siteIds.add(targetSiteId);
-    if (lineProfile?.displayName) {
-      existing.guardName = lineProfile.displayName;
-      existing.displayName = lineProfile.displayName;
-      existing.pictureUrl = lineProfile.pictureUrl || existing.pictureUrl;
-    }
+    existing.guardName = lineProfile.displayName;
+    existing.displayName = lineProfile.displayName;
+    existing.pictureUrl = lineProfile.pictureUrl || existing.pictureUrl;
     discoveredGuards.set(sId, existing);
   }
 

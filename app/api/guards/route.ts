@@ -9,6 +9,9 @@ export async function GET(request: Request) {
     const siteId = searchParams.get("siteId") || undefined;
     const includeSenders = searchParams.get("includeSenders") === "true";
 
+    // Auto purge any legacy placeholder records silently
+    await purgePlaceholderGuardProfiles("system_auto").catch(() => {});
+
     const guards = await getGuardProfiles(siteId);
     let recentSenders: any[] = [];
     if (includeSenders) {
