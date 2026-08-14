@@ -1,5 +1,5 @@
 import { getFirebaseD1Database } from "../lib/firebase-d1";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 const env = Object.assign({ DB: true }, (typeof process !== "undefined" ? process.env : {})) as Record<string, any>;
 
@@ -503,6 +503,35 @@ async function initializeDatabase() {
       created_at TEXT NOT NULL,
       created_by TEXT NOT NULL
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS guard_profiles (
+      id TEXT PRIMARY KEY,
+      site_id TEXT NOT NULL,
+      guard_name TEXT NOT NULL,
+      display_name TEXT,
+      picture_url TEXT,
+      phone_number TEXT,
+      preferred_shift TEXT NOT NULL DEFAULT 'all',
+      role TEXT NOT NULL DEFAULT 'regular',
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS employer_inquiries (
+      id TEXT PRIMARY KEY,
+      group_id TEXT NOT NULL,
+      site_name TEXT NOT NULL,
+      sender_name TEXT NOT NULL,
+      sender_key TEXT,
+      message_text TEXT NOT NULL,
+      urgency TEXT NOT NULL DEFAULT 'p3_general',
+      category TEXT NOT NULL DEFAULT 'general',
+      status TEXT NOT NULL DEFAULT 'pending',
+      acknowledged_by TEXT,
+      acknowledged_at TEXT,
+      dispatched_at TEXT,
+      resolved_at TEXT,
+      received_at TEXT NOT NULL
+    )`),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_coverage_today ON coverage_slots(operational_date, wave, site_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_billing_due ON billing_cases(due_at, payment_state)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id, created_at)"),
@@ -514,6 +543,9 @@ async function initializeDatabase() {
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_registry_name ON line_group_registry(group_name)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_queued_stickers_group_status ON line_queued_stickers(group_id, status)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_registry_seen ON line_group_registry(last_seen_at)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_guard_profiles_site ON guard_profiles(site_id, active)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_employer_inquiries_urgency_time ON employer_inquiries(urgency, status, received_at)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_employer_inquiries_group_time ON employer_inquiries(group_id, received_at)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_events_group_time ON line_webhook_events(group_id, received_at)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_events_type_time ON line_webhook_events(event_type, received_at)"),
     db.prepare("ALTER TABLE line_webhook_events ADD COLUMN message_type TEXT"),
@@ -3622,4 +3654,435 @@ export async function sendIncidentAlertToCommandRoom(input: {
   );
 
   return { ok: true, sent: true };
+}
+
+// -------------------------------------------------------------
+// GUARD DIRECTORY & MULTI-GUARD PROFILES
+// -------------------------------------------------------------
+
+export type GuardProfile = {
+  id: string;
+  siteId: string;
+  siteName?: string;
+  guardName: string;
+  displayName: string | null;
+  pictureUrl: string | null;
+  phoneNumber: string | null;
+  preferredShift: "morning" | "evening" | "all";
+  role: "regular" | "spare" | "head_guard";
+  active: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]> {
+  await ensureDatabase();
+  const db = database();
+
+  let query = `
+    SELECT gp.*, os.site_name
+    FROM guard_profiles gp
+    LEFT JOIN operational_sites os ON gp.site_id = os.id
+    WHERE gp.active = 1
+  `;
+  const params: any[] = [];
+  if (siteId) {
+    query += " AND gp.site_id = ?";
+    params.push(siteId);
+  }
+  query += " ORDER BY os.site_name ASC, gp.role ASC, gp.guard_name ASC";
+
+  const rows = (await db.prepare(query).bind(...params).all<any>()).results || [];
+  return rows.map((r: any) => ({
+    id: String(r.id),
+    siteId: String(r.site_id),
+    siteName: r.site_name ? String(r.site_name) : undefined,
+    guardName: String(r.guard_name),
+    displayName: r.display_name ? String(r.display_name) : null,
+    pictureUrl: r.picture_url ? String(r.picture_url) : null,
+    phoneNumber: r.phone_number ? String(r.phone_number) : null,
+    preferredShift: (r.preferred_shift || "all") as "morning" | "evening" | "all",
+    role: (r.role || "regular") as "regular" | "spare" | "head_guard",
+    active: Number(r.active ?? 1),
+    createdAt: String(r.created_at || ""),
+    updatedAt: String(r.updated_at || ""),
+  }));
+}
+
+export async function saveGuardProfile(data: {
+  id?: string;
+  siteId: string;
+  guardName: string;
+  displayName?: string;
+  pictureUrl?: string;
+  phoneNumber?: string;
+  preferredShift?: string;
+  role?: string;
+  active?: number;
+}): Promise<GuardProfile> {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow().iso;
+  const id = data.id?.trim() || `guard-${randomUUID().slice(0, 8)}`;
+
+  await db.prepare(`
+    INSERT INTO guard_profiles (id, site_id, guard_name, display_name, picture_url, phone_number, preferred_shift, role, active, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      site_id = excluded.site_id,
+      guard_name = excluded.guard_name,
+      display_name = COALESCE(excluded.display_name, guard_profiles.display_name),
+      picture_url = COALESCE(excluded.picture_url, guard_profiles.picture_url),
+      phone_number = excluded.phone_number,
+      preferred_shift = excluded.preferred_shift,
+      role = excluded.role,
+      active = excluded.active,
+      updated_at = excluded.updated_at
+  `).bind(
+    id,
+    data.siteId,
+    data.guardName.trim(),
+    data.displayName?.trim() || null,
+    data.pictureUrl?.trim() || null,
+    data.phoneNumber?.trim() || null,
+    data.preferredShift || "all",
+    data.role || "regular",
+    data.active ?? 1,
+    now,
+    now
+  ).run();
+
+  await addAudit("guard_profile", id, "save", "admin", `บันทึกข้อมูล รปภ. ${data.guardName}`);
+
+  const list = await getGuardProfiles();
+  return list.find((g) => g.id === id) || {
+    id,
+    siteId: data.siteId,
+    guardName: data.guardName,
+    displayName: data.displayName || null,
+    pictureUrl: data.pictureUrl || null,
+    phoneNumber: data.phoneNumber || null,
+    preferredShift: (data.preferredShift || "all") as any,
+    role: (data.role || "regular") as any,
+    active: data.active ?? 1,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export async function deleteGuardProfile(guardId: string): Promise<void> {
+  await ensureDatabase();
+  const db = database();
+  await db.prepare("UPDATE guard_profiles SET active = 0, updated_at = ? WHERE id = ?").bind(bangkokNow().iso, guardId).run();
+  await addAudit("guard_profile", guardId, "delete", "admin", `ลบ/ปิดใช้งาน รปภ. ID ${guardId}`);
+}
+
+export async function getRecentWebhookSenders(limit = 30): Promise<Array<{
+  senderKey: string;
+  groupId: string;
+  groupName: string;
+  lastSeenAt: string;
+  messageType?: string;
+}>> {
+  await ensureDatabase();
+  const db = database();
+
+  const rows = (await db.prepare(`
+    SELECT lwe.sender_key, lwe.group_id, lgr.group_name, MAX(lwe.received_at) as last_seen_at, lwe.message_type
+    FROM line_webhook_events lwe
+    LEFT JOIN line_group_registry lgr ON lwe.group_id = lgr.id
+    WHERE lwe.sender_key IS NOT NULL AND lwe.sender_key != ''
+    GROUP BY lwe.sender_key, lwe.group_id
+    ORDER BY last_seen_at DESC
+    LIMIT ?
+  `).bind(limit).all<any>()).results || [];
+
+  return rows.map((r: any) => ({
+    senderKey: String(r.sender_key),
+    groupId: String(r.group_id),
+    groupName: String(r.group_name || `กลุ่ม ${r.group_id.slice(-6)}`),
+    lastSeenAt: String(r.last_seen_at),
+    messageType: r.message_type ? String(r.message_type) : undefined,
+  }));
+}
+
+// -------------------------------------------------------------
+// EMPLOYER SENTINEL (ZERO-QUOTA LIVE FEED)
+// -------------------------------------------------------------
+
+export type EmployerInquiry = {
+  id: string;
+  groupId: string;
+  siteName: string;
+  senderName: string;
+  senderKey: string | null;
+  messageText: string;
+  urgency: "p1_critical" | "p2_service" | "p3_general";
+  category: string;
+  status: "pending" | "acknowledged" | "dispatched" | "resolved";
+  acknowledgedBy: string | null;
+  acknowledgedAt: string | null;
+  dispatchedAt: string | null;
+  resolvedAt: string | null;
+  receivedAt: string;
+  slaMinutes?: number;
+};
+
+export function classifyEmployerMessage(text: string): {
+  urgency: "p1_critical" | "p2_service" | "p3_general";
+  category: string;
+  title: string;
+  isUrgent: boolean;
+} {
+  const lower = text.toLowerCase();
+
+  // 🔴 P1: CRITICAL / COMPLAINT / INCIDENT / MENTION
+  const isMention = /@(all|everyone|alpha|รปภ|หัวหน้า|สายตรวจ|แอดมิน|admin)/i.test(text);
+  const criticalPatterns = [
+    { regex: /ไม่อยู่ป้อม|ไม่เห็นรปภ|รปภ\.?ไปไหน|ป้อมว่าง|ไม่มีคนเฝ้า/i, category: "guard_missing", title: "🔴 รปภ. ไม่อยู่ป้อม / ป้อมว่าง" },
+    { regex: /หลับ|นอนหลับ|แอบหลับ|หลับยาม|งีบ/i, category: "guard_sleeping", title: "🔴 พบ รปภ. หลับยาม" },
+    { regex: /เมา|ดื่ม|แอลกอฮอล์|กลิ่นเหล้า|สุรา/i, category: "guard_drunk", title: "🔴 รปภ. ดื่มแอลกอฮอล์" },
+    { regex: /ขโมย|โจร|งัด|ขโมยของ|บุกรุก|คนแปลกหน้า/i, category: "theft_intrusion", title: "🚨 มีขโมย / บุกรุก / ของหาย" },
+    { regex: /ทะเลาะ|ตีกัน|ทำร้าย|มีปากเสียง|ขู่/i, category: "violence", title: "🚨 เหตุทะเลาะวิวาท" },
+    { regex: /ไฟไหม้|ควัน|กลิ่นไหม้|แก๊สรั่ว|ระเบิด/i, category: "fire_hazard", title: "🔥 แจ้งเตือนเหตุเพลิงไหม้ / แก๊ส" },
+    { regex: /น้ำท่วม|น้ำรั่ว|ท่อแตก|น้ำล้น/i, category: "flood_pipe", title: "🌊 น้ำท่วม / ท่อประปาแตก" },
+    { regex: /ชน|อุบัติเหตุ|รถชน|เฉี่ยว/i, category: "accident", title: "🚗 เกิดอุบัติเหตุ / รถชน" },
+    { regex: /เปิดไม้กั้นไม่ได้|ไม้กั้นค้าง|ระบบล่ม|สแกนไม่ติด/i, category: "barrier_failure", title: "⚠️ ระบบไม้กั้นเสีย / ใช้งานไม่ได้" },
+    { regex: /ร้องเรียน|ไม่สุภาพ|พูดจาไม่ดี|กิริยา/i, category: "complaint", title: "⚠️ ร้องเรียนพฤติกรรม รปภ." },
+    { regex: /ขอดูกล้อง|ตรวจกล้อง|ย้อนหลัง|cctv/i, category: "cctv_request", title: "📹 ขอดูกล้องวงจรปิด CCTV" },
+  ];
+
+  for (const p of criticalPatterns) {
+    if (p.regex.test(text)) {
+      return { urgency: "p1_critical", category: p.category, title: p.title, isUrgent: true };
+    }
+  }
+
+  if (isMention) {
+    return { urgency: "p1_critical", category: "mention", title: "🔔 นายจ้างแท็กเรียกศูนย์/รปภ.", isUrgent: true };
+  }
+
+  // 🟡 P2: SERVICE / VISITOR / PARKING / DELIVERY
+  const servicePatterns = [
+    { regex: /ช่าง|ผู้รับเหมา|ซ่อม|ต่อเติม|ช่างแอร์|ช่างไฟ/i, category: "contractor", title: "🛠️ แจ้งช่าง / ผู้รับเหมาเข้าพื้นที่" },
+    { regex: /พัสดุ|ไปรษณีย์|flash|kerry|j&t|shopee|lazada/i, category: "parcel", title: "📦 แจ้งรับพัสดุ / ส่งของ" },
+    { regex: /จอดรถ|จอดขวาง|ขวางทาง|ขวางหน้าบ้าน/i, category: "parking", title: "🚗 แจ้งรถจอดขวางทาง" },
+    { regex: /แลกบัตร|ผู้มาติดต่อ|แขก|เพื่อน/i, category: "visitor", title: "👤 แจ้งผู้มาติดต่อ / แลกบัตร" },
+    { regex: /ลืมของ|กุญแจ|ทำตก/i, category: "lost_found", title: "🔑 แจ้งลืมของ / กุญแจ" },
+    { regex: /ไรเดอร์|grab|lineman|foodpanda|robinhood/i, category: "rider", title: "🛵 ไรเดอร์ส่งอาหาร" },
+  ];
+
+  for (const s of servicePatterns) {
+    if (s.regex.test(text)) {
+      return { urgency: "p2_service", category: s.category, title: s.title, isUrgent: false };
+    }
+  }
+
+  // ⚪ P3: GENERAL
+  return { urgency: "p3_general", category: "general", title: "💬 ข้อความทั่วไป", isUrgent: false };
+}
+
+export async function recordEmployerInquiry(input: {
+  groupId: string;
+  siteName?: string;
+  senderName?: string;
+  senderKey?: string;
+  messageText: string;
+}): Promise<EmployerInquiry | null> {
+  const text = input.messageText.trim();
+  if (!text || text.length < 2) return null;
+
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow();
+  const id = `inq-${randomUUID().slice(0, 10)}`;
+
+  // Find site name if not given
+  let siteName = input.siteName || "";
+  if (!siteName) {
+    const groupRow = (await db.prepare(`
+      SELECT lg.group_name, os.site_name
+      FROM line_groups lg
+      LEFT JOIN operational_sites os ON lg.site_id = os.id
+      WHERE lg.id = ?
+    `).bind(input.groupId).first()) as any;
+    siteName = groupRow?.site_name || groupRow?.group_name || `กลุ่ม ${input.groupId.slice(-6)}`;
+  }
+
+  const classification = classifyEmployerMessage(text);
+
+  await db.prepare(`
+    INSERT INTO employer_inquiries (
+      id, group_id, site_name, sender_name, sender_key, message_text,
+      urgency, category, status, received_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+  `).bind(
+    id,
+    input.groupId,
+    siteName || "ไม่ระบุจุด",
+    input.senderName || (input.senderKey ? `นายจ้าง (${input.senderKey.slice(0, 6)})` : "นายจ้าง/ลูกบ้าน"),
+    input.senderKey || null,
+    text,
+    classification.urgency,
+    classification.category,
+    now.iso
+  ).run();
+
+  return {
+    id,
+    groupId: input.groupId,
+    siteName: siteName || "ไม่ระบุจุด",
+    senderName: input.senderName || "นายจ้าง/ลูกบ้าน",
+    senderKey: input.senderKey || null,
+    messageText: text,
+    urgency: classification.urgency,
+    category: classification.category,
+    status: "pending",
+    acknowledgedBy: null,
+    acknowledgedAt: null,
+    dispatchedAt: null,
+    resolvedAt: null,
+    receivedAt: now.iso,
+    slaMinutes: 0,
+  };
+}
+
+export async function getEmployerInquiries(options?: {
+  status?: string;
+  urgency?: string;
+  limit?: number;
+}): Promise<{
+  inquiries: EmployerInquiry[];
+  stats: {
+    total: number;
+    pendingP1: number;
+    pendingP2: number;
+    resolvedToday: number;
+  };
+}> {
+  await ensureDatabase();
+  const db = database();
+  const nowMs = Date.now();
+  const today = bangkokNow().date;
+
+  let query = "SELECT * FROM employer_inquiries WHERE 1=1";
+  const params: any[] = [];
+
+  if (options?.status && options.status !== "all") {
+    query += " AND status = ?";
+    params.push(options.status);
+  }
+  if (options?.urgency && options.urgency !== "all") {
+    query += " AND urgency = ?";
+    params.push(options.urgency);
+  }
+
+  query += " ORDER BY CASE urgency WHEN 'p1_critical' THEN 1 WHEN 'p2_service' THEN 2 ELSE 3 END, received_at DESC LIMIT ?";
+  params.push(options?.limit || 50);
+
+  const rows = (await db.prepare(query).bind(...params).all<any>()).results || [];
+
+  const inquiries: EmployerInquiry[] = rows.map((r: any) => {
+    const receivedMs = Date.parse(r.received_at);
+    const slaMinutes = Number.isFinite(receivedMs) ? Math.max(0, Math.floor((nowMs - receivedMs) / 60000)) : 0;
+    return {
+      id: String(r.id),
+      groupId: String(r.group_id),
+      siteName: String(r.site_name || "ไม่ระบุจุด"),
+      senderName: String(r.sender_name || "นายจ้าง"),
+      senderKey: r.sender_key ? String(r.sender_key) : null,
+      messageText: String(r.message_text || ""),
+      urgency: (r.urgency || "p3_general") as any,
+      category: String(r.category || "general"),
+      status: (r.status || "pending") as any,
+      acknowledgedBy: r.acknowledged_by ? String(r.acknowledged_by) : null,
+      acknowledgedAt: r.acknowledged_at ? String(r.acknowledged_at) : null,
+      dispatchedAt: r.dispatched_at ? String(r.dispatched_at) : null,
+      resolvedAt: r.resolved_at ? String(r.resolved_at) : null,
+      receivedAt: String(r.received_at),
+      slaMinutes,
+    };
+  });
+
+  // Calculate quick stats
+  const allRows = (await db.prepare(`
+    SELECT urgency, status, received_at FROM employer_inquiries
+    WHERE received_at >= ?
+  `).bind(`${today}T00:00:00`).all<any>()).results || [];
+
+  let pendingP1 = 0;
+  let pendingP2 = 0;
+  let resolvedToday = 0;
+
+  allRows.forEach((r: any) => {
+    if (r.status === "pending" || r.status === "acknowledged") {
+      if (r.urgency === "p1_critical") pendingP1++;
+      if (r.urgency === "p2_service") pendingP2++;
+    }
+    if (r.status === "resolved") {
+      resolvedToday++;
+    }
+  });
+
+  return {
+    inquiries,
+    stats: {
+      total: allRows.length,
+      pendingP1,
+      pendingP2,
+      resolvedToday,
+    },
+  };
+}
+
+export async function updateInquiryStatus(
+  inquiryId: string,
+  status: "acknowledged" | "dispatched" | "resolved",
+  actor = "operator"
+): Promise<EmployerInquiry | null> {
+  await ensureDatabase();
+  const db = database();
+  const now = bangkokNow().iso;
+
+  if (status === "acknowledged") {
+    await db.prepare(`
+      UPDATE employer_inquiries 
+      SET status = 'acknowledged', acknowledged_by = ?, acknowledged_at = ?
+      WHERE id = ?
+    `).bind(actor, now, inquiryId).run();
+  } else if (status === "dispatched") {
+    await db.prepare(`
+      UPDATE employer_inquiries 
+      SET status = 'dispatched', dispatched_at = ?, acknowledged_by = COALESCE(acknowledged_by, ?), acknowledged_at = COALESCE(acknowledged_at, ?)
+      WHERE id = ?
+    `).bind(now, actor, now, inquiryId).run();
+  } else if (status === "resolved") {
+    await db.prepare(`
+      UPDATE employer_inquiries 
+      SET status = 'resolved', resolved_at = ?, acknowledged_by = COALESCE(acknowledged_by, ?), acknowledged_at = COALESCE(acknowledged_at, ?)
+      WHERE id = ?
+    `).bind(now, actor, now, inquiryId).run();
+  }
+
+  await addAudit("employer_inquiry", inquiryId, `status_${status}`, actor, `อัปเดตสถานะข้อความนายจ้างเป็น ${status}`);
+
+  const inq = (await db.prepare("SELECT * FROM employer_inquiries WHERE id = ?").bind(inquiryId).first()) as any;
+  if (!inq) return null;
+
+  return {
+    id: String(inq.id),
+    groupId: String(inq.group_id),
+    siteName: String(inq.site_name),
+    senderName: String(inq.sender_name),
+    senderKey: inq.sender_key ? String(inq.sender_key) : null,
+    messageText: String(inq.message_text),
+    urgency: inq.urgency,
+    category: inq.category,
+    status: inq.status,
+    acknowledgedBy: inq.acknowledged_by,
+    acknowledgedAt: inq.acknowledged_at,
+    dispatchedAt: inq.dispatched_at,
+    resolvedAt: inq.resolved_at,
+    receivedAt: inq.received_at,
+  };
 }

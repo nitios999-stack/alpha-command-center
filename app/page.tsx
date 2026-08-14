@@ -4,6 +4,8 @@ import { CSSProperties, FormEvent, useCallback, useEffect, useMemo, useRef, useS
 import { StickersPanel } from "./StickersPanel";
 import { ShiftsPanel } from "./ShiftsPanel";
 import PatrolPanel from "./PatrolPanel";
+import { GuardsPanel } from "./GuardsPanel";
+import { InquiriesPanel } from "./InquiriesPanel";
 
 export type SlotState = "confirmed" | "self_reported" | "waiting" | "replacement_required" | "unassigned" | "missing";
 
@@ -822,14 +824,14 @@ function handleLocalAction(payload: Record<string, unknown>, currentData: Dashbo
 
 export default function Home() {
   const [data, setData] = useState<DashboardData | null>(null);
-  const [tab, setTab] = useState<"ops" | "billing" | "setup" | "line" | "reports" | "stickers" | "shifts" | "patrol">("reports");
+  const [tab, setTab] = useState<"ops" | "billing" | "setup" | "line" | "reports" | "stickers" | "shifts" | "patrol" | "guards" | "inquiries">("reports");
 
   useEffect(() => {
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       const tabParam = params.get("tab");
-      if (tabParam === "patrol") {
-        setTab("patrol");
+      if (tabParam === "patrol" || tabParam === "guards" || tabParam === "inquiries") {
+        setTab(tabParam as any);
       }
     }
   }, []);
@@ -1503,6 +1505,28 @@ export default function Home() {
           </button>
           <button
             type="button"
+            className={`command-tab ${tab === "inquiries" ? "active" : ""}`}
+            onClick={() => setTab("inquiries")}
+            style={{
+              background: tab === "inquiries" ? "#dc2626" : "rgba(220, 38, 38, 0.15)",
+              color: tab === "inquiries" ? "#ffffff" : "#fca5a5",
+              border: tab === "inquiries" ? "1px solid #ef4444" : "1px solid rgba(239, 68, 68, 0.3)",
+              fontWeight: 800,
+            }}
+          >
+            <span className="tab-icon">💬</span>
+            <span>ข้อความนายจ้าง</span>
+          </button>
+          <button
+            type="button"
+            className={`command-tab ${tab === "guards" ? "active" : ""}`}
+            onClick={() => setTab("guards")}
+          >
+            <span className="tab-icon">👮</span>
+            <span>ทำเนียบ รปภ.</span>
+          </button>
+          <button
+            type="button"
             className={`command-tab ${tab === "billing" ? "active" : ""}`}
             onClick={() => setTab("billing")}
           >
@@ -1543,7 +1567,11 @@ export default function Home() {
         </div>
       )}
 
-      {tab === "patrol" ? (
+      {tab === "guards" ? (
+        <GuardsPanel data={data} onRefresh={() => void loadDashboard()} />
+      ) : tab === "inquiries" ? (
+        <InquiriesPanel data={data} onRefresh={() => void loadDashboard()} />
+      ) : tab === "patrol" ? (
         <PatrolPanel
           data={data}
           loading={loading}

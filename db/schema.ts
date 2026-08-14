@@ -173,3 +173,39 @@ export const lineManualBatchJobs = sqliteTable("line_manual_batch_jobs", {
   createdAt: text("created_at").notNull(),
   createdBy: text("created_by").notNull(),
 });
+
+export const guardProfiles = sqliteTable("guard_profiles", {
+  id: text("id").primaryKey(),
+  siteId: text("site_id").notNull(),
+  guardName: text("guard_name").notNull(),
+  displayName: text("display_name"),
+  pictureUrl: text("picture_url"),
+  phoneNumber: text("phone_number"),
+  preferredShift: text("preferred_shift").notNull().default("all"), // 'morning', 'evening', 'all'
+  role: text("role").notNull().default("regular"), // 'regular', 'spare', 'head_guard'
+  active: integer("active").notNull().default(1),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  index("idx_guard_profiles_site").on(table.siteId, table.active),
+]);
+
+export const employerInquiries = sqliteTable("employer_inquiries", {
+  id: text("id").primaryKey(),
+  groupId: text("group_id").notNull(),
+  siteName: text("site_name").notNull(),
+  senderName: text("sender_name").notNull(),
+  senderKey: text("sender_key"),
+  messageText: text("message_text").notNull(),
+  urgency: text("urgency").notNull().default("p3_general"), // 'p1_critical', 'p2_service', 'p3_general'
+  category: text("category").notNull().default("general"),
+  status: text("status").notNull().default("pending"), // 'pending', 'acknowledged', 'dispatched', 'resolved'
+  acknowledgedBy: text("acknowledged_by"),
+  acknowledgedAt: text("acknowledged_at"),
+  dispatchedAt: text("dispatched_at"),
+  resolvedAt: text("resolved_at"),
+  receivedAt: text("received_at").notNull(),
+}, (table) => [
+  index("idx_employer_inquiries_urgency_time").on(table.urgency, table.status, table.receivedAt),
+  index("idx_employer_inquiries_group_time").on(table.groupId, table.receivedAt),
+]);

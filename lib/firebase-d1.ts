@@ -18,6 +18,8 @@ const TABLES = [
   "line_outbound_audit",
   "line_queued_stickers",
   "line_manual_batch_jobs",
+  "guard_profiles",
+  "employer_inquiries",
 ] as const;
 
 type TableName = (typeof TABLES)[number];

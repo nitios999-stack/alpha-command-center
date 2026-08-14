@@ -1,4 +1,4 @@
-import { recordLineWebhookCallback, saveLineWebhookEvent, updateLineGroupProfile, consumeAutoReplyQuota, consumeQueuedSticker, logOutboundAction, evaluateShiftCheckIn, buildMissingShiftAlertSummary, buildShiftAttendanceFlexMessage, confirmSlotFromLineCommand, confirmSlotById, batchApproveSlotsWithPhotos, detectSpecialIncidentsAndLeave, sendIncidentAlertToCommandRoom } from "../db/command-center";
+import { recordLineWebhookCallback, saveLineWebhookEvent, updateLineGroupProfile, consumeAutoReplyQuota, consumeQueuedSticker, logOutboundAction, evaluateShiftCheckIn, buildMissingShiftAlertSummary, buildShiftAttendanceFlexMessage, confirmSlotFromLineCommand, confirmSlotById, batchApproveSlotsWithPhotos, detectSpecialIncidentsAndLeave, sendIncidentAlertToCommandRoom, recordEmployerInquiry } from "../db/command-center";
 
 type LineEnv = { LINE_CHANNEL_ACCESS_TOKEN?: string; LINE_CHANNEL_SECRET?: string; LINE_REPORT_SENDER_SALT?: string };
 type LineEvent = {
@@ -380,6 +380,15 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
         }).catch(() => {});
 
         continue;
+      }
+
+      // Record any non-command incoming text message into the Employer Sentinel Live Feed (Zero-Quota)
+      if (trimmedText && !isSummaryCommand && !confirmMatch) {
+        recordEmployerInquiry({
+          groupId: group.groupId,
+          senderKey: group.senderKey,
+          messageText: trimmedText,
+        }).catch(() => {});
       }
 
       const actionId = `auto-${Date.now()}-${idx}`;
