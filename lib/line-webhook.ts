@@ -168,17 +168,19 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
         }
 
         if (profileJson?.displayName) {
+          const db = database();
+          const now = bangkokNow().iso;
+          const targetSiteId = linePointSiteIdentifier(group.groupId);
           const targetIds = Array.from(new Set([group.senderKey, group.rawUserId].filter(Boolean) as string[]));
           for (const tid of targetIds) {
-            await saveGuardProfile({
-              id: tid,
-              siteId: linePointSiteIdentifier(group.groupId),
-              guardName: profileJson.displayName,
-              displayName: profileJson.displayName,
-              pictureUrl: profileJson.pictureUrl || null,
-              role: "regular",
-              preferredShift: "all",
-            });
+            await db.prepare(`
+              INSERT INTO guard_profiles (id, site_id, guard_name, display_name, picture_url, preferred_shift, role, active, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, 'all', 'regular', 1, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET
+                display_name = COALESCE(excluded.display_name, guard_profiles.display_name),
+                picture_url = COALESCE(excluded.picture_url, guard_profiles.picture_url),
+                updated_at = excluded.updated_at
+            `).bind(tid, targetSiteId, profileJson.displayName, profileJson.displayName, profileJson.pictureUrl || null, now, now).run().catch(() => {});
           }
         }
       } catch {}

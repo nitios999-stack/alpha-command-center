@@ -339,6 +339,36 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
     return guards.filter((g) => g.role === "employer").length;
   }, [guards]);
 
+  // Shift timings per site from database slots
+  const siteShiftTimings = useMemo(() => {
+    const map = new Map<string, { morning?: string; evening?: string }>();
+    if (data?.slots) {
+      for (const slot of data.slots) {
+        const existing = map.get(slot.siteId) || {};
+        if (slot.wave === "morning") existing.morning = slot.deadline;
+        if (slot.wave === "evening") existing.evening = slot.deadline;
+        map.set(slot.siteId, existing);
+      }
+    }
+    return map;
+  }, [data?.slots]);
+
+  // Guards belonging to the selected site
+  const siteGuards = useMemo(() => {
+    if (activeTab === "employers") {
+      return [];
+    }
+    return guards.filter((g) => g.siteId === selectedSiteId && g.role !== "employer");
+  }, [guards, selectedSiteId, activeTab]);
+
+  // Employers in the selected site (or all employers if activeTab === 'employers')
+  const siteEmployers = useMemo(() => {
+    if (activeTab === "employers") {
+      return guards.filter((g) => g.role === "employer");
+    }
+    return guards.filter((g) => g.siteId === selectedSiteId && g.role === "employer");
+  }, [guards, selectedSiteId, activeTab]);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
       {/* HEADER SECTION */}
@@ -553,7 +583,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
 
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.72rem", color: "#94a3b8" }}>
                         <span>{site.customerName || "กลุ่ม LINE"}</span>
-                        <div style={{ display: "flex", gap: "0.3rem" }}>
+                        <div style={{ display: "flex", gap: "0.3rem", alignItems: "center" }}>
                           {siteGuardsCount > 0 && (
                             <span style={{ background: "#064e3b", color: "#a7f3d0", padding: "0.1rem 0.35rem", borderRadius: "6px", fontWeight: 800 }}>
                               👮 {siteGuardsCount}
@@ -566,6 +596,18 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                           )}
                         </div>
                       </div>
+
+                      {/* SHIFT TIMINGS TAGS */}
+                      {(() => {
+                        const timings = siteShiftTimings.get(site.id);
+                        if (!timings || (!timings.morning && !timings.evening)) return null;
+                        return (
+                          <div style={{ display: "flex", gap: "0.4rem", fontSize: "0.68rem", color: "#cbd5e1", marginTop: "0.15rem", borderTop: "1px dashed rgba(255,255,255,0.06)", paddingTop: "0.25rem" }}>
+                            {timings.morning && <span style={{ color: "#fde047" }}>☀️ {timings.morning}</span>}
+                            {timings.evening && <span style={{ color: "#a5b4fc" }}>🌙 {timings.evening}</span>}
+                          </div>
+                        );
+                      })()}
                     </div>
                   );
                 })}
@@ -584,16 +626,31 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
         <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "14px", padding: "1.25rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
           
           {/* DETAIL HEADER */}
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem", borderBottom: "1px solid #1e293b", pb: "0.85rem", paddingBottom: "0.85rem" }}>
-            <div>
-              <h3 style={{ margin: 0, fontSize: "1.15rem", fontWeight: 800, color: "#ffffff", display: "flex", alignItems: "center", gap: "0.4rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.75rem", borderBottom: "1px solid #1e293b", paddingBottom: "0.85rem" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+              <h3 style={{ margin: 0, fontSize: "1.2rem", fontWeight: 800, color: "#ffffff", display: "flex", alignItems: "center", gap: "0.4rem" }}>
                 <span>{activeTab === "employers" ? "👔 รายชื่อนายจ้าง / ลูกค้าทั้งหมด" : `🏢 ${selectedSite?.siteName || "เลือกจุดตรวจ"}`}</span>
               </h3>
-              <p style={{ margin: "0.2rem 0 0 0", color: "#94a3b8", fontSize: "0.8rem" }}>
-                {activeTab === "employers"
-                  ? "รายชื่อนายจ้าง/ผู้ว่าจ้างที่บอทจะเงียบ 100% ไม่ส่งสติกเกอร์ตอบกลับ"
-                  : `ลูกค้า: ${selectedSite?.customerName || "ทั่วไป"} · จัดการ รปภ. ประจำจุดและนายจ้างในกลุ่มนี้`}
-              </p>
+              
+              {activeTab === "sites" && selectedSite && (
+                <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", alignItems: "center" }}>
+                  <span style={{ color: "#94a3b8", fontSize: "0.8rem" }}>ลูกค้า: {selectedSite.customerName || "ทั่วไป"}</span>
+                  
+                  {/* SHIFT TIMINGS BANNER (LOADED DIRECTLY FROM DATABASE) */}
+                  {(() => {
+                    const timings = siteShiftTimings.get(selectedSiteId);
+                    const morningTime = timings?.morning || "07:00";
+                    const eveningTime = timings?.evening || "19:00";
+                    return (
+                      <div style={{ display: "flex", gap: "0.5rem", background: "#0b1220", padding: "0.25rem 0.6rem", borderRadius: "6px", border: "1px solid #1e293b", fontSize: "0.76rem" }}>
+                        <span style={{ color: "#fde047", fontWeight: 700 }}>☀️ กะเช้า ({morningTime})</span>
+                        <span style={{ color: "#475569" }}>|</span>
+                        <span style={{ color: "#a5b4fc", fontWeight: 700 }}>🌙 กะดึก ({eveningTime})</span>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
             </div>
 
             <button
@@ -627,15 +684,14 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
 
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "0.75rem" }}>
                     {siteGuards.map((guard) => {
-                      const isSpare = guard.role === "spare" || guard.siteId === "all";
-                      const shiftLabel = guard.preferredShift === "morning" ? "☀️ กะเช้า" : guard.preferredShift === "evening" ? "🌙 กะดึก" : "🔄 ทั้งสองกะ";
+                      const shiftLabel = guard.preferredShift === "morning" ? "☀️ กะเช้า" : guard.preferredShift === "evening" ? "🌙 กะดึก" : "🔄 ทุกกะ";
 
                       return (
                         <div
                           key={guard.id}
                           style={{
-                            background: isSpare ? "#0c1524" : "#131f37",
-                            border: `1.5px solid ${isSpare ? "#0284c7" : "#10b981"}`,
+                            background: "#131f37",
+                            border: "1.5px solid #10b981",
                             borderRadius: "12px",
                             padding: "0.85rem",
                             display: "flex",
@@ -648,7 +704,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                               <img src={guard.pictureUrl} alt={guard.guardName} style={{ width: "44px", height: "44px", borderRadius: "50%", objectFit: "cover", border: "2px solid #10b981" }} />
                             ) : (
                               <div style={{ width: "44px", height: "44px", borderRadius: "50%", background: "#1e293b", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.3rem", border: "2px solid #10b981" }}>
-                                {guard.pictureUrl || (isSpare ? "🌐" : "👮‍♂️")}
+                                {guard.pictureUrl || "👮‍♂️"}
                               </div>
                             )}
 
@@ -657,7 +713,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                                 {guard.guardName}
                               </div>
                               <div style={{ fontSize: "0.74rem", color: "#a7f3d0", fontWeight: 700 }}>
-                                {shiftLabel} {isSpare && "· สแปร์กลาง"}
+                                {shiftLabel}
                               </div>
                             </div>
                           </div>

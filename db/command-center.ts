@@ -3686,12 +3686,7 @@ export async function saveGuardProfile(data: {
       picture_url = COALESCE(excluded.picture_url, guard_profiles.picture_url),
       phone_number = excluded.phone_number,
       preferred_shift = excluded.preferred_shift,
-      role = CASE 
-        WHEN guard_profiles.role = 'employer' AND excluded.role = 'regular' THEN 'employer'
-        WHEN guard_profiles.role = 'spare' AND excluded.role = 'regular' THEN 'spare'
-        WHEN guard_profiles.role = 'head_guard' AND excluded.role = 'regular' THEN 'head_guard'
-        ELSE COALESCE(excluded.role, guard_profiles.role, 'regular')
-      END,
+      role = excluded.role,
       active = excluded.active,
       updated_at = excluded.updated_at
   `).bind(

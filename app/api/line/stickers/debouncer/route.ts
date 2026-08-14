@@ -11,8 +11,8 @@ export async function POST(request: Request) {
       return Response.json({ ok: false, error: "Missing required fields" }, { status: 400 });
     }
 
-    // หน่วงเวลารอ 35 วินาที เพื่อดูว่ามีข้อความ/รูปตามมาอีกหรือไม่ (LINE Token อยู่ได้ 60 วิ ปลอดภัย 100%)
-    await new Promise((resolve) => setTimeout(resolve, 35000));
+    // หน่วงเวลาสั้นๆ 3 วินาที เพื่อรวบรูปภาพและป้องกัน serverless timeout
+    await new Promise((resolve) => setTimeout(resolve, 3000));
 
     await ensureDatabase();
     const db = database();
@@ -27,8 +27,7 @@ export async function POST(request: Request) {
       return Response.json({ ok: true, skipped: true, reason: "command_room_no_stickers" });
     }
 
-    // 0.5 ตรวจสอบว่ากลุ่มนี้ตั้งค่าให้งดสติกเกอร์เมื่อมีข้อความนายจ้างหรือไม่ (เปิด/ปิดเป็นรายกลุ่มได้)
-    // ค่าเริ่มต้น: ให้บอทตอบสติกเกอร์ตามปกติไปก่อนตามความต้องการของผู้ดูแล
+    // 0.5 ตรวจสอบว่ากลุ่มนี้ตั้งค่าให้งดสติกเกอร์เมื่อมีข้อความนายจ้างหรือไม่
     const configData = (await db.prepare(
       "SELECT * FROM line_auto_reply_configs WHERE group_id = ?"
     ).bind(groupId).first()) as any;
@@ -66,10 +65,10 @@ export async function POST(request: Request) {
       "SELECT rowid, received_at, sender_key, raw_user_id, message_type FROM line_webhook_events WHERE id = ?"
     ).bind(eventId).first()) as { rowid: number; received_at: string; sender_key: string | null; raw_user_id: string | null; message_type: string | null } | null;
 
-    // 1.5 ตรวจสอบตัวตนผู้ส่ง (รปภ. vs นายจ้าง vs คนแปลกหน้า)
+    // 1.5 ตรวจสอบตัวตนผู้ส่ง (รปภ. vs นายจ้าง)
     // เงื่อนไข:
-    // - ถ้ารปภ. ส่งมา -> ให้บอทตอบสติกเกอร์
-    // - ถ้านายจ้างส่ง หรือคนแปลกหน้าส่งมา -> ไม่ต้องตอบ เพื่อให้เห็นแชทและคุยงานสะดวก
+    // - ถ้านายจ้างส่งมา -> ไม่ต้องตอบ เพื่อให้เห็นแชทและคุยงานสะดวก
+    // - ถ้ารปภ. หรือสมาชิกส่งรายงาน/รูปภาพ -> ให้บอทตอบสติกเกอร์
     const uId = currentEvent?.raw_user_id;
     const sKey = currentEvent?.sender_key;
 
@@ -103,22 +102,6 @@ export async function POST(request: Request) {
         skipReason: `งดส่งสติกเกอร์: ผู้ส่งคือนายจ้าง/ลูกค้า "${senderProfile.guard_name}" (บอทเงียบ 100% เพื่อให้เห็นแชทและคุยงานสะดวก)`,
       });
       return Response.json({ ok: true, skipped: true, reason: "employer_message_no_sticker" });
-    }
-
-    // ถ้าไม่พบในทำเนียบ รปภ. (คนแปลกหน้า / บุคคลภายนอก) -> งดตอบเด็ดขาด
-    const isGuard = senderProfile && (senderProfile.role === "regular" || senderProfile.role === "spare" || senderProfile.role === "head_guard");
-    if (!isGuard) {
-      await logOutboundAction({
-        id: `skip-stranger-${Date.now()}`,
-        groupId,
-        triggerEventId: eventId,
-        actionType: "auto-reply-close",
-        stickerPackageId: "11538",
-        stickerId: "51626520",
-        status: "skipped",
-        skipReason: `งดส่งสติกเกอร์: ผู้ส่งเป็นคนแปลกหน้า/ยังไม่ได้ลงทะเบียนเป็น รปภ. ในทำเนียบ (บอทเงียบเพื่อไม่ให้รบกวนแชท)`,
-      });
-      return Response.json({ ok: true, skipped: true, reason: "stranger_no_sticker" });
     }
 
     if (currentEvent) {
