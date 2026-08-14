@@ -412,16 +412,19 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
       {/* HEADER SECTION */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "1rem" }}>
         <div>
-          <h2 style={{ margin: 0, fontSize: "1.35rem", fontWeight: 900, color: "#ffffff", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <span>👮‍♂️</span>
-            <span>ทำเนียบเจ้าหน้าที่ รปภ. & นายจ้าง (LINE Auto-Sync)</span>
+          <h2 style={{ margin: 0, fontSize: "1.4rem", fontWeight: 900, color: "#ffffff", display: "flex", alignItems: "center", gap: "0.6rem", letterSpacing: "-0.02em" }}>
+            <span style={{ fontSize: "1.6rem" }}>👮‍♂️</span>
+            <span>ทำเนียบเจ้าหน้าที่ รปภ. & นายจ้าง</span>
+            <span style={{ background: "linear-gradient(135deg, #0284c7, #0369a1)", color: "#ffffff", fontSize: "0.72rem", fontWeight: 800, padding: "0.2rem 0.55rem", borderRadius: "20px", border: "1px solid #38bdf8" }}>
+              LINE Auto-Sync
+            </span>
           </h2>
-          <p style={{ margin: "0.25rem 0 0 0", color: "#94a3b8", fontSize: "0.85rem" }}>
+          <p style={{ margin: "0.35rem 0 0 0", color: "#94a3b8", fontSize: "0.86rem" }}>
             ระบบดึงรูปและชื่อโปรไฟล์ LINE จริงของทุกคนอัตโนมัติ และแยกนายจ้าง (บอทเงียบ 100%) กับ รปภ. (เช็คเวร)
           </p>
         </div>
 
-        <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", alignItems: "center" }}>
           <button
             onClick={() => handleAutoSyncGuards()}
             disabled={syncing}
@@ -429,19 +432,20 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
               background: syncing ? "#334155" : "linear-gradient(135deg, #059669, #10b981)",
               color: "#ffffff",
               border: "none",
-              padding: "0.55rem 1rem",
+              padding: "0.55rem 1.1rem",
               borderRadius: "10px",
               fontWeight: 800,
               cursor: syncing ? "wait" : "pointer",
-              fontSize: "0.85rem",
+              fontSize: "0.86rem",
               display: "flex",
               alignItems: "center",
-              gap: "0.4rem",
-              boxShadow: "0 4px 14px rgba(16, 185, 129, 0.25)",
+              gap: "0.45rem",
+              boxShadow: "0 4px 14px rgba(16, 185, 129, 0.3)",
+              transition: "all 0.15s ease",
             }}
           >
             <span>{syncing ? "⏳" : "🔄"}</span>
-            <span>{syncing ? "กำลังดึงโปรไฟล์..." : "ดึงโปรไฟล์ LINE อัตโนมัติ"}</span>
+            <span>{syncing ? "กำลังดึงโปรไฟล์..." : "ดึงโปรไฟล์ LINE ทันที"}</span>
           </button>
 
           <button
@@ -450,7 +454,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
               background: "#1e293b",
               color: tokenStatus?.valid ? "#34d399" : "#cbd5e1",
               border: `1px solid ${tokenStatus?.valid ? "#059669" : "#334155"}`,
-              padding: "0.55rem 0.9rem",
+              padding: "0.55rem 0.95rem",
               borderRadius: "10px",
               fontWeight: 700,
               cursor: "pointer",
@@ -458,6 +462,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
               display: "flex",
               alignItems: "center",
               gap: "0.4rem",
+              transition: "all 0.15s ease",
             }}
           >
             <span>🔑</span>
@@ -470,17 +475,68 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
             style={{
               background: "transparent",
               color: "#f87171",
-              border: "1px solid #7f1d1d",
+              border: "1px solid rgba(239, 68, 68, 0.3)",
               padding: "0.55rem 0.85rem",
               borderRadius: "10px",
               fontWeight: 700,
               cursor: "pointer",
               fontSize: "0.82rem",
+              transition: "all 0.15s ease",
             }}
             title="โละล้างข้อมูลตัวอย่างจำลองเก่า เพื่อเตรียมรับโปรไฟล์ LINE จริง"
           >
             🗑️ โละล้างประวัติจำลอง
           </button>
+        </div>
+      </div>
+
+      {/* TOP STATS CARDS BAR */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: "0.85rem" }}>
+        {/* Card 1: Total Confirmed Guards */}
+        <div style={{ background: "linear-gradient(135deg, #0b201a, #051410)", border: "1px solid rgba(16, 185, 129, 0.25)", borderRadius: "14px", padding: "0.85rem 1.1rem", display: "flex", alignItems: "center", gap: "0.85rem", boxShadow: "0 4px 12px rgba(0,0,0,0.2)" }}>
+          <div style={{ width: "44px", height: "44px", borderRadius: "12px", background: "rgba(16, 185, 129, 0.15)", color: "#10b981", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.4rem", border: "1px solid rgba(16, 185, 129, 0.3)" }}>
+            👮‍♂️
+          </div>
+          <div>
+            <div style={{ fontSize: "0.72rem", color: "#a7f3d0", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em" }}>รปภ. ประจำจุด (เช็คเวร)</div>
+            <div style={{ fontSize: "1.4rem", color: "#ffffff", fontWeight: 900, lineHeight: 1.1 }}>{totalGuardsCount} <span style={{ fontSize: "0.82rem", color: "#6ee7b7", fontWeight: 600 }}>นาย</span></div>
+          </div>
+        </div>
+
+        {/* Card 2: Employers / General Members */}
+        <div style={{ background: "linear-gradient(135deg, #240e1b, #150811)", border: "1px solid rgba(244, 63, 94, 0.25)", borderRadius: "14px", padding: "0.85rem 1.1rem", display: "flex", alignItems: "center", gap: "0.85rem", boxShadow: "0 4px 12px rgba(0,0,0,0.2)" }}>
+          <div style={{ width: "44px", height: "44px", borderRadius: "12px", background: "rgba(244, 63, 94, 0.15)", color: "#f43f5e", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.4rem", border: "1px solid rgba(244, 63, 94, 0.3)" }}>
+            👤
+          </div>
+          <div>
+            <div style={{ fontSize: "0.72rem", color: "#fca5a5", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em" }}>บุคคลทั่วไป (บอทเงียบ 100%)</div>
+            <div style={{ fontSize: "1.4rem", color: "#ffffff", fontWeight: 900, lineHeight: 1.1 }}>{totalEmployersCount} <span style={{ fontSize: "0.82rem", color: "#fda4af", fontWeight: 600 }}>คน</span></div>
+          </div>
+        </div>
+
+        {/* Card 3: Total Sites Connected */}
+        <div style={{ background: "linear-gradient(135deg, #0b1c36, #061122)", border: "1px solid rgba(56, 189, 248, 0.25)", borderRadius: "14px", padding: "0.85rem 1.1rem", display: "flex", alignItems: "center", gap: "0.85rem", boxShadow: "0 4px 12px rgba(0,0,0,0.2)" }}>
+          <div style={{ width: "44px", height: "44px", borderRadius: "12px", background: "rgba(56, 189, 248, 0.15)", color: "#38bdf8", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.4rem", border: "1px solid rgba(56, 189, 248, 0.3)" }}>
+            🏢
+          </div>
+          <div>
+            <div style={{ fontSize: "0.72rem", color: "#7dd3fc", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em" }}>จุดตรวจ & กลุ่ม LINE</div>
+            <div style={{ fontSize: "1.4rem", color: "#ffffff", fontWeight: 900, lineHeight: 1.1 }}>{sites.length} <span style={{ fontSize: "0.82rem", color: "#bae6fd", fontWeight: 600 }}>จุด</span></div>
+          </div>
+        </div>
+
+        {/* Card 4: Live Auto-Sync Status */}
+        <div style={{ background: "linear-gradient(135deg, #16122c, #0d0a1b)", border: "1px solid rgba(168, 85, 247, 0.25)", borderRadius: "14px", padding: "0.85rem 1.1rem", display: "flex", alignItems: "center", gap: "0.85rem", boxShadow: "0 4px 12px rgba(0,0,0,0.2)" }}>
+          <div style={{ width: "44px", height: "44px", borderRadius: "12px", background: "rgba(168, 85, 247, 0.15)", color: "#c084fc", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.4rem", border: "1px solid rgba(168, 85, 247, 0.3)" }}>
+            ⚡
+          </div>
+          <div>
+            <div style={{ fontSize: "0.72rem", color: "#d8b4fe", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em" }}>ระบบซิงค์สด Real-Time</div>
+            <div style={{ fontSize: "0.96rem", color: "#34d399", fontWeight: 800, display: "flex", alignItems: "center", gap: "0.4rem", marginTop: "0.15rem" }}>
+              <span style={{ display: "inline-block", width: "8px", height: "8px", borderRadius: "50%", background: "#10b981", boxShadow: "0 0 8px #10b981" }} />
+              <span>Live {lastSyncTime ? `(${lastSyncTime})` : "พร้อมทำงาน"}</span>
+            </div>
+          </div>
         </div>
       </div>
 
