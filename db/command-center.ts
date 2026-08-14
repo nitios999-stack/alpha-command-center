@@ -4023,11 +4023,16 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
   newGuards: number;
   updatedGuards: number;
   sparesDetected: number;
+  profilesFetched: number;
   message: string;
 }> {
   await ensureDatabase();
   const db = database();
   const now = bangkokNow().iso;
+
+  // --- Resolve LINE token for profile API calls ---
+  const tokenSetting = await db.prepare("SELECT value FROM system_settings WHERE key = 'line_channel_access_token'").first<D1Row>();
+  const lineToken = (tokenSetting?.value ? String(tokenSetting.value).trim() : null) || lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
 
   // 1. ดึงผู้ส่งรายงานทั้งหมดจาก webhook events
   const sendersResult = await db.prepare(`
@@ -4055,6 +4060,51 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
     senderGroupsMap.set(String(s.sender_key), list);
   }
 
+  // --- LINE Profile Cache: fetch real displayName + pictureUrl via LINE API ---
+  const profileCache = new Map<string, { displayName: string; pictureUrl: string | null }>();
+  let profilesFetched = 0;
+
+  if (lineToken) {
+    // Collect unique (groupId, senderKey) pairs for API calls
+    const apiCalls: { groupId: string; senderKey: string }[] = [];
+    for (const [senderKey, groupList] of senderGroupsMap.entries()) {
+      // Use first group to fetch profile (any group the user is in works)
+      if (groupList.length > 0) {
+        apiCalls.push({ groupId: String(groupList[0].group_id), senderKey });
+      }
+    }
+
+    // Fetch profiles in parallel batches of 10 (avoid rate limit)
+    const batchSize = 10;
+    for (let i = 0; i < apiCalls.length; i += batchSize) {
+      const batch = apiCalls.slice(i, i + batchSize);
+      const results = await Promise.allSettled(
+        batch.map(async ({ groupId, senderKey }) => {
+          try {
+            const res = await fetch(
+              `https://api.line.me/v2/bot/group/${groupId}/member/${senderKey}`,
+              { headers: { Authorization: `Bearer ${lineToken}` } }
+            );
+            if (res.ok) {
+              const profile = await res.json() as any;
+              if (profile.displayName) {
+                profileCache.set(senderKey, {
+                  displayName: String(profile.displayName),
+                  pictureUrl: profile.pictureUrl ? String(profile.pictureUrl) : null,
+                });
+                return true;
+              }
+            }
+            return false;
+          } catch {
+            return false;
+          }
+        })
+      );
+      profilesFetched += results.filter(r => r.status === "fulfilled" && r.value === true).length;
+    }
+  }
+
   let newGuards = 0;
   let updatedGuards = 0;
   let sparesDetected = 0;
@@ -4067,13 +4117,27 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
     const role = isMultiGroup ? "spare" : "regular";
     if (isMultiGroup) sparesDetected++;
 
-    const rawGroupName = String(primary.site_name || primary.group_name || `จุด ${primary.group_id.slice(-6)}`);
-    const cleanGroupName = rawGroupName.replace(/^(รปภ\.|กลุ่ม\s*รปภ\.|งาน\s*รปภ\.)\s*/i, "").trim();
-    const finalGuardName = isMultiGroup 
-      ? `รปภ. สแปร์กลาง (${cleanGroupName})` 
-      : `รปภ. ประจำ ${cleanGroupName}`;
+    // --- Use real LINE profile if available, else fallback to group-name-based ---
+    const lineProfile = profileCache.get(senderKey);
+    let finalGuardName: string;
+    let finalDisplayName: string;
+    let finalPictureUrl: string;
 
-    const avatar = isMultiGroup ? "🌐" : "👮‍♂️";
+    if (lineProfile) {
+      // Real LINE profile data!
+      finalGuardName = lineProfile.displayName;
+      finalDisplayName = lineProfile.displayName;
+      finalPictureUrl = lineProfile.pictureUrl || "👮‍♂️";
+    } else {
+      // Fallback: group-name based placeholder
+      const rawGroupName = String(primary.site_name || primary.group_name || `จุด ${primary.group_id.slice(-6)}`);
+      const cleanGroupName = rawGroupName.replace(/^(รปภ\.|กลุ่ม\s*รปภ\.|งาน\s*รปภ\.)\s*/i, "").trim();
+      finalGuardName = isMultiGroup
+        ? `รปภ. สแปร์กลาง (${cleanGroupName})`
+        : `รปภ. ประจำ ${cleanGroupName}`;
+      finalDisplayName = senderKey;
+      finalPictureUrl = isMultiGroup ? "🌐" : "👮‍♂️";
+    }
 
     operations.push(
       db.prepare(`
@@ -4084,9 +4148,9 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
         )
         ON CONFLICT(id) DO UPDATE SET
           site_id = excluded.site_id,
-          guard_name = excluded.guard_name,
-          display_name = excluded.display_name,
-          picture_url = COALESCE(guard_profiles.picture_url, excluded.picture_url),
+          guard_name = CASE WHEN excluded.guard_name LIKE 'รปภ.%' THEN COALESCE(NULLIF(guard_profiles.guard_name, guard_profiles.id), excluded.guard_name) ELSE excluded.guard_name END,
+          display_name = CASE WHEN excluded.display_name = guard_profiles.id THEN guard_profiles.display_name ELSE excluded.display_name END,
+          picture_url = CASE WHEN excluded.picture_url LIKE 'https://%' THEN excluded.picture_url ELSE COALESCE(NULLIF(guard_profiles.picture_url, '👮‍♂️'), NULLIF(guard_profiles.picture_url, '🌐'), excluded.picture_url) END,
           role = CASE WHEN excluded.role = 'spare' THEN 'spare' ELSE guard_profiles.role END,
           active = 1,
           updated_at = excluded.updated_at
@@ -4094,8 +4158,8 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
         senderKey,
         siteId,
         finalGuardName,
-        senderKey,
-        avatar,
+        finalDisplayName,
+        finalPictureUrl,
         role,
         now,
         now
@@ -4109,7 +4173,7 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
   }
 
   const total = updatedGuards;
-  await addAudit("guard_profile", "bulk_sync", "auto_sync", actor, `ซิงค์และบันทึกชื่อ รปภ. ประจำจุดตรวจอัตโนมัติ ${total} บัญชี (สแปร์กลาง ${sparesDetected})`);
+  await addAudit("guard_profile", "bulk_sync", "auto_sync", actor, `ซิงค์ รปภ. ${total} บัญชี (ดึงโปรไฟล์ LINE จริง ${profilesFetched} คน, สแปร์กลาง ${sparesDetected})`);
 
   return {
     ok: true,
@@ -4117,7 +4181,8 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
     newGuards,
     updatedGuards,
     sparesDetected,
-    message: `ซิงค์และสร้างชื่อ รปภ. ประจำจุดตรวจครบถ้วน ${total} บัญชีเรียบร้อย (ระบุตามชื่อกลุ่มจุดตรวจจริง)`,
+    profilesFetched,
+    message: `ซิงค์ รปภ. ครบ ${total} บัญชี — ดึงชื่อ-รูปโปรไฟล์ LINE จริง ${profilesFetched} คน (สแปร์กลาง ${sparesDetected})`,
   };
 }
 
