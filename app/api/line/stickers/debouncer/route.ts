@@ -27,33 +27,75 @@ export async function POST(request: Request) {
       return Response.json({ ok: true, skipped: true, reason: "command_room_no_stickers" });
     }
 
-    // 0.5 ตรวจสอบว่ามีข้อความนายจ้าง / ร้องเรียน / สั่งงาน ในกลุ่มนี้หรือไม่
-    // หากนายจ้างส่งข้อความ ห้ามส่งสติกเกอร์ตอบกลับเด็ดขาด เพื่อไม่ให้กลบแชทนายจ้าง
-    const recentInquiry = (await db.prepare(`
-      SELECT id, message_text, urgency 
-      FROM employer_inquiries 
-      WHERE group_id = ? AND received_at >= datetime('now', '-3 minutes')
-      ORDER BY received_at DESC LIMIT 1
-    `).bind(groupId).first()) as { id: string; message_text: string; urgency: string } | null;
+    // 0.5 ตรวจสอบว่ากลุ่มนี้ตั้งค่าให้งดสติกเกอร์เมื่อมีข้อความนายจ้างหรือไม่ (เปิด/ปิดเป็นรายกลุ่มได้)
+    // ค่าเริ่มต้น: ให้บอทตอบสติกเกอร์ตามปกติไปก่อนตามความต้องการของผู้ดูแล
+    const configData = (await db.prepare(
+      "SELECT * FROM line_auto_reply_configs WHERE group_id = ?"
+    ).bind(groupId).first()) as any;
+    
+    // ถ้าผู้ใช้ตั้งใจกดปิดไว้ ให้ข้าม
+    if (configData && configData.mode === "disabled") {
+      return Response.json({ ok: true, skipped: true, reason: "disabled_by_user" });
+    }
 
-    if (recentInquiry) {
-      await logOutboundAction({
-        id: `skip-employer-${Date.now()}`,
-        groupId,
-        triggerEventId: eventId,
-        actionType: "auto-reply-close",
-        stickerPackageId: "11538",
-        stickerId: "51626520",
-        status: "skipped",
-        skipReason: `งดส่งสติกเกอร์: ตรวจพบข้อความนายจ้าง "${recentInquiry.message_text.slice(0, 40)}" เพื่อให้เจ้าหน้าที่หน้าแชทเห็นชัดเจน`,
-      });
-      return Response.json({ ok: true, skipped: true, reason: "employer_message_no_sticker" });
+    if (configData?.silence_on_employer === 1) {
+      const recentInquiry = (await db.prepare(`
+        SELECT id, message_text, urgency 
+        FROM employer_inquiries 
+        WHERE group_id = ? AND received_at >= datetime('now', '-3 minutes')
+        ORDER BY received_at DESC LIMIT 1
+      `).bind(groupId).first()) as { id: string; message_text: string; urgency: string } | null;
+
+      if (recentInquiry) {
+        await logOutboundAction({
+          id: `skip-employer-${Date.now()}`,
+          groupId,
+          triggerEventId: eventId,
+          actionType: "auto-reply-close",
+          stickerPackageId: "11538",
+          stickerId: "51626520",
+          status: "skipped",
+          skipReason: `งดส่งสติกเกอร์: ตรวจพบข้อความนายจ้าง "${recentInquiry.message_text.slice(0, 40)}" (เปิดโหมดเงียบเฉพาะกลุ่มนี้)`,
+        });
+        return Response.json({ ok: true, skipped: true, reason: "employer_message_no_sticker" });
+      }
     }
     
-    // 1. ค้นหา event ปัจจุบันในฐานข้อมูลเพื่อดึง rowid
+    // 1. ค้นหา event ปัจจุบันในฐานข้อมูลเพื่อดึง rowid และ sender_key
     const currentEvent = (await db.prepare(
-      "SELECT rowid, received_at FROM line_webhook_events WHERE id = ?"
-    ).bind(eventId).first()) as { rowid: number; received_at: string } | null;
+      "SELECT rowid, received_at, sender_key, message_type FROM line_webhook_events WHERE id = ?"
+    ).bind(eventId).first()) as { rowid: number; received_at: string; sender_key: string | null; message_type: string | null } | null;
+
+    // 1.5 ตรวจสอบว่าผู้ส่งข้อความนี้เป็น "นายจ้าง" ที่บันทึกไว้ในทำเนียบหรือไม่
+    // หากเป็นนายจ้างที่บันทึกไว้แล้ว ห้ามบอทส่งสติกเกอร์ตอบกลับคนนี้เด็ดขาด (แต่ถ้าเป็น รปภ. ให้ตอบตามปกติ)
+    if (currentEvent?.sender_key) {
+      const groupSite = (await db.prepare("SELECT site_id FROM line_groups WHERE id = ?").bind(groupId).first()) as { site_id?: string } | null;
+      const siteId = groupSite?.site_id || "all";
+
+      const employerProfile = (await db.prepare(`
+        SELECT guard_name, role 
+        FROM guard_profiles 
+        WHERE active = 1 
+          AND role = 'employer' 
+          AND (id = ? OR display_name = ?)
+          AND (site_id = ? OR site_id = 'all')
+        LIMIT 1
+      `).bind(currentEvent.sender_key, currentEvent.sender_key, siteId).first()) as { guard_name: string; role: string } | null;
+
+      if (employerProfile) {
+        await logOutboundAction({
+          id: `skip-employer-${Date.now()}`,
+          groupId,
+          triggerEventId: eventId,
+          actionType: "auto-reply-close",
+          stickerPackageId: "11538",
+          stickerId: "51626520",
+          status: "skipped",
+          skipReason: `งดส่งสติกเกอร์: ข้อความส่งจากนายจ้าง "${employerProfile.guard_name}" ที่บันทึกไว้ในทำเนียบ เพื่อไม่ให้กลบแชทนายจ้าง`,
+        });
+        return Response.json({ ok: true, skipped: true, reason: "employer_message_no_sticker" });
+      }
+    }
 
     if (currentEvent) {
       // ตรวจสอบว่ามีข้อความใหม่กว่าข้อความนี้ในกลุ่มเดียวกันส่งเข้ามาหรือไม่
@@ -67,16 +109,7 @@ export async function POST(request: Request) {
       }
     }
 
-    // 2. ดึงการตั้งค่าสติกเกอร์ของกลุ่ม (ค่าเริ่มต้นอัตโนมัติ 100%: Brown & Friends ตะเบ๊ะ 11538/51626520, cooldown: 3 นาที)
-    const configData = (await db.prepare(
-      "SELECT * FROM line_auto_reply_configs WHERE group_id = ?"
-    ).bind(groupId).first()) as any;
-    
-    // ถ้าผู้ใช้ตั้งใจกดปิดไว้ ให้ข้าม
-    if (configData && configData.mode === "disabled") {
-      return Response.json({ ok: true, skipped: true, reason: "disabled_by_user" });
-    }
-
+    // 2. ดึงค่าตัวแปรสติกเกอร์ (ค่าเริ่มต้นอัตโนมัติ 100%: Brown & Friends ตะเบ๊ะ 11538/51626520, cooldown: 3 นาที)
     const stickerPackageId = configData?.sticker_package_id || "11538";
     const stickerId = configData?.sticker_id || "51626520";
     const cooldownMinutes = configData?.cooldown_minutes ?? 3;

@@ -704,11 +704,85 @@ async function getLineReportActivity(configs: Record<string, LineReportConfig>) 
   return activity;
 }
 
+export async function syncTodayCoverageSlotsFromTemplates(operationalDate?: string) {
+  const db = database();
+  const now = bangkokNow();
+  const date = operationalDate || now.date;
+  const nowIso = now.iso;
+
+  // 1. Fetch active shift templates joined with site names
+  const templatesResult = await db.prepare(`
+    SELECT st.*, os.site_name, os.customer_name 
+    FROM shift_templates st
+    JOIN operational_sites os ON st.site_id = os.id
+    WHERE st.active = 1 AND os.active = 1
+  `).all<D1Row>();
+
+  const templates = (templatesResult.results || []) as any[];
+  if (!templates.length) return;
+
+  const operations: any[] = [];
+
+  for (const t of templates) {
+    const slotId = `slot-${date}-${t.wave}-${t.site_id}-${t.post_name}-${t.slot_label}`.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const cleanDeadline = String(t.deadline || (t.wave === "morning" ? "06:00" : "18:00")).trim();
+    const assignedGuard = t.assigned_guard ? String(t.assigned_guard).trim() : null;
+
+    // Update deadline on existing slots for this site/wave/date
+    operations.push(
+      db.prepare(`
+        UPDATE coverage_slots 
+        SET deadline = ?, 
+            site_name = ?, 
+            customer_name = ?,
+            assigned_guard = COALESCE(coverage_slots.assigned_guard, ?),
+            updated_at = ?
+        WHERE site_id = ? AND wave = ? AND operational_date = ?
+      `).bind(cleanDeadline, String(t.site_name), String(t.customer_name), assignedGuard, nowIso, String(t.site_id), String(t.wave), date)
+    );
+
+    // Insert slot if it does not exist yet today
+    operations.push(
+      db.prepare(`
+        INSERT OR IGNORE INTO coverage_slots (
+          id, operational_date, wave, site_id, site_name, customer_name,
+          post_name, slot_label, assigned_guard, assignment_type,
+          state, verification_policy, deadline, reported_at, source, late_minutes, updated_at
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, 'regular',
+          'waiting', 'standard', ?, NULL, NULL, 0, ?
+        )
+      `).bind(
+        slotId,
+        date,
+        String(t.wave),
+        String(t.site_id),
+        String(t.site_name),
+        String(t.customer_name),
+        String(t.post_name || "จุดประจำ"),
+        String(t.slot_label || "ช่อง 1"),
+        assignedGuard,
+        cleanDeadline,
+        nowIso
+      )
+    );
+  }
+
+  for (let offset = 0; offset < operations.length; offset += 50) {
+    await db.batch(operations.slice(offset, offset + 50));
+  }
+}
+
 export async function getDashboard() {
   await ensureDatabase();
   const db = database();
   const current = bangkokNow();
   const today = current.date;
+
+  // Keep coverage_slots deadlines synchronized with shift_templates configuration
+  await syncTodayCoverageSlotsFromTemplates(today);
+
   const slotResult = await db.prepare("SELECT * FROM coverage_slots WHERE operational_date = ? ORDER BY wave, site_name, post_name, slot_label").bind(today).all<D1Row>();
   const siteResult = await db.prepare("SELECT * FROM operational_sites ORDER BY active DESC, site_name").all<D1Row>();
   const lineGroupResult = await db.prepare("SELECT r.id, m.site_id, r.group_name, r.picture_url, r.last_seen_at, r.source, (SELECT e.event_type FROM line_webhook_events e WHERE e.group_id = r.id ORDER BY e.received_at DESC LIMIT 1) AS last_event_type, (SELECT COUNT(*) FROM line_webhook_events e WHERE e.group_id = r.id) AS event_count FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id ORDER BY CASE WHEN m.site_id IS NULL THEN 0 ELSE 1 END, r.group_name").all<D1Row>();
@@ -1061,12 +1135,9 @@ async function activateAllLinePointsInternal(actor: string) {
   for (let offset = 0; offset < operations.length; offset += 80) {
     await db.batch(operations.slice(offset, offset + 80));
   }
-  // Initialization already owns the process-level ensureDatabase promise.
-  // Calling the exported wrapper here would await that same promise and
-  // deadlock the first API request.
-  const generated = await generateTodayFromTemplatesInternal(actor);
+  await syncTodayCoverageSlotsFromTemplates();
   await addAudit("line_point", "bulk", "enabled", actor, `เปิดใช้งานกลุ่ม LINE เป็นกลุ่มหลัก ${activated + alreadyActive} จุด · เติมกะ ${initialized} รายการ · ข้าม ${skipped} กลุ่ม`);
-  return { activated, alreadyActive, initialized, skipped, generated: generated.created, total: activated + alreadyActive };
+  return { activated, alreadyActive, initialized, skipped, generated: 0, total: activated + alreadyActive };
 }
 
 export async function unmapLineGroup(groupId: string, actor: string) {
@@ -2076,21 +2147,40 @@ export async function evaluateShiftCheckIn(input: {
       const isPhotoOrLocation = input.messageType === "image" || input.messageType === "location" || Boolean(input.messageType?.startsWith("image"));
       const isGuardSender = await isEstablishedGuardSender(db, input.groupId, input.senderKey);
 
+      // ตรวจสอบข้อมูลผู้ส่งจากทำเนียบ (รปภ. ประจำ / สแปร์กลาง / นายจ้าง)
+      let registeredGuard: any = null;
+      if (input.senderKey) {
+        registeredGuard = (await db.prepare(`
+          SELECT guard_name, role, site_id FROM guard_profiles 
+          WHERE active = 1 AND (display_name = ? OR id = ?) AND (site_id = ? OR site_id = 'all' OR role = 'spare' OR role = 'employer')
+          LIMIT 1
+        `).bind(input.senderKey, input.senderKey, group.site_id).first()) as any;
+      }
+
+      // ถ้านายจ้างส่งข้อความหรือรูปภาพ ห้ามนำมานับเป็นการเข้าเวรของ รปภ. เด็ดขาด
+      if (registeredGuard?.role === "employer") {
+        continue;
+      }
+
       // เงื่อนไขในการยืนยันเข้าเวร:
       // 1. มีคีย์เวิร์ดของ รปภ. ชัดเจน (เช่น "ว.4", "รับมอบเวร", "เข้าเวร")
       // 2. หรือ ส่งรูปภาพในช่วง 30 นาทีรอบเวลาเริ่มกะ (17:30 - 18:30) โดยไม่ใช่ข้อความนายจ้าง
       const shouldConfirm = hasGuardEnterKeyword || (isPhotoOrLocation && !cleanText) || (isPhotoOrLocation && isGuardSender && !isClientText);
 
-        if (shouldConfirm) {
-          const lateMins = Math.max(0, currentMinutes - deadlineMins);
-          
-          // ตรวจจับว่าเป็นสแปร์หรือคนประจำ
-          const isSpareExplicit = cleanText && (/สแปร์|แทน|แทนเวร|สแปร์แทน/.test(cleanText));
-          let guardTypeLabel = isSpareExplicit ? "สแปร์แทนเวร" : (slot.assigned_guard ? `ประจำ (${slot.assigned_guard})` : "ประจำจุด");
+      if (shouldConfirm) {
+        const lateMins = Math.max(0, currentMinutes - deadlineMins);
+        
+        const isSpareExplicit = cleanText && (/สแปร์|แทน|แทนเวร|สแปร์แทน/.test(cleanText));
+        const isSpare = isSpareExplicit || registeredGuard?.role === "spare" || registeredGuard?.site_id === "all";
+        const guardName = registeredGuard?.guard_name || slot.assigned_guard;
+
+          let guardTypeLabel = isSpare 
+            ? (guardName ? `สแปร์แทนเวร: ${guardName}` : "สแปร์แทนเวร") 
+            : (guardName ? `ประจำ (${guardName})` : "ประจำจุด");
 
           let sourceText = `LINE รายงานตัว (${guardTypeLabel})`;
           if (hasGuardEnterKeyword) {
-            sourceText = isSpareExplicit ? `LINE สแปร์เข้าแทนเวร (ว.4)` : `LINE รับมอบเวร (ว.4: ${guardTypeLabel})`;
+            sourceText = isSpare ? `LINE สแปร์เข้าแทนเวร (ว.4: ${guardName || "สแปร์"})` : `LINE รับมอบเวร (ว.4: ${guardTypeLabel})`;
           } else if (isPhotoOrLocation && isGuardSender) {
             sourceText = `LINE ภาพถ่าย รปภ. (${guardTypeLabel})`;
           } else if (isPhotoOrLocation) {
@@ -2875,7 +2965,7 @@ export async function importSelectedLineGroups(groupIds: string[], actor = "admi
     count++;
   }
 
-  await generateTodayFromTemplatesInternal(actor);
+  await syncTodayCoverageSlotsFromTemplates();
   return { ok: true, count, message: `นำเข้ากลุ่ม LINE เข้าสู่ระบบตรวจเวรแล้ว ${count} กลุ่ม` };
 }
 
@@ -2936,7 +3026,7 @@ export async function updateGroupShiftConfiguration(input: {
   ];
 
   await db.batch(operations);
-  await generateTodayFromTemplatesInternal(input.actor);
+  await syncTodayCoverageSlotsFromTemplates();
   await addAudit("shift_template", siteId, "shift_updated", input.actor, `แก้ไขเวลากะของกลุ่ม ${group.group_name}`);
 
   return { ok: true, message: `อัปเดตเวลากะของ ${group.group_name} สำเร็จแล้ว` };
@@ -2987,6 +3077,8 @@ export async function bulkApplyShiftPreset(input: {
       actor: input.actor,
     });
   }
+
+  await syncTodayCoverageSlotsFromTemplates();
 
   return {
     ok: true,
@@ -3675,7 +3767,7 @@ export type GuardProfile = {
   pictureUrl: string | null;
   phoneNumber: string | null;
   preferredShift: "morning" | "evening" | "all";
-  role: "regular" | "spare" | "head_guard";
+  role: "regular" | "spare" | "head_guard" | "employer";
   active: number;
   createdAt: string;
   updatedAt: string;
@@ -3692,23 +3784,27 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
     WHERE gp.active = 1
   `;
   const params: any[] = [];
-  if (siteId) {
-    query += " AND gp.site_id = ?";
+  if (siteId === "spares_only") {
+    query += " AND (gp.role = 'spare' OR gp.site_id = 'all')";
+  } else if (siteId === "employers_only") {
+    query += " AND gp.role = 'employer'";
+  } else if (siteId && siteId !== "all") {
+    query += " AND (gp.site_id = ? OR gp.site_id = 'all' OR gp.role = 'spare' OR gp.role = 'employer')";
     params.push(siteId);
   }
-  query += " ORDER BY os.site_name ASC, gp.role ASC, gp.guard_name ASC";
+  query += " ORDER BY CASE WHEN gp.role = 'employer' THEN 2 WHEN gp.site_id = 'all' THEN 1 ELSE 0 END, os.site_name ASC, gp.role ASC, gp.guard_name ASC";
 
   const rows = (await db.prepare(query).bind(...params).all<any>()).results || [];
   return rows.map((r: any) => ({
     id: String(r.id),
     siteId: String(r.site_id),
-    siteName: r.site_name ? String(r.site_name) : undefined,
+    siteName: r.site_id === "all" ? "🌐 สแปร์กลาง (ทุกจุด)" : (r.site_name ? String(r.site_name) : undefined),
     guardName: String(r.guard_name),
     displayName: r.display_name ? String(r.display_name) : null,
     pictureUrl: r.picture_url ? String(r.picture_url) : null,
     phoneNumber: r.phone_number ? String(r.phone_number) : null,
     preferredShift: (r.preferred_shift || "all") as "morning" | "evening" | "all",
-    role: (r.role || "regular") as "regular" | "spare" | "head_guard",
+    role: (r.role || "regular") as "regular" | "spare" | "head_guard" | "employer",
     active: Number(r.active ?? 1),
     createdAt: String(r.created_at || ""),
     updatedAt: String(r.updated_at || ""),
@@ -3783,33 +3879,245 @@ export async function deleteGuardProfile(guardId: string): Promise<void> {
   await addAudit("guard_profile", guardId, "delete", "admin", `ลบ/ปิดใช้งาน รปภ. ID ${guardId}`);
 }
 
-export async function getRecentWebhookSenders(limit = 30): Promise<Array<{
+export async function getRecentWebhookSenders(options?: number | {
+  siteId?: string;
+  groupId?: string;
+  limit?: number;
+}): Promise<Array<{
   senderKey: string;
   groupId: string;
   groupName: string;
+  siteId?: string;
+  siteName?: string;
   lastSeenAt: string;
   messageType?: string;
+  lastSummary?: string;
+  messageCount: number;
+  isBound: boolean;
+  guardName?: string;
+  role?: string;
 }>> {
   await ensureDatabase();
   const db = database();
 
-  const rows = (await db.prepare(`
-    SELECT lwe.sender_key, lwe.group_id, lgr.group_name, MAX(lwe.received_at) as last_seen_at, lwe.message_type
+  const opts = typeof options === "number" ? { limit: options } : options || {};
+  const limit = opts.limit || 50;
+
+  let query = `
+    SELECT 
+      lwe.sender_key, 
+      lwe.group_id, 
+      COALESCE(lgr.group_name, lg.group_name, lwe.group_id) as group_name,
+      lg.site_id,
+      os.site_name,
+      MAX(lwe.received_at) as last_seen_at,
+      MAX(lwe.message_type) as message_type,
+      MAX(lwe.summary) as last_summary,
+      COUNT(lwe.id) as message_count,
+      gp.id as guard_id,
+      gp.guard_name,
+      gp.role
     FROM line_webhook_events lwe
     LEFT JOIN line_group_registry lgr ON lwe.group_id = lgr.id
+    LEFT JOIN line_groups lg ON lwe.group_id = lg.id
+    LEFT JOIN operational_sites os ON lg.site_id = os.id
+    LEFT JOIN guard_profiles gp ON (gp.display_name = lwe.sender_key OR gp.id = lwe.sender_key) AND gp.active = 1
     WHERE lwe.sender_key IS NOT NULL AND lwe.sender_key != ''
+  `;
+  const params: any[] = [];
+
+  if (opts.siteId && opts.siteId !== "all") {
+    query += " AND lg.site_id = ?";
+    params.push(opts.siteId);
+  }
+  if (opts.groupId) {
+    query += " AND lwe.group_id = ?";
+    params.push(opts.groupId);
+  }
+
+  query += `
     GROUP BY lwe.sender_key, lwe.group_id
     ORDER BY last_seen_at DESC
     LIMIT ?
-  `).bind(limit).all<any>()).results || [];
+  `;
+  params.push(limit);
+
+  const rows = (await db.prepare(query).bind(...params).all<any>()).results || [];
 
   return rows.map((r: any) => ({
     senderKey: String(r.sender_key),
     groupId: String(r.group_id),
     groupName: String(r.group_name || `กลุ่ม ${r.group_id.slice(-6)}`),
+    siteId: r.site_id ? String(r.site_id) : undefined,
+    siteName: r.site_name ? String(r.site_name) : undefined,
     lastSeenAt: String(r.last_seen_at),
     messageType: r.message_type ? String(r.message_type) : undefined,
+    lastSummary: r.last_summary ? String(r.last_summary) : undefined,
+    messageCount: Number(r.message_count || 1),
+    isBound: Boolean(r.guard_id),
+    guardName: r.guard_name ? String(r.guard_name) : undefined,
+    role: r.role ? String(r.role) : undefined,
   }));
+}
+
+export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
+  ok: boolean;
+  totalSynced: number;
+  newGuards: number;
+  updatedGuards: number;
+  sparesDetected: number;
+  message: string;
+}> {
+  await ensureDatabase();
+  const db = database();
+  const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
+  const now = bangkokNow().iso;
+
+  // 1. ดึงผู้ส่งรายงานทั้งหมดจาก webhook events
+  const sendersResult = await db.prepare(`
+    SELECT 
+      lwe.sender_key, 
+      lwe.group_id, 
+      COALESCE(lgr.group_name, lg.group_name, lwe.group_id) as group_name,
+      lg.site_id,
+      os.site_name,
+      MAX(lwe.received_at) as last_seen_at,
+      COUNT(lwe.id) as message_count
+    FROM line_webhook_events lwe
+    LEFT JOIN line_group_registry lgr ON lwe.group_id = lgr.id
+    LEFT JOIN line_groups lg ON lwe.group_id = lg.id
+    LEFT JOIN operational_sites os ON lg.site_id = os.id
+    WHERE lwe.sender_key IS NOT NULL AND lwe.sender_key != ''
+    GROUP BY lwe.sender_key, lwe.group_id
+  `).all<D1Row>();
+
+  const senders = (sendersResult.results || []) as any[];
+  if (!senders.length) {
+    return {
+      ok: true,
+      totalSynced: 0,
+      newGuards: 0,
+      updatedGuards: 0,
+      sparesDetected: 0,
+      message: "ยังไม่พบประวัติผู้ส่งรายงานในระบบ LINE Webhook",
+    };
+  }
+
+  // 2. จัดกลุ่ม sender_key
+  const senderGroupsMap = new Map<string, any[]>();
+  for (const s of senders) {
+    const list = senderGroupsMap.get(String(s.sender_key)) || [];
+    list.push(s);
+    senderGroupsMap.set(String(s.sender_key), list);
+  }
+
+  // 3. ดึง guard_profiles ที่มีอยู่เดิม
+  const existingProfiles = await db.prepare("SELECT * FROM guard_profiles").all<D1Row>();
+  const existingMap = new Map<string, any>();
+  for (const ep of (existingProfiles.results || [])) {
+    existingMap.set(String(ep.id), ep);
+    if (ep.display_name) existingMap.set(String(ep.display_name), ep);
+  }
+
+  let newGuards = 0;
+  let updatedGuards = 0;
+  let sparesDetected = 0;
+
+  const operations: any[] = [];
+
+  for (const [senderKey, groupList] of senderGroupsMap.entries()) {
+    const isMultiGroup = groupList.length > 1;
+    const primary = groupList[0];
+    const siteId = isMultiGroup ? "all" : (primary.site_id || linePointSiteIdentifier(primary.group_id));
+    const role = isMultiGroup ? "spare" : "regular";
+    if (isMultiGroup) sparesDetected++;
+
+    let realDisplayName: string | null = null;
+    let realPictureUrl: string | null = null;
+
+    // ถ้ามี LINE Access Token และเป็น LINE User ID
+    if (token && senderKey.startsWith("U") && senderKey.length >= 30) {
+      try {
+        const profileRes = await fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(primary.group_id)}/member/${encodeURIComponent(senderKey)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (profileRes.ok) {
+          const profileJson = await profileRes.json() as any;
+          if (profileJson.displayName) realDisplayName = profileJson.displayName;
+          if (profileJson.pictureUrl) realPictureUrl = profileJson.pictureUrl;
+        } else {
+          const userRes = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(senderKey)}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (userRes.ok) {
+            const userJson = await userRes.json() as any;
+            if (userJson.displayName) realDisplayName = userJson.displayName;
+            if (userJson.pictureUrl) realPictureUrl = userJson.pictureUrl;
+          }
+        }
+      } catch {
+        // Fallback
+      }
+    }
+
+    const existing = existingMap.get(senderKey);
+    const siteLabel = primary.site_name || primary.group_name || `กลุ่ม ${primary.group_id.slice(-6)}`;
+    const finalGuardName = realDisplayName 
+      || (existing?.guard_name && !existing.guard_name.startsWith("รปภ. (U-") ? existing.guard_name : null)
+      || (isMultiGroup 
+            ? `รปภ. สแปร์กลาง (${senderKey.slice(0, 6)})` 
+            : `รปภ. ประจำ ${siteLabel}`);
+
+    const finalPictureUrl = realPictureUrl || existing?.picture_url || null;
+
+    operations.push(
+      db.prepare(`
+        INSERT INTO guard_profiles (
+          id, site_id, guard_name, display_name, picture_url, phone_number, preferred_shift, role, active, created_at, updated_at
+        ) VALUES (
+          ?, ?, ?, ?, ?, NULL, 'all', ?, 1, ?, ?
+        )
+        ON CONFLICT(id) DO UPDATE SET
+          site_id = CASE WHEN guard_profiles.site_id = 'all' THEN 'all' ELSE excluded.site_id END,
+          guard_name = excluded.guard_name,
+          display_name = excluded.display_name,
+          picture_url = COALESCE(excluded.picture_url, guard_profiles.picture_url),
+          role = CASE WHEN excluded.role = 'spare' THEN 'spare' ELSE guard_profiles.role END,
+          active = 1,
+          updated_at = excluded.updated_at
+      `).bind(
+        senderKey,
+        siteId,
+        finalGuardName,
+        senderKey,
+        finalPictureUrl,
+        role,
+        now,
+        now
+      )
+    );
+
+    if (existing) {
+      updatedGuards++;
+    } else {
+      newGuards++;
+    }
+  }
+
+  for (let offset = 0; offset < operations.length; offset += 50) {
+    await db.batch(operations.slice(offset, offset + 50));
+  }
+
+  await addAudit("guard_profile", "bulk_sync", "auto_sync", actor, `ดึงข้อมูลและลงทะเบียน รปภ. อัตโนมัติ ${senderGroupsMap.size} คน (ใหม่ ${newGuards}, อัปเดต ${updatedGuards}, สแปร์กลาง ${sparesDetected})`);
+
+  return {
+    ok: true,
+    totalSynced: senderGroupsMap.size,
+    newGuards,
+    updatedGuards,
+    sparesDetected,
+    message: `ดึงและลงทะเบียน รปภ. จาก LINE อัตโนมัติสำเร็จครบทั้ง ${senderGroupsMap.size} บัญชี (คนประจำ ${senderGroupsMap.size - sparesDetected} คน, สแปร์กลาง ${sparesDetected} คน)`,
+  };
 }
 
 // -------------------------------------------------------------

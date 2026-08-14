@@ -1,4 +1,4 @@
-import { getGuardProfiles, saveGuardProfile, deleteGuardProfile, getRecentWebhookSenders } from "../../../db/command-center";
+import { getGuardProfiles, saveGuardProfile, deleteGuardProfile, getRecentWebhookSenders, autoSyncGuardsFromLine } from "../../../db/command-center";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,7 +12,7 @@ export async function GET(request: Request) {
     const guards = await getGuardProfiles(siteId);
     let recentSenders: any[] = [];
     if (includeSenders) {
-      recentSenders = await getRecentWebhookSenders(25);
+      recentSenders = await getRecentWebhookSenders({ siteId, limit: 100 });
     }
 
     return Response.json({
@@ -28,6 +28,12 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
+
+    if (body.action === "auto_sync" || body.action === "auto_bind_all") {
+      const result = await autoSyncGuardsFromLine(body.actor || "admin");
+      return Response.json(result);
+    }
+
     if (!body.siteId || !body.guardName) {
       return Response.json({ ok: false, error: "กรุณาระบุชื่อจุดและชื่อ รปภ." }, { status: 400 });
     }
