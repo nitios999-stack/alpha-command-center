@@ -26,6 +26,29 @@ export async function POST(request: Request) {
     if (targetGroupSetting?.value && targetGroupSetting.value === groupId) {
       return Response.json({ ok: true, skipped: true, reason: "command_room_no_stickers" });
     }
+
+    // 0.5 ตรวจสอบว่ามีข้อความนายจ้าง / ร้องเรียน / สั่งงาน ในกลุ่มนี้หรือไม่
+    // หากนายจ้างส่งข้อความ ห้ามส่งสติกเกอร์ตอบกลับเด็ดขาด เพื่อไม่ให้กลบแชทนายจ้าง
+    const recentInquiry = (await db.prepare(`
+      SELECT id, message_text, urgency 
+      FROM employer_inquiries 
+      WHERE group_id = ? AND received_at >= datetime('now', '-3 minutes')
+      ORDER BY received_at DESC LIMIT 1
+    `).bind(groupId).first()) as { id: string; message_text: string; urgency: string } | null;
+
+    if (recentInquiry) {
+      await logOutboundAction({
+        id: `skip-employer-${Date.now()}`,
+        groupId,
+        triggerEventId: eventId,
+        actionType: "auto-reply-close",
+        stickerPackageId: "11538",
+        stickerId: "51626520",
+        status: "skipped",
+        skipReason: `งดส่งสติกเกอร์: ตรวจพบข้อความนายจ้าง "${recentInquiry.message_text.slice(0, 40)}" เพื่อให้เจ้าหน้าที่หน้าแชทเห็นชัดเจน`,
+      });
+      return Response.json({ ok: true, skipped: true, reason: "employer_message_no_sticker" });
+    }
     
     // 1. ค้นหา event ปัจจุบันในฐานข้อมูลเพื่อดึง rowid
     const currentEvent = (await db.prepare(

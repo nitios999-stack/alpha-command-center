@@ -2020,59 +2020,66 @@ export async function evaluateShiftCheckIn(input: {
     const slots = (slotsResult.results || []) as any[];
     if (!slots.length) return { checkedIn: false };
 
-    // 3. ตรวจสอบว่ามีสล็อตไหนอยู่ในกรอบเวลาเข้าเวร (ล่วงหน้า 90 นาที ถึง หลังเวลาเริ่ม 240 นาที)
+    // 3. ตรวจสอบว่ามีสล็อตไหนอยู่ในกรอบเวลาเข้าเวร (กะดึก: อนุญาตก่อนเวลาไม่เกิน 30 นาที ยกเว้นมีคำว่า ว.4/รับมอบเวร)
     for (const slot of slots) {
       const deadlineMins = minuteFromTime(slot.deadline || "18:00");
-      const windowStart = deadlineMins - 90; // ก่อนเวลา 1.5 ชั่วโมง
-      const windowEnd = deadlineMins + 240;  // หลังเวลาไม่เกิน 4 ชั่วโมง
+      const cleanText = input.text ? input.text.toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]/g, "") : "";
 
-      if (currentMinutes >= windowStart && currentMinutes <= windowEnd) {
-        const cleanText = input.text ? input.text.toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]/g, "") : "";
+      // LAYER 1: ตรวจจับคำออกเวรของกะเดิม (Outgoing Handover Filter)
+      const isLeavingText = cleanText && SHIFT_LEAVE_KEYWORDS.some((kw) => {
+        const cleanKw = kw.toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]/g, "");
+        return cleanText.includes(cleanKw);
+      });
 
-        // LAYER 1: ตรวจจับคำออกเวรของกะเดิม (Outgoing Handover Filter)
-        const isLeavingText = cleanText && SHIFT_LEAVE_KEYWORDS.some((kw) => {
-          const cleanKw = kw.toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]/g, "");
-          return cleanText.includes(cleanKw);
-        });
+      if (isLeavingText) {
+        // กะเดิมพิมพ์ออกเวร -> ไม่นับเป็นเข้าเวรของกะใหม่! แต่บันทึกโน้ตไว้ว่ากะเก่าส่งเวรแล้ว
+        await addAudit(
+          "coverage_slot",
+          slot.id,
+          "shift_handover_out",
+          "LINE Webhook (Outgoing)",
+          `กะเก่าส่งเวร/ออกเวรจุด ${slot.site_name} (สถานะ: รอกะใหม่มารับมอบ)`
+        );
+        continue; // ข้ามการยืนยันสล็อตนี้ เพื่อรอกะใหม่มารายงานตัว
+      }
 
-        if (isLeavingText) {
-          // กะเดิมพิมพ์ออกเวร -> ไม่นับเป็นเข้าเวรของกะใหม่! แต่บันทึกโน้ตไว้ว่ากะเก่าส่งเวรแล้ว
-          await addAudit(
-            "coverage_slot",
-            slot.id,
-            "shift_handover_out",
-            "LINE Webhook (Outgoing)",
-            `กะเก่าส่งเวร/ออกเวรจุด ${slot.site_name} (สถานะ: รอกะใหม่มารับมอบ)`
-          );
-          continue; // ข้ามการยืนยันสล็อตนี้ เพื่อรอกะใหม่มารายงานตัว
-        }
+      // LAYER 2: ตรวจจับภาษาลูกค้า/นายจ้าง (Anti-Employer/Client Filter)
+      const employerCheck = input.text ? classifyEmployerMessage(input.text) : null;
+      const isClientText = Boolean(employerCheck?.isUrgent) || (cleanText && CLIENT_EMPLOYER_KEYWORDS.some((kw) => {
+        const cleanKw = kw.toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]/g, "");
+        return cleanText.includes(cleanKw);
+      }));
 
-        // LAYER 2: ตรวจจับภาษาลูกค้า/นายจ้าง (Anti-Employer/Client Filter)
-        const isClientText = cleanText && CLIENT_EMPLOYER_KEYWORDS.some((kw) => {
-          const cleanKw = kw.toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]/g, "");
-          return cleanText.includes(cleanKw);
-        });
+      if (isClientText) {
+        // ลูกค้า/นายจ้างพิมพ์ข้อความ/สั่งงาน -> ไม่นำมานับเข้าเวรเด็ดขาด!
+        continue;
+      }
 
-        if (isClientText) {
-          // ลูกค้า/นายจ้างสั่งงาน -> ไม่นำมานับเข้าเวรเด็ดขาด
-          continue;
-        }
+      // LAYER 3: ตรวจสอบคำเฉพาะของ รปภ. (Guard-Exclusive Enter Keywords)
+      const hasGuardEnterKeyword = cleanText && GUARD_ENTER_KEYWORDS.some((kw) => {
+        const cleanKw = kw.toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]/g, "");
+        return cleanText.includes(cleanKw);
+      });
 
-        // LAYER 3: ตรวจสอบคำเฉพาะของ รปภ. (Guard-Exclusive Enter Keywords)
-        const hasGuardEnterKeyword = cleanText && GUARD_ENTER_KEYWORDS.some((kw) => {
-          const cleanKw = kw.toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]/g, "");
-          return cleanText.includes(cleanKw);
-        });
+      // LAYER 4: ตรวจสอบรูปภาพ + กรอบเวลาที่สมจริง (Tight Realistic Shift Window)
+      // รูปภาพทั่วไป: อนุญาตก่อนเวลาเริ่มกะได้ไม่เกิน 30 นาที (เช่น กะ 18:00 น. เริ่มนับตั้งแต่ 17:30 น.)
+      // หากส่งก่อน 17:30 น. (เช่น 16:30 น.) จะถือว่าเป็นภาพตรวจตราของกะเช้า ไม่นำมายืนยันกะดึกล่วงหน้า
+      // เว้นแต่จะมีคำว่า "รับมอบเวร" หรือ "ว.4 เข้าเวร" ชัดเจน จึงจะยอมรับก่อนเวลาได้ถึง 45 นาที (17:15 น.)
+      const windowStart = hasGuardEnterKeyword ? deadlineMins - 45 : deadlineMins - 30;
+      const windowEnd = deadlineMins + 240; // หลังเวลาไม่เกิน 4 ชั่วโมง
 
-        // LAYER 4: ตรวจสอบรูปภาพ + ประวัติผู้ส่ง (Photo by Guard Sender)
-        const isPhotoOrLocation = input.messageType === "image" || input.messageType === "location" || Boolean(input.messageType?.startsWith("image"));
-        const isGuardSender = await isEstablishedGuardSender(db, input.groupId, input.senderKey);
+      if (currentMinutes < windowStart || currentMinutes > windowEnd) {
+        // อยู่นอกกรอบเวลารายงานตัวเข้าเวร -> เป็นการตรวจตราตามปกติของกะปัจจุบัน ข้ามไป
+        continue;
+      }
 
-        // เงื่อนไขในการยืนยันเข้าเวร:
-        // 1. มีคีย์เวิร์ดของ รปภ. ชัดเจน (เช่น "ว.4", "รับมอบเวร", "เข้าเวร")
-        // 2. หรือ ส่งรูปภาพโดย รปภ. ที่มีประวัติการส่งรายงานตรวจเป็นประจำ
-        // 3. หรือ ส่งรูปภาพในช่วง 60 นาทีรอบเวลาเริ่มกะ โดยไม่มีข้อความสั่งงานของลูกค้า
-        const shouldConfirm = hasGuardEnterKeyword || (isPhotoOrLocation && (isGuardSender || !cleanText));
+      const isPhotoOrLocation = input.messageType === "image" || input.messageType === "location" || Boolean(input.messageType?.startsWith("image"));
+      const isGuardSender = await isEstablishedGuardSender(db, input.groupId, input.senderKey);
+
+      // เงื่อนไขในการยืนยันเข้าเวร:
+      // 1. มีคีย์เวิร์ดของ รปภ. ชัดเจน (เช่น "ว.4", "รับมอบเวร", "เข้าเวร")
+      // 2. หรือ ส่งรูปภาพในช่วง 30 นาทีรอบเวลาเริ่มกะ (17:30 - 18:30) โดยไม่ใช่ข้อความนายจ้าง
+      const shouldConfirm = hasGuardEnterKeyword || (isPhotoOrLocation && !cleanText) || (isPhotoOrLocation && isGuardSender && !isClientText);
 
         if (shouldConfirm) {
           const lateMins = Math.max(0, currentMinutes - deadlineMins);
@@ -2116,7 +2123,6 @@ export async function evaluateShiftCheckIn(input: {
           };
         }
       }
-    }
 
     return { checkedIn: false };
   } catch (err) {
