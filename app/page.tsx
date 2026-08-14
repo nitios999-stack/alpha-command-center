@@ -5,10 +5,11 @@ import { StickersPanel } from "./StickersPanel";
 import { ShiftsPanel } from "./ShiftsPanel";
 import PatrolPanel from "./PatrolPanel";
 
-type SlotState = "confirmed" | "self_reported" | "waiting" | "replacement_required" | "unassigned" | "missing";
+export type SlotState = "confirmed" | "self_reported" | "waiting" | "replacement_required" | "unassigned" | "missing";
 
-type CoverageSlot = {
+export type CoverageSlot = {
   id: string;
+  operationalDate?: string;
   wave: string;
   siteId: string;
   siteName: string;
@@ -23,6 +24,7 @@ type CoverageSlot = {
   reportedAt: string | null;
   source: string | null;
   lateMinutes: number;
+  updatedAt?: string;
 };
 
 type BillingCase = {
@@ -159,7 +161,7 @@ type TemplateRow = {
   lineGroupId: string;
 };
 
-type DashboardData = {
+export type DashboardData = {
   today: string;
   now: { time: string };
   slots: CoverageSlot[];
@@ -1465,7 +1467,7 @@ export default function Home() {
             onClick={() => setTab("ops")}
           >
             <span className="tab-icon">🛡️</span>
-            <span>เช็คเข้าเวร</span>
+            <span>เข้าเวรวันนี้</span>
           </button>
           <button
             type="button"

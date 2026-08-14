@@ -404,12 +404,12 @@ export function bangkokNow() {
   };
 }
 
-function minuteFromTime(time: string) {
+export function minuteFromTime(time: string) {
   const bits = time.split(":");
   return Number(bits[0]) * 60 + Number(bits[1]);
 }
 
-function deadlineMinute(deadline: string) {
+export function deadlineMinute(deadline: string) {
   const bits = deadline.split(":");
   return Number(bits[0]) * 60 + Number(bits[1]);
 }
@@ -1945,11 +1945,11 @@ const GUARD_ENTER_KEYWORDS = [
 async function isEstablishedGuardSender(db: any, groupId: string, senderKey?: string): Promise<boolean> {
   if (!senderKey) return false;
   try {
-    const countRow = await db.prepare(`
+    const countRow = (await db.prepare(`
       SELECT COUNT(*) as count 
       FROM line_webhook_events 
       WHERE group_id = ? AND sender_key = ?
-    `).bind(groupId, senderKey).first<{ count: number }>();
+    `).bind(groupId, senderKey).first()) as { count?: number } | null;
 
     return (countRow?.count || 0) >= 2;
   } catch {
@@ -3277,11 +3277,12 @@ export async function discoverAndRecoverAllGroups() {
       }
     }
 
+    const erLastSeen = ((er as any)?.last_seen_at as string | null | undefined) || now;
     await db.prepare(`
       INSERT INTO line_group_registry (id, group_name, picture_url, last_seen_at, source, updated_at)
       VALUES (?, ?, ?, ?, 'webhook', ?)
       ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, picture_url = COALESCE(excluded.picture_url, line_group_registry.picture_url), last_seen_at = excluded.last_seen_at, updated_at = excluded.updated_at
-    `).bind(cleanId, groupName, pictureUrl, er.last_seen_at || now, now).run().catch(() => {});
+    `).bind(cleanId, groupName, pictureUrl, erLastSeen, now).run().catch(() => {});
 
     const isCommandCandidate = /สายตรวจ|สนง|สำนักงาน|COP|Command|ศูนย์/i.test(groupName);
 

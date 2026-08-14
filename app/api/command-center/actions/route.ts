@@ -160,18 +160,20 @@ export async function POST(request: Request) {
       const customerName = payload.customerName?.trim() ?? "";
       const nextAction = payload.nextAction?.trim() ?? "";
       const ownerName = payload.ownerName?.trim() ?? actor;
-      if (!customerName || !nextAction || !payload.dueAt || !Number.isFinite(payload.amountBaht) || payload.amountBaht <= 0) {
+      const amountBaht = typeof payload.amountBaht === "number" ? payload.amountBaht : Number(payload.amountBaht);
+      if (!customerName || !nextAction || !payload.dueAt || !Number.isFinite(amountBaht) || amountBaht <= 0) {
         return Response.json({ error: "กรอกข้อมูลวางบิลให้ครบและระบุยอดมากกว่า 0" }, { status: 400 });
       }
       await addBillingCase({
         customerName,
-        amountBaht: payload.amountBaht,
+        amountBaht,
         dueAt: payload.dueAt,
         nextAction,
         ownerName,
       });
     } else if (payload.type === "batch_approve") {
-      result = { ok: true, ...(await batchApproveSlotsWithPhotos({ wave: payload.wave as any, actor })) };
+      const batchResult = await batchApproveSlotsWithPhotos({ wave: payload.wave as any, actor });
+      result = { ...batchResult, ok: true };
     } else {
       return Response.json({ error: "คำสั่งไม่ถูกต้อง" }, { status: 400 });
     }
