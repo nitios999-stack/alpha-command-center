@@ -12,7 +12,7 @@ type LineEvent = {
   postback?: { data?: string; params?: Record<string, string> };
 };
 type LineWebhook = { events?: LineEvent[] };
-type GroupEvent = { eventId: string; eventType: string; groupId: string; messageType?: string; text?: string; senderKey?: string; replyToken?: string; isRedelivery?: boolean; postbackData?: string };
+type GroupEvent = { eventId: string; eventType: string; groupId: string; rawUserId?: string; messageType?: string; text?: string; senderKey?: string; replyToken?: string; isRedelivery?: boolean; postbackData?: string };
 
 function base64(bytes: ArrayBuffer) {
   const data = new Uint8Array(bytes);
@@ -132,6 +132,7 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
       messageType,
       text,
       postbackData,
+      rawUserId: event.source?.userId?.trim() || undefined,
       senderKey: eventType === "message" ? await senderFingerprint(event.source?.userId, senderSalt) : undefined,
       replyToken: event.replyToken?.trim(),
       isRedelivery: event.deliveryContext?.isRedelivery,
@@ -141,6 +142,29 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
 
   // Store the verified event before any optional profile lookup.
   const saved = await Promise.all(groupEvents.map(async (group) => {
+    // Live Guard Profile Resolution from LINE API
+    if (group.rawUserId && accessToken) {
+      fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(group.groupId)}/member/${encodeURIComponent(group.rawUserId)}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }).then(async (res) => {
+        if (res.ok) {
+          const profile = await res.json() as any;
+          if (profile.displayName) {
+            const currentGuardId = group.senderKey || group.rawUserId!;
+            await saveGuardProfile({
+              id: currentGuardId,
+              siteId: group.groupId,
+              guardName: profile.displayName,
+              displayName: currentGuardId,
+              pictureUrl: profile.pictureUrl || null,
+              role: "regular",
+              preferredShift: "all",
+            });
+          }
+        }
+      }).catch(() => {});
+    }
+
     // Real-time Shift Check-in Evaluation (Photo / Location / Keyword Auto-Detect)
     evaluateShiftCheckIn({
       groupId: group.groupId,
