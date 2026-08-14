@@ -792,6 +792,75 @@ function handleLocalAction(payload: Record<string, unknown>, currentData: Dashbo
         });
       }
     }
+  } else if (type === "line_point_setup") {
+    const groupId = String(payload.groupId ?? "");
+    const customerName = String(payload.customerNameOverride ?? "ลูกค้าทั่วไป").trim();
+    const morningEnabled = payload.morningEnabled !== false;
+    const eveningEnabled = payload.eveningEnabled !== false;
+    const morningDeadline = String(payload.morningDeadline || "06:00").trim();
+    const eveningDeadline = String(payload.eveningDeadline || "18:00").trim();
+    const morningGuard = payload.morningGuard ? String(payload.morningGuard).trim() : null;
+    const eveningGuard = payload.eveningGuard ? String(payload.eveningGuard).trim() : null;
+    const active = payload.pointActive !== false;
+
+    const group = lineGroups.find((g) => g.id === groupId);
+    const groupName = group ? group.groupName : "จุดตรวจ";
+    const siteId = group?.siteId || ("site-" + groupId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 50));
+
+    if (group) group.siteId = siteId;
+
+    sites = [
+      { id: siteId, siteName: groupName, customerName, active: active ? 1 : 0 },
+      ...sites.filter((s) => s.id !== siteId)
+    ];
+
+    // Filter out old waiting slots for this site
+    slots = slots.filter((s) => s.siteId !== siteId || s.state !== "waiting");
+
+    if (active) {
+      if (morningEnabled) {
+        slots.push({
+          id: "slot-" + siteId + "-morning-1",
+          operationalDate: today,
+          wave: "morning",
+          siteId,
+          siteName: groupName,
+          customerName,
+          postName: String(payload.pointPostName || "จุดประจำ"),
+          slotLabel: String(payload.pointSlotLabel || "ช่อง 1"),
+          assignedGuard: morningGuard,
+          assignmentType: "regular",
+          state: "waiting",
+          verificationPolicy: "standard",
+          deadline: morningDeadline,
+          reportedAt: null,
+          source: null,
+          lateMinutes: 0,
+          updatedAt: created,
+        });
+      }
+      if (eveningEnabled) {
+        slots.push({
+          id: "slot-" + siteId + "-evening-1",
+          operationalDate: today,
+          wave: "evening",
+          siteId,
+          siteName: groupName,
+          customerName,
+          postName: String(payload.pointPostName || "จุดประจำ"),
+          slotLabel: String(payload.pointSlotLabel || "ช่อง 1"),
+          assignedGuard: eveningGuard,
+          assignmentType: "regular",
+          state: "waiting",
+          verificationPolicy: "standard",
+          deadline: eveningDeadline,
+          reportedAt: null,
+          source: null,
+          lateMinutes: 0,
+          updatedAt: created,
+        });
+      }
+    }
   } else if (type === "line_delete" || type === "site_delete") {
     const groupId = String(payload.groupId ?? "");
     const siteId = String(payload.siteId ?? "");

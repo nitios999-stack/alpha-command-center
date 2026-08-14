@@ -772,6 +772,21 @@ export async function syncTodayCoverageSlotsFromTemplates(operationalDate?: stri
   for (let offset = 0; offset < operations.length; offset += 50) {
     await db.batch(operations.slice(offset, offset + 50));
   }
+
+  // Prune today's waiting slots for deactivated or removed shift templates
+  await db.prepare(`
+    DELETE FROM coverage_slots
+    WHERE operational_date = ?
+      AND state = 'waiting'
+      AND NOT EXISTS (
+        SELECT 1 FROM shift_templates st
+        JOIN operational_sites os ON st.site_id = os.id
+        WHERE st.site_id = coverage_slots.site_id
+          AND st.wave = coverage_slots.wave
+          AND st.active = 1
+          AND os.active = 1
+      )
+  `).bind(date).run().catch(() => {});
 }
 
 export async function getDashboard() {
@@ -1068,14 +1083,23 @@ export async function setupLinePoint(input: LinePointSetupInput) {
       .bind(`line_report_config:${groupId}`, JSON.stringify({ ...reportConfig, enabled: active }), now),
   ];
   const addTemplate = (wave: "morning" | "evening", enabled: boolean, guard: string | undefined, deadline: string) => {
-    if (!enabled) return;
     const templateId = templateIdentifier(siteId, wave, postName, slotLabel);
-    operations.push(db.prepare("INSERT INTO shift_templates (id, site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, active, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'standard', 1, ?) ON CONFLICT(id) DO UPDATE SET assigned_guard = excluded.assigned_guard, deadline = excluded.deadline, active = 1, updated_at = excluded.updated_at")
-      .bind(templateId, siteId, wave, postName, slotLabel, guard?.trim() || null, deadline, now));
+    if (enabled) {
+      operations.push(db.prepare("INSERT INTO shift_templates (id, site_id, wave, post_name, slot_label, assigned_guard, deadline, verification_policy, active, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'standard', 1, ?) ON CONFLICT(id) DO UPDATE SET assigned_guard = excluded.assigned_guard, deadline = excluded.deadline, active = 1, updated_at = excluded.updated_at")
+        .bind(templateId, siteId, wave, postName, slotLabel, guard?.trim() || null, deadline, now));
+    } else {
+      operations.push(
+        db.prepare("UPDATE shift_templates SET active = 0, updated_at = ? WHERE site_id = ? AND wave = ?")
+          .bind(now, siteId, wave),
+        db.prepare("DELETE FROM coverage_slots WHERE site_id = ? AND wave = ? AND state = 'waiting'")
+          .bind(siteId, wave)
+      );
+    }
   };
   addTemplate("morning", input.morningEnabled !== false, input.morningGuard, morningDeadline);
   addTemplate("evening", input.eveningEnabled !== false, input.eveningGuard, eveningDeadline);
   await db.batch(operations);
+  await syncTodayCoverageSlotsFromTemplates();
   await addAudit("line_point", groupId, active ? "enabled" : "disabled", input.actor, `${active ? "ตั้ง" : "ปิด"} กลุ่ม LINE ${groupName} เป็นจุดใช้งาน · ลูกค้า ${customerName}`);
   return { siteId, active, groupName };
 }
