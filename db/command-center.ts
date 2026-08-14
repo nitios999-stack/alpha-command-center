@@ -3450,21 +3450,25 @@ export async function purgeAllLegacyEventsAndPlaceholders(actor = "admin"): Prom
   await ensureDatabase();
   const db = database();
   
-  // 1. Delete all fake placeholder guards
+  // 1. Delete all fake placeholder guards, legacy hashes, and bot accounts
   const gRes = await db.prepare(`
     DELETE FROM guard_profiles 
     WHERE guard_name LIKE 'รปภ. ประจำ%' 
        OR guard_name LIKE 'รปภ. สแปร์กลาง%'
        OR id LIKE 'guard-line-point-%'
+       OR id LIKE 'U-%'
+       OR guard_name LIKE 'U-%'
        OR (guard_name LIKE 'รปภ. (U-%' AND (display_name IS NULL OR display_name = ''))
        OR (guard_name LIKE 'รปภ. LINE (%' AND (display_name IS NULL OR display_name = ''))
        OR (display_name LIKE 'U-%' AND (picture_url IS NULL OR picture_url = ''))
+       OR guard_name LIKE '%bot%'
+       OR guard_name LIKE '%บอท%'
   `).run();
 
   // 2. Delete legacy webhook events that do not have a real raw_user_id (hashed only)
   const eRes = await db.prepare(`
     DELETE FROM line_webhook_events 
-    WHERE raw_user_id IS NULL OR raw_user_id = '' OR raw_user_id LIKE 'U-%'
+    WHERE raw_user_id IS NULL OR raw_user_id = '' OR raw_user_id LIKE 'U-%' OR sender_key LIKE 'U-%'
   `).run();
 
   const countG = Number(gRes.changes || 0);
@@ -3483,7 +3487,74 @@ export async function purgeAllLegacyEventsAndPlaceholders(actor = "admin"): Prom
 export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]> {
   await ensureDatabase();
   const db = database();
+  const botUserId = await getEffectiveBotUserId();
+  const lineToken = await getEffectiveLineToken();
 
+  // 1. Auto-discover any real LINE senders from webhook events not yet registered in guard_profiles
+  try {
+    const unmappedSenders = (await db.prepare(`
+      SELECT 
+        lwe.raw_user_id,
+        lwe.sender_key,
+        lwe.group_id,
+        COALESCE(lg.site_id, lgr.site_id, '') as site_id
+      FROM line_webhook_events lwe
+      LEFT JOIN line_groups lg ON lwe.group_id = lg.id
+      LEFT JOIN line_group_registry lgr ON lwe.group_id = lgr.id
+      LEFT JOIN guard_profiles gp ON (gp.id = lwe.raw_user_id OR gp.id = lwe.sender_key) AND gp.active = 1
+      WHERE gp.id IS NULL
+        AND (
+          (lwe.raw_user_id LIKE 'U%' AND length(lwe.raw_user_id) >= 30)
+          OR (lwe.sender_key LIKE 'U%' AND length(lwe.sender_key) >= 30)
+        )
+      GROUP BY COALESCE(NULLIF(lwe.raw_user_id, ''), lwe.sender_key), lwe.group_id
+      LIMIT 30
+    `).all<any>()).results || [];
+
+    for (const sender of unmappedSenders) {
+      const uId = String(sender.raw_user_id || sender.sender_key || "").trim();
+      if (!uId || (botUserId && uId === botUserId)) continue;
+      const targetSiteId = sender.site_id || linePointSiteIdentifier(sender.group_id);
+      
+      let fetchedName = `รปภ. (${uId.slice(-6)})`;
+      let fetchedPic: string | null = null;
+
+      if (lineToken && uId.startsWith("U") && uId.length >= 30) {
+        try {
+          let res = await fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(sender.group_id)}/member/${encodeURIComponent(uId)}`, {
+            headers: { Authorization: `Bearer ${lineToken}` },
+          });
+          if (!res.ok) {
+            res = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(uId)}`, {
+              headers: { Authorization: `Bearer ${lineToken}` },
+            });
+          }
+          if (res.ok) {
+            const pJson = await res.json() as any;
+            if (pJson.displayName) {
+              fetchedName = String(pJson.displayName).trim();
+              fetchedPic = pJson.pictureUrl ? String(pJson.pictureUrl).trim() : null;
+            }
+          }
+        } catch {}
+      }
+
+      // Check if this is the bot's name
+      if (fetchedName.toLowerCase().includes("bot") || fetchedName.includes("บอท")) continue;
+
+      const now = bangkokNow().iso;
+      await db.prepare(`
+        INSERT INTO guard_profiles (id, site_id, guard_name, display_name, picture_url, preferred_shift, role, active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'all', 'regular', 1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          display_name = COALESCE(excluded.display_name, guard_profiles.display_name),
+          picture_url = COALESCE(excluded.picture_url, guard_profiles.picture_url),
+          updated_at = excluded.updated_at
+      `).bind(uId, targetSiteId, fetchedName, fetchedName, fetchedPic, now, now).run();
+    }
+  } catch {}
+
+  // 2. Fetch all active guard and employer profiles
   let query = `
     SELECT gp.*, os.site_name
     FROM guard_profiles gp
@@ -3493,6 +3564,8 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
       AND gp.guard_name NOT LIKE 'รปภ. สแปร์กลาง%'
       AND gp.id NOT LIKE 'guard-line-point-%'
       AND gp.guard_name NOT LIKE 'U-%'
+      AND gp.guard_name NOT LIKE '%bot%'
+      AND gp.guard_name NOT LIKE '%บอท%'
   `;
   const params: any[] = [];
   if (siteId === "spares_only") {
@@ -3506,29 +3579,37 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
   query += " ORDER BY CASE WHEN gp.role = 'employer' THEN 2 WHEN gp.site_id = 'all' THEN 1 ELSE 0 END, os.site_name ASC, gp.role ASC, gp.guard_name ASC";
 
   const rows = (await db.prepare(query).bind(...params).all<any>()).results || [];
-  return rows.map((r: any) => {
-    let displayGuardName = String(r.guard_name || "").trim();
-    const rawDisplayName = String(r.display_name || "").trim();
+  return rows
+    .filter((r: any) => {
+      const uId = String(r.id || "").trim();
+      const gName = String(r.guard_name || "").trim();
+      if (botUserId && uId === botUserId) return false;
+      if (gName.toLowerCase().includes("bot") || gName.includes("บอท")) return false;
+      return true;
+    })
+    .map((r: any) => {
+      let displayGuardName = String(r.guard_name || "").trim();
+      const rawDisplayName = String(r.display_name || "").trim();
 
-    if (!displayGuardName && rawDisplayName) {
-      displayGuardName = rawDisplayName;
-    }
+      if (!displayGuardName && rawDisplayName) {
+        displayGuardName = rawDisplayName;
+      }
 
-    return {
-      id: String(r.id),
-      siteId: String(r.site_id),
-      siteName: r.site_id === "all" ? "🌐 สแปร์กลาง (ทุกจุด)" : (r.site_name ? String(r.site_name) : undefined),
-      guardName: displayGuardName || `ผู้ส่ง (${String(r.id).slice(-6)})`,
-      displayName: r.display_name ? String(r.display_name) : null,
-      pictureUrl: r.picture_url ? String(r.picture_url) : null,
-      phoneNumber: r.phone_number ? String(r.phone_number) : null,
-      preferredShift: (r.preferred_shift || "all") as "morning" | "evening" | "all",
-      role: (r.role || "regular") as "regular" | "spare" | "head_guard" | "employer",
-      active: Number(r.active ?? 1),
-      createdAt: String(r.created_at || ""),
-      updatedAt: String(r.updated_at || ""),
-    };
-  });
+      return {
+        id: String(r.id),
+        siteId: String(r.site_id),
+        siteName: r.site_id === "all" ? "🌐 สแปร์กลาง (ทุกจุด)" : (r.site_name ? String(r.site_name) : undefined),
+        guardName: displayGuardName || `ผู้ส่ง (${String(r.id).slice(-6)})`,
+        displayName: r.display_name ? String(r.display_name) : null,
+        pictureUrl: r.picture_url ? String(r.picture_url) : null,
+        phoneNumber: r.phone_number ? String(r.phone_number) : null,
+        preferredShift: (r.preferred_shift || "all") as "morning" | "evening" | "all",
+        role: (r.role || "regular") as "regular" | "spare" | "head_guard" | "employer",
+        active: Number(r.active ?? 1),
+        createdAt: String(r.created_at || ""),
+        updatedAt: String(r.updated_at || ""),
+      };
+    });
 }
 
 export async function saveGuardProfile(data: {
@@ -4356,19 +4437,36 @@ export async function updateInquiryStatus(
   };
 }
 
+let cachedBotUserId: string | null = null;
+
+export async function getEffectiveBotUserId(): Promise<string | null> {
+  if (cachedBotUserId) return cachedBotUserId;
+  const info = await getLineBotInfo();
+  return info.userId || null;
+}
+
 export async function getLineBotStatus(): Promise<{
   configured: boolean;
   valid: boolean;
   botName?: string;
   basicId?: string;
+  userId?: string;
   pictureUrl?: string;
   error?: string;
 }> {
-  await ensureDatabase();
-  const db = database();
-  const tokenSetting = await db.prepare("SELECT value FROM system_settings WHERE key = 'line_channel_access_token'").first<D1Row>();
-  const token = (tokenSetting?.value ? String(tokenSetting.value).trim() : null) || lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
-  
+  return getLineBotInfo();
+}
+
+export async function getLineBotInfo(): Promise<{
+  configured: boolean;
+  valid: boolean;
+  botName?: string;
+  basicId?: string;
+  userId?: string;
+  pictureUrl?: string;
+  error?: string;
+}> {
+  const token = await getEffectiveLineToken();
   if (!token) {
     return { configured: false, valid: false, error: "ยังไม่ได้ระบุ LINE Channel Access Token" };
   }
@@ -4378,12 +4476,14 @@ export async function getLineBotStatus(): Promise<{
       headers: { Authorization: `Bearer ${token}` },
     });
     const json = await res.json() as any;
-    if (res.ok && json.basicId) {
+    if (res.ok && (json.basicId || json.userId)) {
+      if (json.userId) cachedBotUserId = String(json.userId).trim();
       return {
         configured: true,
         valid: true,
         botName: json.displayName,
         basicId: json.basicId,
+        userId: json.userId,
         pictureUrl: json.pictureUrl,
       };
     }

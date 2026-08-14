@@ -243,6 +243,35 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
     }
   };
 
+  const handleToggleShift = async (guard: GuardProfile, newShift: "morning" | "evening" | "all") => {
+    try {
+      const payload = {
+        id: guard.id,
+        siteId: guard.siteId,
+        guardName: guard.guardName,
+        displayName: guard.displayName,
+        pictureUrl: guard.pictureUrl,
+        phoneNumber: guard.phoneNumber,
+        preferredShift: newShift,
+        role: guard.role,
+      };
+
+      const res = await fetch("/api/guards", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        setMessage(`ปรับกะของ "${guard.guardName}" เป็น ${newShift === 'morning' ? '☀️ กะเช้า' : newShift === 'evening' ? '🌙 กะดึก' : '🔄 ทุกกะ'} สำเร็จ`);
+        loadGuards();
+        onRefresh();
+      }
+    } catch {
+      alert("เกิดข้อผิดพลาดในการเปลี่ยนกะ");
+    }
+  };
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formSiteId || !formName.trim()) {
@@ -777,28 +806,83 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                             </div>
                           )}
 
-                          {/* ACTION BUTTONS */}
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: "0.5rem", gap: "0.3rem" }}>
-                            <button
-                              onClick={() => handleToggleRole(guard, "employer")}
-                              style={{ background: "#881337", color: "#fecdd3", border: "1px solid #e11d48", padding: "0.25rem 0.55rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer" }}
-                            >
-                              👔 ปรับเป็นนายจ้าง
-                            </button>
+                          {/* SHIFT & ACTION CONTROLS */}
+                          <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem", borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: "0.5rem" }}>
+                            {/* SHIFT SELECTOR */}
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1.1fr", gap: "0.25rem" }}>
+                              <button
+                                onClick={() => handleToggleShift(guard, "morning")}
+                                style={{
+                                  background: guard.preferredShift === "morning" ? "#eab308" : "#1e293b",
+                                  color: guard.preferredShift === "morning" ? "#713f12" : "#94a3b8",
+                                  border: "none",
+                                  padding: "0.28rem 0.2rem",
+                                  borderRadius: "6px",
+                                  fontSize: "0.7rem",
+                                  fontWeight: 800,
+                                  cursor: "pointer",
+                                  textAlign: "center",
+                                }}
+                              >
+                                ☀️ กะเช้า
+                              </button>
+                              <button
+                                onClick={() => handleToggleShift(guard, "evening")}
+                                style={{
+                                  background: guard.preferredShift === "evening" ? "#6366f1" : "#1e293b",
+                                  color: guard.preferredShift === "evening" ? "#ffffff" : "#94a3b8",
+                                  border: "none",
+                                  padding: "0.28rem 0.2rem",
+                                  borderRadius: "6px",
+                                  fontSize: "0.7rem",
+                                  fontWeight: 800,
+                                  cursor: "pointer",
+                                  textAlign: "center",
+                                }}
+                              >
+                                🌙 กะดึก
+                              </button>
+                              <button
+                                onClick={() => handleToggleShift(guard, "all")}
+                                style={{
+                                  background: guard.preferredShift === "all" ? "#0284c7" : "#1e293b",
+                                  color: guard.preferredShift === "all" ? "#ffffff" : "#94a3b8",
+                                  border: "none",
+                                  padding: "0.28rem 0.2rem",
+                                  borderRadius: "6px",
+                                  fontSize: "0.7rem",
+                                  fontWeight: 800,
+                                  cursor: "pointer",
+                                  textAlign: "center",
+                                }}
+                              >
+                                🔄 ทุกกะ
+                              </button>
+                            </div>
 
-                            <div style={{ display: "flex", gap: "0.3rem" }}>
+                            {/* ROLE & EDIT BUTTONS */}
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.3rem" }}>
                               <button
-                                onClick={() => openEditModal(guard)}
-                                style={{ background: "#1e293b", border: "1px solid #334155", color: "#cbd5e1", padding: "0.25rem 0.5rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 700, cursor: "pointer" }}
+                                onClick={() => handleToggleRole(guard, "employer")}
+                                style={{ background: "#881337", color: "#fecdd3", border: "1px solid #e11d48", padding: "0.25rem 0.55rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer" }}
                               >
-                                ✏️ แก้ไข
+                                👔 ปรับเป็นนายจ้าง
                               </button>
-                              <button
-                                onClick={() => handleDelete(guard)}
-                                style={{ background: "transparent", border: "1px solid #ef4444", color: "#f87171", padding: "0.25rem 0.45rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 700, cursor: "pointer" }}
-                              >
-                                🗑️
-                              </button>
+
+                              <div style={{ display: "flex", gap: "0.3rem" }}>
+                                <button
+                                  onClick={() => openEditModal(guard)}
+                                  style={{ background: "#1e293b", border: "1px solid #334155", color: "#cbd5e1", padding: "0.25rem 0.5rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 700, cursor: "pointer" }}
+                                >
+                                  ✏️ แก้ไข
+                                </button>
+                                <button
+                                  onClick={() => handleDelete(guard)}
+                                  style={{ background: "transparent", border: "1px solid #ef4444", color: "#f87171", padding: "0.25rem 0.45rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 700, cursor: "pointer" }}
+                                >
+                                  🗑️
+                                </button>
+                              </div>
                             </div>
                           </div>
                         </div>
@@ -844,7 +928,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                               {emp.guardName}
                             </div>
                             <div style={{ fontSize: "0.74rem", color: "#fca5a5", fontWeight: 700 }}>
-                              นายจ้าง / ผู้ว่าจ้าง (บอทเงียบ)
+                              นายจ้าง / ผู้ว่าจ้าง (บอทเงียบ 100%)
                             </div>
                           </div>
                         </div>
@@ -872,73 +956,6 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                               🗑️
                             </button>
                           </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* UNBOUND DISCOVERED SENDERS IN THIS GROUP */}
-              {unboundSiteSenders.length > 0 && (
-                <div style={{ marginTop: "0.85rem", background: "#0b1220", border: "1px dashed #6366f1", borderRadius: "12px", padding: "1rem" }}>
-                  <div style={{ fontSize: "0.84rem", fontWeight: 800, color: "#818cf8", marginBottom: "0.65rem", display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                    <span>📡</span>
-                    <span>พบผู้ส่งในกลุ่มนี้ที่ยังไม่ระบุบทบาท ({unboundSiteSenders.length} บัญชี) — คลิกเพื่อระบุบทบาททันที:</span>
-                  </div>
-
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "0.75rem" }}>
-                    {unboundSiteSenders.map((sender) => (
-                      <div
-                        key={sender.senderKey}
-                        style={{
-                          background: "#131c2e",
-                          border: "1px solid #334155",
-                          borderRadius: "10px",
-                          padding: "0.75rem",
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: "0.5rem",
-                        }}
-                      >
-                        <div style={{ display: "flex", gap: "0.6rem", alignItems: "center" }}>
-                          {sender.pictureUrl && sender.pictureUrl.startsWith("http") ? (
-                            <img src={sender.pictureUrl} alt={sender.displayName || "LINE User"} style={{ width: "38px", height: "38px", borderRadius: "50%", objectFit: "cover" }} />
-                          ) : (
-                            <div style={{ width: "38px", height: "38px", borderRadius: "50%", background: "#1e293b", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.1rem" }}>
-                              👤
-                            </div>
-                          )}
-
-                          <div style={{ minWidth: 0, flex: 1 }}>
-                            <div style={{ fontSize: "0.88rem", fontWeight: 800, color: "#ffffff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {sender.displayName || sender.rawUserId || sender.senderKey}
-                            </div>
-                            <div style={{ fontSize: "0.7rem", color: "#94a3b8" }}>
-                              ส่งมา {sender.messageCount} ครั้ง · บอทเงียบอยู่
-                            </div>
-                          </div>
-                        </div>
-
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1.2fr", gap: "0.3rem", marginTop: "0.2rem" }}>
-                          <button
-                            onClick={() => handleQuickBind(sender, "regular", "morning")}
-                            style={{ background: "#065f46", color: "#a7f3d0", border: "none", padding: "0.3rem 0.2rem", borderRadius: "6px", fontSize: "0.7rem", fontWeight: 800, cursor: "pointer", textAlign: "center" }}
-                          >
-                            ☀️ กะเช้า
-                          </button>
-                          <button
-                            onClick={() => handleQuickBind(sender, "regular", "evening")}
-                            style={{ background: "#1e3a8a", color: "#bfdbfe", border: "none", padding: "0.3rem 0.2rem", borderRadius: "6px", fontSize: "0.7rem", fontWeight: 800, cursor: "pointer", textAlign: "center" }}
-                          >
-                            🌙 กะดึก
-                          </button>
-                          <button
-                            onClick={() => handleQuickBind(sender, "employer")}
-                            style={{ background: "#881337", color: "#fecdd3", border: "none", padding: "0.3rem 0.2rem", borderRadius: "6px", fontSize: "0.7rem", fontWeight: 800, cursor: "pointer", textAlign: "center" }}
-                          >
-                            👔 นายจ้าง
-                          </button>
                         </div>
                       </div>
                     ))}
