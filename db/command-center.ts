@@ -342,9 +342,15 @@ function toLineGroup(row: D1Row): LineGroup {
   };
 }
 
+let cachedDynamicToken: string | null = null;
+
+export function setCachedLineToken(token: string | null) {
+  cachedDynamicToken = token;
+}
+
 function lineEnvironment() {
   const processEnv = (typeof process !== "undefined" ? process.env : {}) as Record<string, string | undefined>;
-  const channelAccessToken = (env as Record<string, string>).LINE_CHANNEL_ACCESS_TOKEN || processEnv.LINE_CHANNEL_ACCESS_TOKEN;
+  const channelAccessToken = cachedDynamicToken || (env as Record<string, string>).LINE_CHANNEL_ACCESS_TOKEN || processEnv.LINE_CHANNEL_ACCESS_TOKEN;
   const channelSecret = (env as Record<string, string>).LINE_CHANNEL_SECRET || processEnv.LINE_CHANNEL_SECRET;
   return {
     ...env,
@@ -4394,4 +4400,94 @@ export async function updateInquiryStatus(
     resolvedAt: inq.resolved_at,
     receivedAt: inq.received_at,
   };
+}
+
+export async function getLineBotStatus(): Promise<{
+  configured: boolean;
+  valid: boolean;
+  botName?: string;
+  basicId?: string;
+  pictureUrl?: string;
+  error?: string;
+}> {
+  await ensureDatabase();
+  const db = database();
+  const tokenSetting = await db.prepare("SELECT value FROM system_settings WHERE key = 'line_channel_access_token'").first<D1Row>();
+  const token = (tokenSetting?.value ? String(tokenSetting.value).trim() : null) || lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
+  
+  if (!token) {
+    return { configured: false, valid: false, error: "ยังไม่ได้ระบุ LINE Channel Access Token" };
+  }
+  
+  try {
+    const res = await fetch("https://api.line.me/v2/bot/info", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const json = await res.json() as any;
+    if (res.ok && json.basicId) {
+      return {
+        configured: true,
+        valid: true,
+        botName: json.displayName,
+        basicId: json.basicId,
+        pictureUrl: json.pictureUrl,
+      };
+    }
+    return {
+      configured: true,
+      valid: false,
+      error: json.message || "Token ไม่ถูกต้อง หรือหมดอายุ (401)",
+    };
+  } catch (err: any) {
+    return {
+      configured: true,
+      valid: false,
+      error: err.message || "ไม่สามารถเชื่อมต่อกับ LINE API ได้",
+    };
+  }
+}
+
+export async function saveLineAccessToken(token: string, actor = "admin"): Promise<{
+  ok: boolean;
+  botName?: string;
+  basicId?: string;
+  pictureUrl?: string;
+  error?: string;
+}> {
+  const cleanToken = token.trim();
+  if (!cleanToken) {
+    return { ok: false, error: "กรุณาระบุ Channel Access Token" };
+  }
+
+  try {
+    const res = await fetch("https://api.line.me/v2/bot/info", {
+      headers: { Authorization: `Bearer ${cleanToken}` },
+    });
+    const json = await res.json() as any;
+    if (!res.ok || !json.basicId) {
+      return { ok: false, error: json.message || "Token ไม่ถูกต้อง หรือหมดอายุ (401) กรุณาคัดลอกใหม่จาก LINE Developers Console" };
+    }
+
+    await ensureDatabase();
+    const db = database();
+    const now = bangkokNow().iso;
+    await db.prepare("INSERT INTO system_settings (key, value, updated_at) VALUES ('line_channel_access_token', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+      .bind(cleanToken, now).run();
+
+    setCachedLineToken(cleanToken);
+
+    await addAudit("system_setting", "line_token", "updated", actor, `อัปเดต LINE Channel Access Token สำหรับบอท ${json.displayName || json.basicId}`);
+
+    // Trigger autoSyncGuardsFromLine in background
+    autoSyncGuardsFromLine(actor).catch(() => {});
+
+    return {
+      ok: true,
+      botName: json.displayName,
+      basicId: json.basicId,
+      pictureUrl: json.pictureUrl,
+    };
+  } catch (err: any) {
+    return { ok: false, error: err.message || "ไม่สามารถเชื่อมต่อกับ LINE API ได้" };
+  }
 }

@@ -1,10 +1,11 @@
 import { apiAuthRequiredResponse, getChatGPTUser } from "../../../chatgpt-auth";
-import { activateAllLinePoints, addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, deleteLineGroup, deleteOperationalSite, generateTodayFromTemplates, importShiftTemplates, mapLineGroup, markLeave, previewLineReportReminder, refreshLineGroupProfiles, removeDemoData, replaceSlot, saveLineReminderSettings, saveLineReportConfig, sendLineConnectionTest, sendLineReportReminder, setupLinePoint, syncLineGroupsFromGateway, unmapLineGroup, updateOperationalSite, batchApproveSlotsWithPhotos, type LinePointSetupInput, type LineReportConfig, type TemplateImportRow } from "../../../../db/command-center";
+import { activateAllLinePoints, addBillingCase, addCoverageSlot, addOperationalSite, confirmSlot, deleteLineGroup, deleteOperationalSite, generateTodayFromTemplates, importShiftTemplates, mapLineGroup, markLeave, previewLineReportReminder, refreshLineGroupProfiles, removeDemoData, replaceSlot, saveLineReminderSettings, saveLineReportConfig, sendLineConnectionTest, sendLineReportReminder, setupLinePoint, syncLineGroupsFromGateway, unmapLineGroup, updateOperationalSite, batchApproveSlotsWithPhotos, saveLineAccessToken, getLineBotStatus, type LinePointSetupInput, type LineReportConfig, type TemplateImportRow } from "../../../../db/command-center";
 
 export const runtime = "nodejs";
 
 type ActionPayload = {
-  type?: "confirm" | "replace" | "leave" | "site" | "site_update" | "site_delete" | "slot" | "billing" | "template_import" | "generate_today" | "remove_demo" | "line_group" | "line_point_setup" | "line_points_activate_all" | "line_unmap" | "line_delete" | "line_connection_test" | "line_gateway_sync" | "line_profile_refresh" | "line_reminder_settings" | "line_reminder_preview" | "line_reminder_send" | "line_report_config" | "batch_approve";
+  type?: "confirm" | "replace" | "leave" | "site" | "site_update" | "site_delete" | "slot" | "billing" | "template_import" | "generate_today" | "remove_demo" | "line_group" | "line_point_setup" | "line_points_activate_all" | "line_unmap" | "line_delete" | "line_connection_test" | "line_gateway_sync" | "line_profile_refresh" | "line_reminder_settings" | "line_reminder_preview" | "line_reminder_send" | "line_report_config" | "batch_approve" | "save_line_token" | "get_line_token_status";
+  token?: string;
   slotId?: string;
   siteId?: string;
   source?: string;
@@ -133,8 +134,11 @@ export async function POST(request: Request) {
       result = { ok: true, ...(await syncLineGroupsFromGateway(actor)) };
     } else if (payload.type === "line_profile_refresh") {
       result = { ok: true, ...(await refreshLineGroupProfiles(actor, Array.isArray(payload.groupIds) ? payload.groupIds.slice(0, 8).filter((id): id is string => typeof id === "string") : [])) };
-    } else if (payload.type === "generate_today") {
-      result = { ok: true, ...(await generateTodayFromTemplates(actor)) };
+    } else if (payload.type === "save_line_token") {
+      result = await saveLineAccessToken(payload.token ?? "", actor);
+      if (!result.ok) return Response.json(result, { status: 400 });
+    } else if (payload.type === "get_line_token_status") {
+      result = { ok: true, ...(await getLineBotStatus()) };
     } else if (payload.type === "remove_demo") {
       await removeDemoData(actor);
     } else if (payload.type === "slot") {

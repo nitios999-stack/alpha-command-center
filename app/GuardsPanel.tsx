@@ -51,6 +51,51 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
   const [search, setSearch] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [showTokenSetting, setShowTokenSetting] = useState(false);
+  const [tokenInput, setTokenInput] = useState("");
+  const [tokenStatus, setTokenStatus] = useState<{ configured: boolean; valid: boolean; botName?: string; basicId?: string; error?: string } | null>(null);
+  const [testingToken, setTestingToken] = useState(false);
+
+  const checkTokenStatus = async () => {
+    try {
+      const res = await fetch("/api/command-center/actions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "get_line_token_status" }),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        setTokenStatus(json);
+      }
+    } catch {}
+  };
+
+  const handleSaveToken = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!tokenInput.trim()) return;
+    setTestingToken(true);
+    try {
+      const res = await fetch("/api/command-center/actions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "save_line_token", token: tokenInput.trim() }),
+      });
+      const json = await res.json();
+      if (res.ok && json.ok) {
+        setMessage(`🎉 เชื่อมต่อ LINE API สำเร็จ! บอท: ${json.botName || json.basicId} (ระบบกำลังดึงโปรไฟล์ รปภ. ทั้งหมด)`);
+        setTokenInput("");
+        setShowTokenSetting(false);
+        await checkTokenStatus();
+        await loadGuards();
+        onRefresh();
+      } else {
+        alert(`❌ ไม่สามารถเชื่อมต่อ Token ได้: ${json.error || "Token ไม่ถูกต้อง"}`);
+      }
+    } catch {
+      alert("❌ เกิดข้อผิดพลาดในการเชื่อมต่อ");
+    }
+    setTestingToken(false);
+  };
 
   // Form modal state
   const [showModal, setShowModal] = useState(false);
@@ -106,6 +151,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
 
   useEffect(() => {
     loadGuards();
+    checkTokenStatus();
   }, [selectedSiteId]);
 
   const openAddModal = (defaultSiteId?: string, senderPrefill?: RecentSender) => {
@@ -308,6 +354,25 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
             <span>{syncing ? "กำลังดึงข้อมูลจาก LINE..." : "ดึงชื่อ-รูป รปภ. ทั้งหมดอัตโนมัติ (1-Click)"}</span>
           </button>
           <button
+            onClick={() => setShowTokenSetting((s) => !s)}
+            style={{
+              background: tokenStatus?.valid ? "#1e293b" : "#dc2626",
+              color: "#ffffff",
+              border: `1px solid ${tokenStatus?.valid ? "#334155" : "#ef4444"}`,
+              padding: "0.6rem 0.95rem",
+              borderRadius: "8px",
+              fontWeight: 800,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: "0.4rem",
+              fontSize: "0.88rem",
+            }}
+          >
+            <span>{tokenStatus?.valid ? "🟢" : "🔑"}</span>
+            <span>{tokenStatus?.valid ? `LINE Token: ${tokenStatus.botName || tokenStatus.basicId || "เชื่อมแล้ว"}` : "ตั้งค่า LINE Token (จำเป็น)"}</span>
+          </button>
+          <button
             onClick={() => openAddModal()}
             style={{ background: "#0284c7", color: "#ffffff", border: "none", padding: "0.6rem 1.1rem", borderRadius: "8px", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.88rem" }}
           >
@@ -322,6 +387,54 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
           </button>
         </div>
       </div>
+
+      {showTokenSetting && (
+        <div style={{ background: "#0f172a", border: "2px solid #6366f1", borderRadius: "14px", padding: "1.25rem", display: "flex", flexDirection: "column", gap: "0.85rem", boxShadow: "0 8px 24px rgba(99, 102, 241, 0.2)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <h3 style={{ margin: 0, color: "#ffffff", fontSize: "1.1rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <span>🔑</span> ตั้งค่า LINE Channel Access Token (เชื่อมต่อดึงชื่อและรูปโปรไฟล์จริง)
+            </h3>
+            <button onClick={() => setShowTokenSetting(false)} style={{ background: "transparent", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: "1.2rem", fontWeight: 800 }}>✕</button>
+          </div>
+
+          <p style={{ margin: 0, color: "#94a3b8", fontSize: "0.85rem", lineHeight: 1.5 }}>
+            คัดลอก <strong>Channel access token (long-lived)</strong> จาก <a href="https://developers.line.biz/console/" target="_blank" rel="noreferrer" style={{ color: "#38bdf8", textDecoration: "underline" }}>LINE Developers Console</a> (แท็บ Messaging API) มาวางในช่องด้านล่าง แล้วกดบันทึก ระบบจะทดสอบและดึงชื่อจริงพร้อมรูปของ รปภ. ให้ทันทีครับ
+          </p>
+
+          <form onSubmit={handleSaveToken} style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", alignItems: "center" }}>
+            <input
+              type="text"
+              value={tokenInput}
+              onChange={(e) => setTokenInput(e.target.value)}
+              placeholder="วาง LINE Channel Access Token ที่นี่..."
+              required
+              style={{ flex: 1, minWidth: "280px", background: "#1e293b", border: "1px solid #475569", color: "#ffffff", padding: "0.7rem 1rem", borderRadius: "8px", fontSize: "0.9rem" }}
+            />
+            <button
+              type="submit"
+              disabled={testingToken}
+              style={{
+                background: testingToken ? "#475569" : "linear-gradient(135deg, #6366f1, #4f46e5)",
+                color: "#ffffff",
+                border: "none",
+                padding: "0.7rem 1.4rem",
+                borderRadius: "8px",
+                fontWeight: 800,
+                cursor: testingToken ? "wait" : "pointer",
+                fontSize: "0.92rem",
+              }}
+            >
+              {testingToken ? "⏳ กำลังทดสอบ..." : "💾 บันทึกและทดสอบเชื่อมต่อ LINE API"}
+            </button>
+          </form>
+
+          {tokenStatus && (
+            <div style={{ padding: "0.6rem 0.9rem", borderRadius: "8px", background: tokenStatus.valid ? "#064e3b" : "#450a0a", border: `1px solid ${tokenStatus.valid ? "#059669" : "#dc2626"}`, color: tokenStatus.valid ? "#a7f3d0" : "#fca5a5", fontSize: "0.85rem" }}>
+              {tokenStatus.valid ? `🟢 เชื่อมต่อบอท: ${tokenStatus.botName || tokenStatus.basicId} (@${tokenStatus.basicId}) สำเร็จ 100%` : `🔴 ${tokenStatus.error || "Token ไม่ถูกต้องหรือหมดอายุ (401)"}`}
+            </div>
+          )}
+        </div>
+      )}
 
       {message && (
         <div style={{ background: "#064e3b", color: "#a7f3d0", border: "1px solid #059669", padding: "0.75rem 1rem", borderRadius: "10px", fontSize: "0.9rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
