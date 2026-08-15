@@ -11,8 +11,8 @@ export async function POST(request: Request) {
       return Response.json({ ok: false, error: "Missing required fields" }, { status: 400 });
     }
 
-    // หน่วงเวลาสั้นๆ 3 วินาที เพื่อรวบรูปภาพและป้องกัน serverless timeout
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    // หน่วงเวลารอ 45 วินาที เพื่อรวบรูปภาพ/ข้อความทั้งหมด และตรวจสอบว่า รปภ. ส่งเสร็จหรือยัง (LINE Reply Token มีอายุ 60 วินาที ปลอดภัย 100%)
+    await new Promise((resolve) => setTimeout(resolve, 45000));
 
     await ensureDatabase();
     const db = database();
@@ -111,7 +111,7 @@ export async function POST(request: Request) {
       ).bind(groupId, currentEvent.rowid).first()) as { id: string } | null;
 
       if (newerEvent) {
-        // มีข้อความใหม่เข้ามา แปลว่ายังส่งรูปไม่เสร็จ ให้ข้ามตัวนี้ไป (ตัวใหม่จะนับ 35 วิ ต่อเอง)
+        // มีข้อความใหม่เข้ามา แปลว่ายังส่งรูปไม่เสร็จ ให้ข้ามตัวนี้ไป (ตัวใหม่จะนับ 45 วิ ต่อเอง)
         return Response.json({ ok: true, skipped: true, reason: "newer_message_exists" });
       }
     }
@@ -138,7 +138,7 @@ export async function POST(request: Request) {
       return Response.json({ ok: false, error: "no token" }, { status: 500 });
     }
 
-    // 3. ส่งสติกเกอร์ปิดท้าย 1 ตัว (35 วิ หลังรูปสุดท้าย) ผ่าน Reply API (ฟรี 100% ไม่เสียโควต้าของ LINE)
+    // 3. ส่งสติกเกอร์ปิดท้าย 1 ตัว (45 วิ หลังรูปสุดท้าย) ผ่าน Reply API (ฟรี 100% ไม่เสียโควต้าของ LINE)
     const response = await fetch("https://api.line.me/v2/bot/message/reply", {
       method: "POST",
       headers: {
@@ -188,7 +188,7 @@ export async function POST(request: Request) {
       stickerPackageId: stickerPackageId,
       stickerId: stickerId,
       status: "sent",
-      skipReason: "จังหวะปิดจบ 35 วิ (reply ฟรี 100%)"
+      skipReason: "จังหวะปิดจบ 45 วิ (reply ฟรี 100%)"
     });
 
     return Response.json({ ok: true, sent: true });

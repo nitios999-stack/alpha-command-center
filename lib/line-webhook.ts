@@ -415,7 +415,7 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
         actionType = "manual-batch-queued";
         triggerEventId = queuedSticker.queuedId;
       } else {
-        // TRIGGER DEBOUNCER ONLY ON THE LAST MESSAGE OF THE BATCH (35s after the last photo/message)
+        // TRIGGER DEBOUNCER ONLY ON THE LAST MESSAGE OF THE BATCH (45s after the last photo/message)
         if (isLastInBatch) {
           try {
             const receivedAt = new Date().toISOString();

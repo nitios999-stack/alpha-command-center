@@ -238,7 +238,7 @@ export function ShiftsPanel() {
         setConfigs((prev) =>
           prev.map((c) => (c.groupId === groupId ? { ...c, autoReplyEnabled: newStatus } : c))
         );
-        setMessage(newStatus ? "🤖 เปิดสติกเกอร์ตอบกลับ 35 วิ" : "🔇 ปิดสติกเกอร์กลุ่มนี้แล้ว");
+        setMessage(newStatus ? "🤖 เปิดสติกเกอร์ตอบกลับ 45 วิ" : "🔇 ปิดสติกเกอร์กลุ่มนี้แล้ว");
       }
     } catch {
       setMessage("❌ เกิดข้อผิดพลาดในการเปลี่ยนสถานะ");
@@ -717,7 +717,7 @@ export function ShiftsPanel() {
               <div>
                 <h3 style={{ margin: 0, fontSize: "1.05rem" }}>⚡ ตั้งค่าเวลากะด่วน และ สติกเกอร์ตอบกลับ</h3>
                 <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: "0.15rem 0 0" }}>
-                  เปิดสติกเกอร์ตอบกลับอัตโนมัติ <strong>{totalAutoReplyActive} / {configs.length} กลุ่ม</strong> (ส่งหลังรูปสุดท้าย 35 วิ)
+                  เปิดสติกเกอร์ตอบกลับอัตโนมัติ <strong>{totalAutoReplyActive} / {configs.length} กลุ่ม</strong> (ส่งหลังรูปสุดท้าย 45 วิ)
                 </p>
               </div>
               <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
@@ -773,7 +773,7 @@ export function ShiftsPanel() {
                   <tr style={{ background: "#f8fafc", borderBottom: "2px solid var(--border)" }}>
                     <th style={{ padding: "0.85rem 1rem", textAlign: "left" }}>กลุ่มไลน์ / หน่วยงาน</th>
                     <th style={{ padding: "0.85rem 0.75rem", textAlign: "center", width: "150px" }}>สถานะการส่งสด</th>
-                    <th style={{ padding: "0.85rem 0.75rem", textAlign: "center", width: "140px" }}>🤖 สติกเกอร์ 35 วิ</th>
+                    <th style={{ padding: "0.85rem 0.75rem", textAlign: "center", width: "140px" }}>🤖 สติกเกอร์ 45 วิ</th>
                     <th style={{ padding: "0.85rem 0.75rem", textAlign: "center", width: "160px" }}>☀️ ผลัดเช้า</th>
                     <th style={{ padding: "0.85rem 0.75rem", textAlign: "center", width: "160px" }}>🌙 ผลัดดึก</th>
                     <th style={{ padding: "0.85rem 1rem", textAlign: "center", width: "110px" }}>สถานะ</th>
@@ -840,7 +840,7 @@ export function ShiftsPanel() {
                               gap: "0.2rem",
                             }}
                           >
-                            <span>{c.autoReplyEnabled ? "🟢 35 วิ" : "⚪ ปิด"}</span>
+                            <span>{c.autoReplyEnabled ? "🟢 45 วิ" : "⚪ ปิด"}</span>
                           </button>
                         )}
                       </td>

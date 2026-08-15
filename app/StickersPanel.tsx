@@ -100,7 +100,7 @@ export function StickersPanel() {
             </div>
             <h2 style={{ fontSize: "1.65rem", margin: "0.2rem 0 0.5rem", fontWeight: 800 }}>ศูนย์ควบคุมสติกเกอร์ตอบรับอัตโนมัติ</h2>
             <p style={{ color: "#94a3b8", fontSize: "0.95rem", maxWidth: "650px", margin: 0 }}>
-              ระบบส่งสติกเกอร์มาตรฐาน Brown & Friends ตะเบ๊ะ (Package 11538 / Sticker 51626520) ปิดท้ายรายงาน 35 วิ ฟรี 100%
+              ระบบส่งสติกเกอร์มาตรฐาน Brown & Friends ตะเบ๊ะ (Package 11538 / Sticker 51626520) ปิดท้ายรายงาน 45 วิ ฟรี 100%
             </p>
           </div>
           <button
@@ -182,7 +182,7 @@ export function StickersPanel() {
           <div style={{ fontSize: "0.85rem", color: "#475569", lineHeight: 1.6 }}>
             💡 <strong>เงื่อนไขการส่งสติกเกอร์:</strong>
             <ul style={{ margin: "0.3rem 0 0", paddingLeft: "1.2rem" }}>
-              <li>ส่งอัตโนมัติหลังรูป/ข้อความสุดท้าย <strong>35 วินาที</strong></li>
+              <li>ส่งอัตโนมัติหลังรูป/ข้อความสุดท้าย <strong>45 วินาที</strong></li>
               <li>ใช้ LINE Reply Token <strong>ฟรี 100%</strong> ไม่เสียโควต้าข้อความ</li>
               <li>ไม่ตอบกลับสติกเกอร์ของ รปภ. (ป้องกันลูป)</li>
               <li>กลุ่มสั่งการล็อกปิดสติกเกอร์อัตโนมัติ</li>
