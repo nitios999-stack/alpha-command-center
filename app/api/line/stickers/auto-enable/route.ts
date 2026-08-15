@@ -5,7 +5,7 @@ export const runtime = "nodejs";
 export async function GET(request: Request) {
   const db = database();
   const url = new URL(request.url);
-  const cooldown = Number(url.searchParams.get("cooldown")) || 3;
+  const cooldown = Number(url.searchParams.get("cooldown")) || 30;
   
   const groupsResult = await db.prepare("SELECT id, group_name FROM line_group_registry").all();
   const groups = (groupsResult.results || []) as any[];

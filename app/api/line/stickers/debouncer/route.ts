@@ -41,7 +41,7 @@ export async function POST(request: Request) {
       const recentInquiry = (await db.prepare(`
         SELECT id, message_text, urgency 
         FROM employer_inquiries 
-        WHERE group_id = ? AND received_at >= datetime('now', '-3 minutes')
+        WHERE group_id = ? AND received_at >= datetime('now', '-30 minutes')
         ORDER BY received_at DESC LIMIT 1
       `).bind(groupId).first()) as { id: string; message_text: string; urgency: string } | null;
 
@@ -116,10 +116,10 @@ export async function POST(request: Request) {
       }
     }
 
-    // 2. ดึงค่าตัวแปรสติกเกอร์ (ค่าเริ่มต้นอัตโนมัติ 100%: Brown & Friends ตะเบ๊ะ 11538/51626520, cooldown: 3 นาที)
+    // 2. ดึงค่าตัวแปรสติกเกอร์ (ค่าเริ่มต้นอัตโนมัติ 100%: Brown & Friends ตะเบ๊ะ 11538/51626520, cooldown: 30 นาที)
     const stickerPackageId = configData?.sticker_package_id || "11538";
     const stickerId = configData?.sticker_id || "51626520";
-    const cooldownMinutes = configData?.cooldown_minutes ?? 3;
+    const cooldownMinutes = configData?.cooldown_minutes ?? 30;
 
     // เช็ก Cooldown
     const now = new Date();

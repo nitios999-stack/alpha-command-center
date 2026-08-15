@@ -484,7 +484,7 @@ async function initializeDatabase() {
       daily_limit INTEGER NOT NULL DEFAULT 100,
       daily_count INTEGER NOT NULL DEFAULT 0,
       daily_count_date TEXT,
-      cooldown_minutes INTEGER NOT NULL DEFAULT 15,
+      cooldown_minutes INTEGER NOT NULL DEFAULT 30,
       active_hours_start TEXT NOT NULL DEFAULT '00:00',
       active_hours_end TEXT NOT NULL DEFAULT '23:59',
       last_reply_at TEXT,
@@ -578,6 +578,7 @@ async function initializeDatabase() {
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_events_report_candidate ON line_webhook_events(group_id, message_type, received_at)"),
   ]);
   await db.refreshIfStale();
+  await db.prepare("UPDATE line_auto_reply_configs SET cooldown_minutes = 30 WHERE cooldown_minutes = 3").run().catch(() => {});
 
   const seedSetting = await db.prepare("SELECT value FROM system_settings WHERE key = 'demo_seeded'").first<{ value: string }>();
   if (!seedSetting) {
@@ -2992,7 +2993,7 @@ export async function setGroupAutoReply(input: { groupId: string; enabled: boole
 
   await db.prepare(`
     INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, updated_at)
-    VALUES (?, ?, '11538', '51626520', 3, ?)
+    VALUES (?, ?, '11538', '51626520', 30, ?)
     ON CONFLICT(group_id) DO UPDATE SET mode = excluded.mode, updated_at = excluded.updated_at
   `).bind(input.groupId, mode, now).run();
 
@@ -3015,7 +3016,7 @@ export async function setAllGroupsAutoReply(input: { enabled: boolean; actor?: s
     if (g.id === commandGroupId && input.enabled) continue; // Skip command group
     await db.prepare(`
       INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, updated_at)
-      VALUES (?, ?, '11538', '51626520', 3, ?)
+      VALUES (?, ?, '11538', '51626520', 30, ?)
       ON CONFLICT(group_id) DO UPDATE SET mode = excluded.mode, updated_at = excluded.updated_at
     `).bind(g.id, mode, now).run();
   }

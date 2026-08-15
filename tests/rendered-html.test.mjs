@@ -39,7 +39,7 @@ test("server-renders the ALPHA Command Center shell", async () => {
   assert.match(html, /<title>ALPHA Command Center<\/title>/i);
   assert.match(html, /ALPHA SECURITY/);
   assert.match(html, /Command Center/);
-  assert.match(html, /เข้าเวรวันนี้/);
+  assert.match(html, /ภาพรวมตรวจเวร/);
   assert.doesNotMatch(html, /Your site is taking shape|Building your site|codex-preview/i);
 });
 
@@ -120,7 +120,7 @@ test("keeps the command center database and product surface in source", async ()
   assert.match(page, /showReportSettings/);
   assert.match(page, /useState<LineReportFilter>\("all"\)/);
   assert.match(page, /useState<[^>]+>\("reports"\)/);
-  assert.match(page, /เข้าเวรวันนี้/);
+  assert.match(page, /ภาพรวมตรวจเวร/);
   assert.match(page, /lineSignalStatus/);
   assert.doesNotMatch(page, /lineMapGroupName|lineMapPictureUrl/);
   assert.doesNotMatch(page, /line_group_name|line_picture_url/);
