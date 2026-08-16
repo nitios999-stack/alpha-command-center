@@ -445,8 +445,6 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
       let matchedEmployerName: string | null = null;
       let matchedInspectorName: string | null = null;
 let matchedOaName: string | null = null;
-      let matchedOaName: string | null = null;
-
       if (trimmedText) {
         // 1. Employer Names
         const employerProfiles = (await db.prepare(
