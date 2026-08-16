@@ -770,6 +770,7 @@ ON CONFLICT(group_id) DO UPDATE SET last_reply_at = excluded.last_reply_at, upda
     }
   }
 }
+}
 }));
 void schedule;
 return Response.json({ ok: true, accepted: saved.filter((result) => result?.saved).length });
