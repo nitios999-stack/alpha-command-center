@@ -11,8 +11,8 @@ export function StickersPanel() {
   const [audit, setAudit] = useState<any[]>([]);
   const [message, setMessage] = useState<string | null>(null);
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async (isBackground = false) => {
+    if (!isBackground) setLoading(true);
     try {
       const res = await fetch("/api/line/stickers/configs");
       if (res.ok) {
@@ -22,17 +22,21 @@ export function StickersPanel() {
         setGroups(data.groups || []);
         setQueue(data.queue || []);
         setAudit(data.audit || []);
-      } else {
+      } else if (!isBackground) {
         setMessage("ไม่สามารถโหลดข้อมูลสติกเกอร์ได้");
       }
     } catch {
-      setMessage("เกิดข้อผิดพลาดในการเชื่อมต่อ");
+      if (!isBackground) setMessage("เกิดข้อผิดพลาดในการเชื่อมต่อ");
     }
-    setLoading(false);
+    if (!isBackground) setLoading(false);
   };
 
   useEffect(() => {
     fetchData();
+    const interval = setInterval(() => {
+      fetchData(true);
+    }, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
@@ -98,55 +102,44 @@ export function StickersPanel() {
             <div style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", background: "rgba(56, 189, 248, 0.15)", color: "#38bdf8", padding: "0.25rem 0.6rem", borderRadius: "20px", fontSize: "0.75rem", fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: "0.5rem" }}>
               <span>🐻</span> LINE OFFICIAL STICKERS
             </div>
-            <h2 style={{ fontSize: "1.65rem", margin: "0.2rem 0 0.5rem", fontWeight: 800 }}>ศูนย์ควบคุมสติกเกอร์ตอบรับอัตโนมัติ</h2>
-            <p style={{ color: "#94a3b8", fontSize: "0.95rem", maxWidth: "650px", margin: 0 }}>
-              ระบบส่งสติกเกอร์มาตรฐาน Brown & Friends ตะเบ๊ะ (Package 11538 / Sticker 51626520) ปิดท้ายรายงาน 45 วิ ฟรี 100%
+            <h2 style={{ margin: "0 0 0.5rem", fontSize: "1.5rem", fontWeight: 800 }}>ระบบส่งสติกเกอร์ตอบรับอัตโนมัติ</h2>
+            <p style={{ margin: 0, color: "#94a3b8", fontSize: "0.9rem", maxWidth: "600px" }}>
+              ตอบรับการรายงานเวรของ รปภ. ในกลุ่ม LINE แบบ Real-time ทันที ฟรี 100% ไม่เสียโควต้าข้อความ (งดตอบนายจ้างและสายตรวจ)
             </p>
           </div>
-          <button
-            onClick={fetchData}
-            style={{ background: "#334155", color: "white", border: "1px solid #475569", padding: "0.55rem 1rem", borderRadius: "8px", fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.4rem" }}
-          >
-            🔄 รีเฟรชข้อมูล
-          </button>
+          <div style={{ display: "flex", gap: "0.5rem" }}>
+            <button
+              onClick={() => fetchData()}
+              style={{ background: "#0284c7", color: "#ffffff", border: "none", padding: "0.5rem 0.9rem", borderRadius: "8px", fontWeight: 700, fontSize: "0.82rem", cursor: "pointer", display: "flex", alignItems: "center", gap: "0.35rem" }}
+            >
+              <span>🔄</span> อัปเดตสด
+            </button>
+          </div>
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: "1.25rem", marginBottom: "1.5rem" }}>
-        {/* MANUAL BATCH SEND */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "1.25rem", marginBottom: "1.5rem" }}>
+        {/* MANUAL BATCH SEND CARD */}
         <div className="card" style={{ padding: "1.25rem", borderRadius: "14px", border: "1px solid var(--border)", background: "white" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
-            <h3 style={{ margin: 0, fontSize: "1.1rem" }}>📲 ส่งสติกเกอร์แบบกลุ่ม (Manual Batch)</h3>
-            <button onClick={selectAll} style={{ background: "none", border: "none", color: "#0284c7", fontWeight: 700, fontSize: "0.85rem", cursor: "pointer" }}>
-              {selectedGroups.length === groups.length ? "ยกเลิกเลือกทั้งหมด" : "เลือกทั้งหมด"}
+            <h3 style={{ margin: 0, fontSize: "1.1rem" }}>🎯 ส่งสติกเกอร์แบบระบุกลุ่ม</h3>
+            <button onClick={selectAll} style={{ background: "none", border: "none", color: "var(--primary)", fontSize: "0.8rem", cursor: "pointer", fontWeight: 600 }}>
+              {selectedGroups.length === groups.length ? "ยกเลิกทั้งหมด" : "เลือกทั้งหมด"}
             </button>
           </div>
-          <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: "0 0 0.75rem" }}>
-            เลือกกลุ่มที่ต้องการให้บอตส่งสติกเกอร์ตอบรับเข้าไปทันทีในรอบถัดไป
+          <p style={{ color: "var(--muted)", fontSize: "0.85rem", marginTop: 0 }}>
+            เลือกกลุ่ม LINE ที่ต้องการส่งสติกเกอร์ตอบรับพร้อมกันทันที
           </p>
 
-          <div style={{ maxHeight: "240px", overflowY: "auto", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "0.5rem", marginBottom: "1rem" }}>
+          <div style={{ maxHeight: "180px", overflowY: "auto", border: "1px solid var(--border)", borderRadius: "8px", padding: "0.5rem", marginBottom: "1rem" }}>
             {groups.map((g) => (
-              <label
-                key={g.id}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "0.6rem",
-                  padding: "0.4rem 0.5rem",
-                  borderRadius: "6px",
-                  fontSize: "0.85rem",
-                  cursor: "pointer",
-                  background: selectedGroups.includes(g.id) ? "rgba(56, 189, 248, 0.08)" : "transparent",
-                }}
-              >
+              <label key={g.id} style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.35rem 0.5rem", fontSize: "0.85rem", cursor: "pointer" }}>
                 <input
                   type="checkbox"
                   checked={selectedGroups.includes(g.id)}
                   onChange={() => toggleGroup(g.id)}
-                  style={{ width: "16px", height: "16px", cursor: "pointer" }}
                 />
-                <span style={{ fontWeight: 600, color: "#0f172a" }}>{g.group_name || "กลุ่มไม่ระบุชื่อ"}</span>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.group_name}</span>
               </label>
             ))}
           </div>
@@ -157,7 +150,7 @@ export function StickersPanel() {
             className="btn btn-primary"
             style={{ width: "100%", padding: "0.65rem", borderRadius: "8px", fontWeight: 700, cursor: "pointer" }}
           >
-            🚀 ส่งสติกเกอร์ให้ {selectedGroups.length} กลุ่มที่เลือก
+            🚀 ส่งสติกเกอร์ให้ {selectedGroups.length} กลุ่ม
           </button>
         </div>
 
@@ -182,10 +175,10 @@ export function StickersPanel() {
           <div style={{ fontSize: "0.85rem", color: "#475569", lineHeight: 1.6 }}>
             💡 <strong>เงื่อนไขการส่งสติกเกอร์:</strong>
             <ul style={{ margin: "0.3rem 0 0", paddingLeft: "1.2rem" }}>
-              <li>ส่งอัตโนมัติหลังรูป/ข้อความสุดท้าย <strong>45 วินาที</strong></li>
+              <li>ตอบรับอัตโนมัติทันทีเมื่อ รปภ. ส่งรายงานเวร / ภาพตรวจ</li>
               <li>ใช้ LINE Reply Token <strong>ฟรี 100%</strong> ไม่เสียโควต้าข้อความ</li>
               <li>ไม่ตอบกลับสติกเกอร์ของ รปภ. (ป้องกันลูป)</li>
-              <li>กลุ่มสั่งการล็อกปิดสติกเกอร์อัตโนมัติ</li>
+              <li>บอทเงียบ 100% เมื่อเป็นข้อความจาก <strong>นายจ้าง</strong> หรือ <strong>สายตรวจ</strong></li>
             </ul>
           </div>
         </div>
@@ -193,32 +186,65 @@ export function StickersPanel() {
 
       {/* AUDIT LOG TABLE */}
       <div className="card" style={{ borderRadius: "14px", overflow: "hidden", border: "1px solid var(--border)", background: "white" }}>
-        <div style={{ padding: "1rem 1.25rem", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h3 style={{ margin: 0, fontSize: "1.05rem" }}>📋 ประวัติการตอบกลับล่าสุด (Outbound Audit Log)</h3>
-          <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>{audit.length} รายการ</span>
+        <div style={{ padding: "1rem 1.25rem", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+            <h3 style={{ margin: 0, fontSize: "1.05rem" }}>📋 ประวัติการตอบกลับล่าสุด (Outbound Audit Log)</h3>
+            <span style={{ fontSize: "0.75rem", background: "#dcfce7", color: "#166534", padding: "0.15rem 0.5rem", borderRadius: "12px", fontWeight: 700 }}>
+              Live Auto-Refresh (5s)
+            </span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+            <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>{audit.length} รายการ</span>
+            <button
+              onClick={() => fetchData()}
+              style={{ background: "#f1f5f9", border: "1px solid #cbd5e1", padding: "0.3rem 0.6rem", borderRadius: "6px", fontSize: "0.78rem", fontWeight: 700, cursor: "pointer" }}
+            >
+              🔄 รีเฟรช
+            </button>
+          </div>
         </div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
             <thead>
               <tr style={{ background: "#f8fafc", borderBottom: "1px solid var(--border)" }}>
-                <th style={{ padding: "0.75rem 1rem", textAlign: "left" }}>เวลา</th>
+                <th style={{ padding: "0.75rem 1rem", textAlign: "left", whiteSpace: "nowrap" }}>วัน-เวลา (เวลาไทย)</th>
                 <th style={{ padding: "0.75rem 1rem", textAlign: "left" }}>กลุ่ม</th>
                 <th style={{ padding: "0.75rem 0.75rem", textAlign: "center" }}>ประเภท</th>
                 <th style={{ padding: "0.75rem 0.75rem", textAlign: "center" }}>สถานะ</th>
-                <th style={{ padding: "0.75rem 1rem", textAlign: "left" }}>หมายเหตุ</th>
+                <th style={{ padding: "0.75rem 1rem", textAlign: "left" }}>หมายเหตุ / ผลการทำงาน</th>
               </tr>
             </thead>
             <tbody>
-              {audit.slice(0, 15).map((a) => {
+              {audit.map((a) => {
                 const g = groups.find((x) => x.id === a.group_id);
+                const timestamp = a.sent_at || a.created_at;
+                let formattedTime = "-";
+                if (timestamp) {
+                  try {
+                    const d = new Date(timestamp);
+                    if (!isNaN(d.getTime())) {
+                      formattedTime = new Intl.DateTimeFormat("th-TH", {
+                        day: "2-digit",
+                        month: "short",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        second: "2-digit",
+                        hourCycle: "h23",
+                      }).format(d);
+                    }
+                  } catch {
+                    formattedTime = String(timestamp).slice(0, 19);
+                  }
+                }
+
                 return (
                   <tr key={a.id} style={{ borderBottom: "1px solid #f1f5f9" }}>
-                    <td style={{ padding: "0.6rem 1rem", color: "var(--muted)" }}>
-                      {a.created_at ? new Intl.DateTimeFormat("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(a.created_at)) : "-"}
+                    <td style={{ padding: "0.6rem 1rem", color: "#334155", fontWeight: 600, whiteSpace: "nowrap" }}>
+                      ⏰ {formattedTime}
                     </td>
-                    <td style={{ padding: "0.6rem 1rem", fontWeight: 600 }}>{g ? g.group_name : a.group_id}</td>
+                    <td style={{ padding: "0.6rem 1rem", fontWeight: 700, color: "#0f172a" }}>{g ? g.group_name : a.group_id}</td>
                     <td style={{ padding: "0.6rem 0.75rem", textAlign: "center" }}>
-                      <span style={{ background: "#f1f5f9", padding: "0.15rem 0.5rem", borderRadius: "4px", fontSize: "0.75rem" }}>
+                      <span style={{ background: "#f1f5f9", padding: "0.15rem 0.5rem", borderRadius: "4px", fontSize: "0.75rem", fontWeight: 600 }}>
                         {a.action_type}
                       </span>
                     </td>

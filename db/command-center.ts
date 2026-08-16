@@ -1,4 +1,4 @@
-import { getFirebaseD1Database } from "../lib/firebase-d1.ts";
+import { getFirebaseD1Database } from "../lib/firebase-d1";
 import { createHash, randomUUID } from "node:crypto";
 
 const env = Object.assign({ DB: true }, (typeof process !== "undefined" ? process.env : {})) as Record<string, any>;
@@ -384,7 +384,7 @@ function siteIdentifier(siteName: string) {
   return "site-" + siteName.trim().toLowerCase().replace(/[^a-z0-9ก-๙]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
-function linePointSiteIdentifier(groupId: string) {
+export function linePointSiteIdentifier(groupId: string) {
   return "line-point-" + groupId.trim().replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 220);
 }
 
@@ -577,8 +577,34 @@ async function initializeDatabase() {
     db.prepare("ALTER TABLE line_webhook_events ADD COLUMN raw_user_id TEXT"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_events_report_candidate ON line_webhook_events(group_id, message_type, received_at)"),
   ]);
-  await db.refreshIfStale();
   await db.prepare("UPDATE line_auto_reply_configs SET cooldown_minutes = 30 WHERE cooldown_minutes = 3").run().catch(() => {});
+  await db.prepare(`
+    DELETE FROM employer_inquiries 
+    WHERE message_text LIKE '%รปภ%' 
+       OR message_text LIKE '%ว.4%' 
+       OR message_text LIKE '%ตรวจแล้ว%' 
+       OR message_text LIKE '%ออกตรวจ%' 
+       OR message_text LIKE '%เหตุการณ์ทั่วไป%' 
+       OR message_text LIKE '%ปกติครับ%' 
+       OR message_text LIKE '%ปกติค่ะ%'
+       OR message_text LIKE '%หน่วยงานโครงการ%'
+  `).run().catch(() => {});
+
+  // Deduplicate and cleanup old senderKey hash rows that share the same real display_name
+  await db.prepare(`
+    DELETE FROM guard_profiles 
+    WHERE (guard_name LIKE 'ผู้ส่ง (%' OR guard_name LIKE 'รปภ. (%' OR id NOT LIKE 'U%')
+      AND display_name IS NOT NULL
+      AND display_name != ''
+      AND display_name NOT LIKE 'ผู้ส่ง (%'
+      AND display_name NOT LIKE 'รปภ. (%'
+      AND EXISTS (
+        SELECT 1 FROM guard_profiles gp2
+        WHERE gp2.id != guard_profiles.id
+          AND gp2.display_name = guard_profiles.display_name
+          AND (gp2.role = 'regular' OR gp2.role = 'spare' OR gp2.role = 'employer' OR gp2.id LIKE 'U%')
+      )
+  `).run().catch(() => {});
 
   const seedSetting = await db.prepare("SELECT value FROM system_settings WHERE key = 'demo_seeded'").first<{ value: string }>();
   if (!seedSetting) {
@@ -831,8 +857,13 @@ export async function getDashboard() {
   const db = database();
   const current = bangkokNow();
   const today = current.date;
+  let slotResult = await db.prepare("SELECT * FROM coverage_slots WHERE operational_date = ? ORDER BY wave, site_name, post_name, slot_label").bind(today).all<D1Row>();
 
-  const slotResult = await db.prepare("SELECT * FROM coverage_slots WHERE operational_date = ? ORDER BY wave, site_name, post_name, slot_label").bind(today).all<D1Row>();
+  // Auto-generate today's slots from active shift templates on a new day
+  if (!slotResult.results || slotResult.results.length === 0) {
+    await generateTodayFromTemplatesInternal("system");
+    slotResult = await db.prepare("SELECT * FROM coverage_slots WHERE operational_date = ? ORDER BY wave, site_name, post_name, slot_label").bind(today).all<D1Row>();
+  }
   const siteResult = await db.prepare("SELECT * FROM operational_sites ORDER BY active DESC, site_name").all<D1Row>();
   const lineGroupResult = await db.prepare("SELECT r.id, m.site_id, r.group_name, r.picture_url, r.last_seen_at, r.source, (SELECT e.event_type FROM line_webhook_events e WHERE e.group_id = r.id ORDER BY e.received_at DESC LIMIT 1) AS last_event_type, (SELECT COUNT(*) FROM line_webhook_events e WHERE e.group_id = r.id) AS event_count FROM line_group_registry r LEFT JOIN line_groups m ON m.id = r.id ORDER BY CASE WHEN m.site_id IS NULL THEN 0 ELSE 1 END, r.group_name").all<D1Row>();
   const templateResult = await db.prepare("SELECT wave, COUNT(*) AS count FROM shift_templates WHERE active = 1 GROUP BY wave").all<D1Row>();
@@ -1941,7 +1972,18 @@ export function generateTodayFromTemplates(actor: string) {
 async function generateTodayFromTemplatesInternal(actor: string) {
   const db = database();
   const today = bangkokNow();
-  const templates = await db.prepare("SELECT t.*, s.site_name, s.customer_name FROM shift_templates t INNER JOIN operational_sites s ON s.id = t.site_id WHERE t.active = 1 AND s.active = 1 ORDER BY t.wave, s.site_name, t.post_name, t.slot_label").all<D1Row>();
+  const templates = await db.prepare(`
+    SELECT 
+      t.*, 
+      COALESCE(s.site_name, lgr.group_name, lg.group_name, t.site_id) as site_name, 
+      COALESCE(s.customer_name, 'ลูกค้าทั่วไป') as customer_name 
+    FROM shift_templates t 
+    LEFT JOIN operational_sites s ON s.id = t.site_id 
+    LEFT JOIN line_groups lg ON lg.site_id = t.site_id
+    LEFT JOIN line_group_registry lgr ON lg.id = lgr.id
+    WHERE t.active = 1 
+    ORDER BY t.wave, t.post_name, t.slot_label
+  `).all<D1Row>();
   const total = templates.results?.length ?? 0;
   if (!total) return { created: 0, existing: 0, total: 0 };
 
@@ -2125,8 +2167,17 @@ export async function evaluateShiftCheckIn(input: {
   messageType?: string;
   text?: string;
   senderKey?: string;
+  rawUserId?: string;
   receivedAt: string;
-}): Promise<{ checkedIn: boolean; siteName?: string; deadline?: string; lateMinutes?: number }> {
+}): Promise<{
+  checkedIn: boolean;
+  siteName?: string;
+  deadline?: string;
+  lateMinutes?: number;
+  checkedCount?: number;
+  target?: number;
+  isFull?: boolean;
+}> {
   try {
     await ensureDatabase();
     const db = database();
@@ -2972,9 +3023,9 @@ export async function discoverAndRecoverAllGroups() {
   return res.results || [];
 }
 
-export async function sendShiftAlertToCommandRoom(actor = "admin", targetGroupId?: string) {
-  const summary = await buildMissingShiftAlertSummary();
-  const flex = await buildShiftAttendanceFlexMessage();
+export async function sendShiftAlertToCommandRoom(actor = "admin", targetGroupId?: string, wave?: "morning" | "evening") {
+  const summary = await buildMissingShiftAlertSummary({ wave });
+  const flex = await buildShiftAttendanceFlexMessage({ wave });
   return {
     ok: true,
     sent: true,
@@ -3446,7 +3497,7 @@ export type GuardProfile = {
   pictureUrl: string | null;
   phoneNumber: string | null;
   preferredShift: "morning" | "evening" | "all";
-  role: "regular" | "spare" | "head_guard" | "employer";
+  role: "regular" | "spare" | "head_guard" | "employer" | "inspector" | "unconfirmed";
   active: number;
   createdAt: string;
   updatedAt: string;
@@ -3521,120 +3572,8 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
   await ensureDatabase();
   const db = database();
   const botUserId = await getEffectiveBotUserId();
-  const lineToken = await getEffectiveLineToken();
 
-  // 1. Auto-discover any real LINE senders from webhook events not yet registered in guard_profiles
-  try {
-    const unmappedSenders = (await db.prepare(`
-      SELECT 
-        lwe.raw_user_id,
-        lwe.sender_key,
-        lwe.group_id,
-        COALESCE(lg.site_id, '') as site_id
-      FROM line_webhook_events lwe
-      LEFT JOIN line_groups lg ON lwe.group_id = lg.id
-      LEFT JOIN guard_profiles gp ON (gp.id = lwe.raw_user_id OR gp.id = lwe.sender_key) AND gp.active = 1
-      WHERE gp.id IS NULL
-        AND (
-          (lwe.raw_user_id IS NOT NULL AND lwe.raw_user_id != '')
-          OR (lwe.sender_key IS NOT NULL AND lwe.sender_key != '')
-        )
-      GROUP BY COALESCE(NULLIF(lwe.raw_user_id, ''), lwe.sender_key), lwe.group_id
-      LIMIT 50
-    `).all<any>()).results || [];
-
-    for (const sender of unmappedSenders) {
-      const uId = String(sender.raw_user_id || sender.sender_key || "").trim();
-      if (!uId || (botUserId && uId === botUserId)) continue;
-      const targetSiteId = sender.site_id || linePointSiteIdentifier(sender.group_id);
-      
-      let fetchedName = `ผู้ส่ง (${uId.slice(-6)})`;
-      let fetchedPic: string | null = null;
-
-      if (lineToken && uId.startsWith("U") && uId.length >= 30) {
-        try {
-          let res = await fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(sender.group_id)}/member/${encodeURIComponent(uId)}`, {
-            headers: { Authorization: `Bearer ${lineToken}` },
-          });
-          if (!res.ok) {
-            res = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(uId)}`, {
-              headers: { Authorization: `Bearer ${lineToken}` },
-            });
-          }
-          if (res.ok) {
-            const pJson = await res.json() as any;
-            if (pJson.displayName) {
-              fetchedName = String(pJson.displayName).trim();
-              fetchedPic = pJson.pictureUrl ? String(pJson.pictureUrl).trim() : null;
-            }
-          }
-        } catch {}
-      }
-
-      const now = bangkokNow().iso;
-      await db.prepare(`
-        INSERT INTO guard_profiles (id, site_id, guard_name, display_name, picture_url, preferred_shift, role, active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'all', 'regular', 1, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          guard_name = CASE WHEN guard_profiles.guard_name LIKE 'ผู้ส่ง (%' OR guard_profiles.guard_name LIKE 'รปภ. (%' THEN excluded.guard_name ELSE guard_profiles.guard_name END,
-          site_id = COALESCE(NULLIF(guard_profiles.site_id, ''), excluded.site_id),
-          display_name = COALESCE(excluded.display_name, guard_profiles.display_name),
-          picture_url = COALESCE(excluded.picture_url, guard_profiles.picture_url),
-          updated_at = excluded.updated_at
-      `).bind(uId, targetSiteId, fetchedName, fetchedName, fetchedPic, now, now).run();
-    }
-
-    // Resolve any existing profiles with placeholder names in background batch
-    if (lineToken) {
-      const pendingProfiles = (await db.prepare(`
-        SELECT id, site_id FROM guard_profiles 
-        WHERE (guard_name LIKE 'ผู้ส่ง (%' OR display_name LIKE 'ผู้ส่ง (%' OR display_name IS NULL)
-          AND id LIKE 'U%' AND length(id) >= 30
-        LIMIT 10
-      `).all<any>()).results || [];
-
-      for (const p of pendingProfiles) {
-        try {
-          const res = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(p.id)}`, {
-            headers: { Authorization: `Bearer ${lineToken}` },
-          });
-          if (res.ok) {
-            const pJson = (await res.json()) as any;
-            if (pJson.displayName) {
-              const nowIso = bangkokNow().iso;
-              await db.prepare(`
-                UPDATE guard_profiles 
-                SET guard_name = CASE WHEN guard_name LIKE 'ผู้ส่ง (%' THEN ? ELSE guard_name END,
-                    display_name = ?,
-                    picture_url = COALESCE(?, picture_url),
-                    updated_at = ?
-                WHERE id = ?
-              `).bind(pJson.displayName, pJson.displayName, pJson.pictureUrl || null, nowIso, p.id).run();
-            }
-          }
-        } catch {}
-      }
-    }
-
-    // Re-map any legacy 'all' / 'spare' guards back to their actual site
-    await db.prepare(`
-      UPDATE guard_profiles
-      SET site_id = (
-        SELECT COALESCE(NULLIF(lg.site_id, ''), 'site-default')
-        FROM line_webhook_events lwe
-        LEFT JOIN line_groups lg ON lwe.group_id = lg.id
-        WHERE (lwe.raw_user_id = guard_profiles.id OR lwe.sender_key = guard_profiles.id)
-          AND lg.site_id IS NOT NULL
-        LIMIT 1
-      ),
-      role = CASE WHEN role = 'employer' THEN 'employer' ELSE 'regular' END
-      WHERE site_id = 'all' OR role = 'spare'
-    `).run().catch(() => {});
-  } catch (err: any) {
-    console.error("Error in getGuardProfiles auto-discovery:", err?.message || err);
-  }
-
-  // 2. Fetch all multi-group sender site mappings from webhook events
+  // 1. Fetch all multi-group sender site mappings from webhook events
   const userSiteMap = new Map<string, Set<string>>();
   try {
     const senderSiteMappings = (await db.prepare(`
@@ -3675,45 +3614,92 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
     query += " AND (gp.site_id = ? OR gp.role = 'employer')";
     params.push(siteId);
   }
-  query += " ORDER BY CASE WHEN gp.role = 'employer' THEN 1 ELSE 0 END, os.site_name ASC, gp.role ASC, gp.guard_name ASC";
+  query += " ORDER BY gp.updated_at DESC, gp.created_at DESC";
 
   const rows = (await db.prepare(query).bind(...params).all<any>()).results || [];
-  return rows
-    .filter((r: any) => {
-      const uId = String(r.id || "").trim();
-      if (botUserId && uId === botUserId) return false;
-      return true;
-    })
-    .map((r: any) => {
-      const uId = String(r.id);
-      let displayGuardName = String(r.guard_name || "").trim();
-      const rawDisplayName = String(r.display_name || "").trim();
+  
+  // Deduplicate and merge profiles that share the same display_name / guard_name
+  const mergedMap = new Map<string, GuardProfile>();
 
-      if (!displayGuardName && rawDisplayName) {
-        displayGuardName = rawDisplayName;
+  for (const r of rows) {
+    const uId = String(r.id || "").trim();
+    if (!uId || (botUserId && uId === botUserId)) continue;
+
+    let displayGuardName = String(r.guard_name || "").trim();
+    const rawDisplayName = String(r.display_name || "").trim();
+    if (!displayGuardName && rawDisplayName) {
+      displayGuardName = rawDisplayName;
+    }
+    // Robust Real Name Resolution
+    const hasRealDisplayName = Boolean(rawDisplayName && !rawDisplayName.startsWith("ผู้ส่ง (") && !rawDisplayName.startsWith("รปภ. (") && !/^U-[A-F0-9]{16}$/i.test(rawDisplayName) && !/^U[0-9a-fA-F]{32}$/i.test(rawDisplayName));
+    const hasRealGuardName = Boolean(displayGuardName && !displayGuardName.startsWith("ผู้ส่ง (") && !displayGuardName.startsWith("รปภ. (") && !/^U-[A-F0-9]{16}$/i.test(displayGuardName) && !/^U[0-9a-fA-F]{32}$/i.test(displayGuardName));
+    const canonicalRealName = hasRealDisplayName ? rawDisplayName : (hasRealGuardName ? displayGuardName : null);
+
+    const finalName = canonicalRealName || displayGuardName || `ผู้ส่ง (${uId.slice(-6)})`;
+    const finalDisplayName = rawDisplayName || null;
+
+    // Deduplication Key: Canonical LINE Display Name if resolved, or raw uId
+    const isPlaceholder = !canonicalRealName;
+    const dedupKey = canonicalRealName 
+      ? `name:${canonicalRealName.trim().toLowerCase()}` 
+      : `id:${uId}`;
+
+    const allSites = Array.from(userSiteMap.get(uId) || []);
+    let assignedRole: string = "unconfirmed";
+    if (r.role === "employer") {
+      assignedRole = "employer";
+    } else if (r.role === "inspector") {
+      assignedRole = "inspector";
+    } else if (isPlaceholder) {
+      assignedRole = "unconfirmed";
+    } else {
+      assignedRole = r.role || "regular";
+    }
+
+    const existing = mergedMap.get(dedupKey);
+    if (existing) {
+      // Prefer canonical LINE User ID (starts with U) over senderKey hash
+      if (uId.startsWith("U") && !existing.id.startsWith("U")) {
+        existing.id = uId;
       }
-
-      const allSites = Array.from(userSiteMap.get(uId) || []);
-      if (r.site_id && !allSites.includes(r.site_id)) {
-        allSites.push(r.site_id);
+      // Upgrade name from placeholder to real name
+      if ((existing.guardName.startsWith("ผู้ส่ง (") || existing.guardName.startsWith("รปภ. (")) && canonicalRealName) {
+        existing.guardName = canonicalRealName;
       }
-
-      return {
+      if (!existing.pictureUrl && r.picture_url) {
+        existing.pictureUrl = String(r.picture_url);
+      }
+      // If current row is newer, let it update role
+      if (r.updated_at && (!existing.updatedAt || r.updated_at > existing.updatedAt)) {
+        existing.role = assignedRole as any;
+        existing.updatedAt = String(r.updated_at);
+      }
+      if (!existing.siteIds) {
+        existing.siteIds = [];
+      }
+      for (const s of allSites) {
+        if (!existing.siteIds.includes(s)) existing.siteIds.push(s);
+      }
+    } else {
+      mergedMap.set(dedupKey, {
         id: uId,
         siteId: String(r.site_id || "site-default"),
         siteIds: allSites,
         siteName: r.site_name ? String(r.site_name) : "จุดตรวจประจำ",
-        guardName: displayGuardName || `ผู้ส่ง (${uId.slice(-6)})`,
-        displayName: r.display_name ? String(r.display_name) : null,
+        guardName: finalName,
+        displayName: finalDisplayName,
         pictureUrl: r.picture_url ? String(r.picture_url) : null,
         phoneNumber: r.phone_number ? String(r.phone_number) : null,
         preferredShift: (r.preferred_shift || "all") as "morning" | "evening" | "all",
-        role: (r.role || "regular") as "regular" | "spare" | "head_guard" | "employer",
+        role: assignedRole as "regular" | "spare" | "head_guard" | "employer" | "inspector" | "unconfirmed",
         active: Number(r.active ?? 1),
         createdAt: String(r.created_at || ""),
         updatedAt: String(r.updated_at || ""),
-      };
-    });
+      });
+    }
+  }
+
+  return Array.from(mergedMap.values());
 }
 
 export async function saveGuardProfile(data: {
@@ -3731,6 +3717,9 @@ export async function saveGuardProfile(data: {
   const db = database();
   const now = bangkokNow().iso;
   const id = data.id?.trim() || `guard-${randomUUID().slice(0, 8)}`;
+  const role = data.role || "regular";
+  const name = data.guardName.trim();
+  const dName = data.displayName?.trim() || null;
 
   await db.prepare(`
     INSERT INTO guard_profiles (id, site_id, guard_name, display_name, picture_url, phone_number, preferred_shift, role, active, created_at, updated_at)
@@ -3748,29 +3737,38 @@ export async function saveGuardProfile(data: {
   `).bind(
     id,
     data.siteId,
-    data.guardName.trim(),
-    data.displayName?.trim() || null,
+    name,
+    dName,
     data.pictureUrl?.trim() || null,
     data.phoneNumber?.trim() || null,
     data.preferredShift || "all",
-    data.role || "regular",
+    role,
     data.active ?? 1,
     now,
     now
   ).run();
 
-  await addAudit("guard_profile", id, "save", "admin", `บันทึกข้อมูล รปภ. ${data.guardName}`);
+  // Synchronize role across all matching real name/displayName rows to prevent state bounce-back
+  if (dName || (!name.startsWith("ผู้ส่ง (") && !name.startsWith("รปภ. ("))) {
+    await db.prepare(`
+      UPDATE guard_profiles 
+      SET role = ?, updated_at = ?
+      WHERE (display_name = ? AND ? IS NOT NULL) OR (guard_name = ? AND guard_name NOT LIKE 'ผู้ส่ง (%' AND guard_name NOT LIKE 'รปภ. (%')
+    `).bind(role, now, dName, dName, name).run().catch(() => {});
+  }
+
+  await addAudit("guard_profile", id, "save", "admin", `บันทึกข้อมูล รปภ. ${name} (สถานะ: ${role})`);
 
   const list = await getGuardProfiles();
-  return list.find((g) => g.id === id) || {
+  return list.find((g) => g.id === id || (dName && g.displayName === dName)) || {
     id,
     siteId: data.siteId,
-    guardName: data.guardName,
-    displayName: data.displayName || null,
+    guardName: name,
+    displayName: dName,
     pictureUrl: data.pictureUrl || null,
     phoneNumber: data.phoneNumber || null,
     preferredShift: (data.preferredShift || "all") as any,
-    role: (data.role || "regular") as any,
+    role: role as any,
     active: data.active ?? 1,
     createdAt: now,
     updatedAt: now,
@@ -3851,44 +3849,6 @@ export async function getRecentWebhookSenders(options?: number | {
 
   const rows = (await db.prepare(query).bind(...params).all<any>()).results || [];
 
-  const lineToken = await getEffectiveLineToken();
-  const sendersToFetch: { groupId: string; rawUserId: string; row: any }[] = [];
-
-  for (const r of rows) {
-    const rawUid = String(r.sender_key || "").trim();
-    if (rawUid.startsWith("U") && rawUid.length === 33 && (!r.display_name || r.display_name.startsWith("U-") || !r.picture_url)) {
-      sendersToFetch.push({ groupId: String(r.group_id), rawUserId: rawUid, row: r });
-    }
-  }
-
-  if (lineToken && sendersToFetch.length > 0) {
-    await Promise.allSettled(
-      sendersToFetch.slice(0, 20).map(async ({ groupId, rawUserId, row }) => {
-        try {
-          let res = await fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/member/${encodeURIComponent(rawUserId)}`, {
-            headers: { Authorization: `Bearer ${lineToken}` },
-          });
-          if (!res.ok) {
-            res = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(rawUserId)}`, {
-              headers: { Authorization: `Bearer ${lineToken}` },
-            });
-          }
-          if (res.ok) {
-            const pJson = await res.json();
-            if (pJson.displayName) {
-              row.display_name = pJson.displayName;
-              row.picture_url = pJson.pictureUrl || null;
-              await db.prepare(`
-                UPDATE guard_profiles 
-                SET display_name = ?, picture_url = COALESCE(?, picture_url), updated_at = ?
-                WHERE id = ? OR display_name = ?
-              `).bind(pJson.displayName, pJson.pictureUrl || null, bangkokNow().iso, rawUserId, rawUserId).run();
-            }
-          }
-        } catch {}
-      })
-    );
-  }
 
   return rows.map((r: any) => {
     let cleanGuardName: string | undefined = undefined;
@@ -3947,7 +3907,7 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
     siteName?: string;
     groupName?: string;
     guardName?: string;
-    displayName?: string;
+    displayName?: string | null;
     pictureUrl?: string | null;
     source: string;
   }>();
@@ -4185,7 +4145,8 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
   for (const guard of discoveredGuards.values()) {
     const firstSiteId = Array.from(guard.siteIds)[0] || "site-default";
     const siteId = firstSiteId;
-    const role = "regular";
+    const isPlaceholder = !guard.displayName || guard.guardName?.startsWith("ผู้ส่ง (") || guard.guardName?.startsWith("รปภ. (") || !guard.pictureUrl || !guard.pictureUrl.startsWith("http");
+    const role = isPlaceholder ? "unconfirmed" : "regular";
 
     const displayPicture = guard.pictureUrl || "👮‍♂️";
 
@@ -4199,7 +4160,7 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
         ON CONFLICT(id) DO UPDATE SET
           site_id = COALESCE(NULLIF(guard_profiles.site_id, ''), excluded.site_id),
           guard_name = CASE 
-            WHEN excluded.guard_name NOT LIKE 'รปภ. ประจำ%' AND excluded.guard_name NOT LIKE 'รปภ. สแปร์%' AND excluded.guard_name NOT LIKE 'U-%' AND excluded.guard_name NOT LIKE 'U%'
+            WHEN excluded.guard_name NOT LIKE 'ผู้ส่ง (%' AND excluded.guard_name NOT LIKE 'รปภ. (%' AND excluded.guard_name NOT LIKE 'U-%' AND excluded.guard_name NOT LIKE 'U%'
             THEN excluded.guard_name
             ELSE COALESCE(NULLIF(guard_profiles.guard_name, ''), excluded.guard_name)
           END,
@@ -4208,13 +4169,18 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
             WHEN excluded.picture_url LIKE 'https://%' THEN excluded.picture_url 
             ELSE COALESCE(NULLIF(guard_profiles.picture_url, '👮‍♂️'), excluded.picture_url) 
           END,
-          role = CASE WHEN guard_profiles.role = 'employer' THEN 'employer' ELSE COALESCE(guard_profiles.role, 'regular') END,
+          role = CASE 
+            WHEN guard_profiles.role = 'employer' THEN 'employer' 
+            WHEN guard_profiles.role = 'inspector' THEN 'inspector'
+            WHEN excluded.guard_name LIKE 'ผู้ส่ง (%' OR excluded.guard_name LIKE 'รปภ. (%' OR excluded.role = 'unconfirmed' THEN 'unconfirmed'
+            ELSE COALESCE(guard_profiles.role, excluded.role) 
+          END,
           active = 1,
           updated_at = excluded.updated_at
       `).bind(
         guard.id,
         siteId,
-        guard.guardName || guard.displayName || `รปภ. (${guard.id.slice(0, 6)})`,
+        guard.guardName || guard.displayName || `ผู้ส่ง (${guard.id.slice(-6)})`,
         guard.displayName || null,
         displayPicture,
         role,
@@ -4326,6 +4292,29 @@ export function classifyEmployerMessage(text: string): {
   return { urgency: "p3_general", category: "general", title: "💬 ข้อความทั่วไป", isUrgent: false };
 }
 
+// -------------------------------------------------------------
+// GUARD REPORT & PATROL MESSAGE CLASSIFIER
+// -------------------------------------------------------------
+export function isGuardReportMessage(text: string): boolean {
+  if (!text) return false;
+  const clean = text.trim();
+  
+  // Guard check-in / patrol keywords
+  const guardRegex = /(?:รปภ\.?|ว\.4|ว\.24|ว\.00|ว\.8|ว\.60|ผลัด|กะเช้า|กะดึก|ผลัดเช้า|ผลัดดึก|เข้าเวร|ออกเวร|ส่งเวร|รับเวร|ตรวจแล้ว|ออกตรวจ|เดินตรวจ|ลาดตระเวน|ตรวจเช็ค|ตรวจพื้นที่|เหตุการณ์ทั่วไป|เหตุการณ์ปกติ|สถานการณ์ปกติ|ปกติครับ|ปกติค่ะ|เรียบร้อยครับ|เรียบร้อยค่ะ|ประจำป้อม|ป้อม|สแปร์|สายตรวจ|หน่วยงานโครงการ)/i;
+  
+  // Time pattern e.g. 02.00 น. or 19.00น.
+  const timePattern = /\b\d{1,2}[\.:]\d{2}\s*น\.?/i;
+  
+  // Date pattern e.g. 16 สิงหาคม or วันที่ 16
+  const datePattern = /(?:วันที่\s*\d{1,2}|\d{1,2}\s*(?:มกราคม|กุมภาพันธ์|มีนาคม|เมษายน|พฤษภาคม|มิถุนายน|กรกฎาคม|สิงหาคม|กันยายน|ตุลาคม|พฤศจิกายน|ธันวาคม|ส\.ค\.|ก\.ย\.|ต\.ค\.|พ\.ย\.|ธ\.ค\.|ม\.ค\.|ก\.พ\.|มี\.ค\.|เม\.ย\.|พ\.ค\.|มิ\.ย\.|ก\.ค\.))/i;
+
+  if (guardRegex.test(clean)) return true;
+  if (timePattern.test(clean) && (clean.includes("ตรวจ") || clean.includes("รปภ") || clean.includes("ว") || clean.includes("ปกติ") || clean.includes("ป้อม") || clean.includes("เรียบร้อย"))) return true;
+  if (datePattern.test(clean) && (clean.includes("ตรวจ") || clean.includes("รปภ") || clean.includes("หน่วยงาน") || clean.includes("ผลัด") || clean.includes("ว"))) return true;
+
+  return false;
+}
+
 export async function recordEmployerInquiry(input: {
   groupId: string;
   siteName?: string;
@@ -4335,6 +4324,9 @@ export async function recordEmployerInquiry(input: {
 }): Promise<EmployerInquiry | null> {
   const text = input.messageText.trim();
   if (!text || text.length < 2) return null;
+
+  // Never record Guard shift/patrol reports as employer inquiries
+  if (isGuardReportMessage(text)) return null;
 
   await ensureDatabase();
   const db = database();

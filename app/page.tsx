@@ -6,6 +6,8 @@ import { ShiftsPanel } from "./ShiftsPanel";
 import PatrolPanel from "./PatrolPanel";
 import { GuardsPanel } from "./GuardsPanel";
 import { InquiriesPanel } from "./InquiriesPanel";
+import { LivePhotoWall } from "./LivePhotoWall";
+import { LineQuotaPanel } from "./LineQuotaPanel";
 
 export type SlotState = "confirmed" | "self_reported" | "waiting" | "replacement_required" | "unassigned" | "missing";
 
@@ -230,6 +232,7 @@ function deriveSiteStatus(slots: CoverageSlot[]): SiteStatus {
 }
 
 function groupSites(slots: CoverageSlot[], registry: OperationalSite[], lineGroups: LineGroup[]) {
+  const lineGroupBySite = new Map((lineGroups || []).filter((g) => g.siteId).map((g) => [g.siteId!, g]));
   const activeRegistry = registry.filter((site) => site.active === 1);
   const groups = new Map<string, CoverageSlot[]>();
   slots.forEach((slot) => {
@@ -911,13 +914,13 @@ function handleLocalAction(payload: Record<string, unknown>, currentData: Dashbo
 
 export default function Home() {
   const [data, setData] = useState<DashboardData | null>(null);
-  const [tab, setTab] = useState<"ops" | "billing" | "setup" | "line" | "reports" | "stickers" | "shifts" | "patrol" | "guards" | "inquiries">("reports");
+  const [tab, setTab] = useState<"photowall" | "ops" | "billing" | "setup" | "line" | "reports" | "stickers" | "shifts" | "patrol" | "guards" | "inquiries" | "quota">("reports");
 
   useEffect(() => {
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       const tabParam = params.get("tab");
-      if (tabParam === "patrol" || tabParam === "guards" || tabParam === "inquiries") {
+      if (tabParam === "photowall" || tabParam === "patrol" || tabParam === "guards" || tabParam === "inquiries" || tabParam === "ops" || tabParam === "quota" || tabParam === "reports" || tabParam === "stickers" || tabParam === "shifts" || tabParam === "billing" || tabParam === "setup" || tabParam === "line") {
         setTab(tabParam as any);
       }
     }
@@ -962,6 +965,53 @@ export default function Home() {
   const [linePointForm, setLinePointForm] = useState<LinePointForm | null>(null);
   const [showSiteForm, setShowSiteForm] = useState(false);
   const [siteEditTarget, setSiteEditTarget] = useState<SiteCard | null>(null);
+
+  // EXECUTIVE SHIFT DIGEST STATE
+  const [showExecutiveDigest, setShowExecutiveDigest] = useState(false);
+  const [digestData, setDigestData] = useState<any>(null);
+  const [loadingDigest, setLoadingDigest] = useState(false);
+  const [pushingDigest, setPushingDigest] = useState(false);
+  const [digestSentNotice, setDigestSentNotice] = useState<string | null>(null);
+
+  const openExecutiveDigest = async () => {
+    setShowExecutiveDigest(true);
+    setLoadingDigest(true);
+    try {
+      const res = await fetch("/api/command-center/digest");
+      if (res.ok) {
+        const json = await res.json();
+        setDigestData(json);
+      }
+    } catch {
+      // ignore
+    }
+    setLoadingDigest(false);
+  };
+
+  const sendDigestToLine = async () => {
+    if (!digestData?.digestText) return;
+    setPushingDigest(true);
+    try {
+      const res = await fetch("/api/command-center/digest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          digestText: digestData.digestText,
+          actor: "ผู้บริหารศูนย์สั่งการ ALPHA",
+        }),
+      });
+      const json = await res.json();
+      if (res.ok) {
+        setDigestSentNotice("✅ ส่งรายงานสรุปเข้า LINE ผู้บริหารเรียบร้อยแล้ว!");
+        setTimeout(() => setDigestSentNotice(null), 4000);
+      } else {
+        alert(`ส่งไม่สำเร็จ: ${json.error || "เกิดข้อผิดพลาด"}`);
+      }
+    } catch {
+      alert("เกิดข้อผิดพลาดในการเชื่อมต่อ");
+    }
+    setPushingDigest(false);
+  };
 
   const loadDashboard = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     if (!silent) setLoading(true);
@@ -1515,7 +1565,30 @@ export default function Home() {
             {lastLoadedAt && networkState === "online" ? ` · ${new Intl.DateTimeFormat("th-TH", { hour: "2-digit", minute: "2-digit" }).format(lastLoadedAt)}` : ""}
           </span>
         </div>
-        <button className="mobile-refresh" onClick={() => void loadDashboard()} disabled={loading} aria-label="รีเฟรชข้อมูล">↻</button>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          <button
+            type="button"
+            onClick={openExecutiveDigest}
+            style={{
+              background: "linear-gradient(135deg, #0284c7, #4f46e5)",
+              color: "#ffffff",
+              border: "1px solid rgba(255,255,255,0.2)",
+              padding: "0.45rem 0.9rem",
+              borderRadius: "10px",
+              fontSize: "0.82rem",
+              fontWeight: 800,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: "0.4rem",
+              boxShadow: "0 4px 14px rgba(2, 132, 199, 0.35)",
+            }}
+          >
+            <span>📊</span>
+            <span>สรุปกะผู้บริหาร</span>
+          </button>
+          <button className="mobile-refresh" onClick={() => void loadDashboard()} disabled={loading} aria-label="รีเฟรชข้อมูล">↻</button>
+        </div>
       </header>
 
       {/* GLOBAL LIVE COMMAND KPIS */}
@@ -1619,6 +1692,20 @@ export default function Home() {
           >
             <span className="tab-icon">🏢</span>
             <span>กลุ่ม LINE ({data?.lineGroups.length ?? 0})</span>
+          </button>
+          <button
+            type="button"
+            className={`command-tab ${tab === "quota" ? "active" : ""}`}
+            onClick={() => setTab("quota")}
+            style={{
+              background: tab === "quota" ? "#0284c7" : "rgba(2, 132, 199, 0.12)",
+              color: tab === "quota" ? "#ffffff" : "#38bdf8",
+              borderColor: tab === "quota" ? "#0284c7" : "rgba(2, 132, 199, 0.25)",
+              fontWeight: 700,
+            }}
+          >
+            <span className="tab-icon">📊</span>
+            <span>โควต้า LINE</span>
           </button>
           <button
             type="button"
@@ -2146,6 +2233,8 @@ export default function Home() {
         <ShiftsPanel />
       ) : tab === "stickers" ? (
         <StickersPanel />
+      ) : tab === "quota" ? (
+        <LineQuotaPanel />
       ) : tab === "line" ? (
         <section className="line-control" aria-label="ศูนย์ควบคุม LINE OA">
           <div className="line-control-hero">
@@ -2398,6 +2487,106 @@ export default function Home() {
             <label>ลูกค้าหรือหน่วยงาน<input name="customerName" required defaultValue={siteEditTarget?.customerName ?? ""} placeholder="ชื่อบริษัท/หน่วยงาน" /></label>
             <div className="modal-actions"><button type="button" className="small-secondary" onClick={() => { setShowSiteForm(false); setSiteEditTarget(null); }}>ยกเลิก</button><button className="small-primary" disabled={busyId?.startsWith("site-") === true}>{busyId?.startsWith("site-") ? "กำลังบันทึก…" : siteEditTarget ? "บันทึกการแก้ไข" : "เพิ่มจุด"}</button></div>
           </form>
+        </div>
+      )}
+
+      {/* EXECUTIVE SHIFT DIGEST MODAL */}
+      {showExecutiveDigest && (
+        <div className="modal-backdrop" role="presentation" style={{ zIndex: 120 }}>
+          <div className="modal-card" style={{ maxWidth: "600px", width: "95%", background: "linear-gradient(145deg, #0b1329 0%, #172554 100%)", border: "1.5px solid #38bdf8", boxShadow: "0 20px 50px rgba(0,0,0,0.6)" }} role="dialog" aria-modal="true">
+            <div className="modal-head" style={{ borderBottom: "1px solid rgba(56, 189, 248, 0.2)", paddingBottom: "0.85rem" }}>
+              <div>
+                <p className="eyebrow" style={{ color: "#38bdf8", fontWeight: 800 }}>EXECUTIVE BRIEFING</p>
+                <h3 style={{ fontSize: "1.25rem", color: "#ffffff", fontWeight: 800 }}>📊 รายงานสรุปสถานการณ์ประจำกะ (ผู้บริหาร)</h3>
+                <p style={{ color: "#94a3b8", fontSize: "0.82rem" }}>
+                  {digestData ? `${digestData.dateFormatted} · ${digestData.waveName}` : "กำลังรวบรวมข้อมูลสถานการณ์..."}
+                </p>
+              </div>
+              <button type="button" className="drawer-close" onClick={() => setShowExecutiveDigest(false)} aria-label="ปิด">×</button>
+            </div>
+
+            {loadingDigest ? (
+              <div style={{ padding: "2.5rem 1rem", textAlign: "center", color: "#94a3b8" }}>
+                <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>⏳</div>
+                <div>กำลังประมวลผลข้อมูลกำลังพลและเคสนายจ้าง...</div>
+              </div>
+            ) : digestData ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: "1rem", marginTop: "1rem" }}>
+                {digestSentNotice && (
+                  <div style={{ background: "#065f46", color: "#ecfdf5", border: "1px solid #059669", padding: "0.6rem 0.85rem", borderRadius: "8px", fontSize: "0.82rem", fontWeight: 800 }}>
+                    {digestSentNotice}
+                  </div>
+                )}
+
+                {/* DIGEST KPI MINI TILES */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "0.5rem" }}>
+                  <div style={{ background: "rgba(0,0,0,0.3)", padding: "0.6rem", borderRadius: "10px", border: "1px solid rgba(255,255,255,0.08)", textAlign: "center" }}>
+                    <div style={{ fontSize: "0.68rem", color: "#94a3b8" }}>จุดตรวจทั้งหมด</div>
+                    <div style={{ fontSize: "1.15rem", fontWeight: 800, color: "#ffffff" }}>{digestData.stats?.totalSlots}</div>
+                  </div>
+                  <div style={{ background: "rgba(0,0,0,0.3)", padding: "0.6rem", borderRadius: "10px", border: "1px solid rgba(255,255,255,0.08)", textAlign: "center" }}>
+                    <div style={{ fontSize: "0.68rem", color: "#94a3b8" }}>เข้าเวรครบ</div>
+                    <div style={{ fontSize: "1.15rem", fontWeight: 800, color: "#10b981" }}>{digestData.stats?.onDuty}</div>
+                  </div>
+                  <div style={{ background: "rgba(0,0,0,0.3)", padding: "0.6rem", borderRadius: "10px", border: "1px solid rgba(255,255,255,0.08)", textAlign: "center" }}>
+                    <div style={{ fontSize: "0.68rem", color: "#94a3b8" }}>สแปร์เข้าแทน</div>
+                    <div style={{ fontSize: "1.15rem", fontWeight: 800, color: "#f59e0b" }}>{digestData.stats?.spareUsed}</div>
+                  </div>
+                  <div style={{ background: "rgba(0,0,0,0.3)", padding: "0.6rem", borderRadius: "10px", border: "1px solid rgba(255,255,255,0.08)", textAlign: "center" }}>
+                    <div style={{ fontSize: "0.68rem", color: "#94a3b8" }}>เคสนายจ้าง</div>
+                    <div style={{ fontSize: "1.15rem", fontWeight: 800, color: "#38bdf8" }}>{digestData.stats?.p1Count + digestData.stats?.p2Count}</div>
+                  </div>
+                </div>
+
+                {/* TEXTAREA PREVIEW */}
+                <div>
+                  <label style={{ fontSize: "0.75rem", fontWeight: 800, color: "#94a3b8", display: "block", marginBottom: "0.3rem" }}>
+                    📝 ตัวอย่างข้อความที่จะส่งเข้า LINE ผู้บริหาร:
+                  </label>
+                  <textarea
+                    rows={8}
+                    value={digestData.digestText || ""}
+                    onChange={(e) => setDigestData({ ...digestData, digestText: e.target.value })}
+                    style={{ width: "100%", background: "#090d16", border: "1px solid #334155", color: "#f1f5f9", padding: "0.75rem", borderRadius: "8px", fontSize: "0.82rem", lineHeight: "1.4", fontFamily: "monospace" }}
+                  />
+                </div>
+
+                {/* ACTION BUTTONS */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: "0.75rem" }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(digestData.digestText || "");
+                      setDigestSentNotice("📋 คัดลอกข้อความสรุปใส่คลิปบอร์ดแล้ว");
+                      setTimeout(() => setDigestSentNotice(null), 3000);
+                    }}
+                    style={{ background: "#334155", color: "#f8fafc", border: "none", padding: "0.55rem 0.9rem", borderRadius: "8px", fontSize: "0.8rem", fontWeight: 700, cursor: "pointer" }}
+                  >
+                    📋 คัดลอกข้อความ
+                  </button>
+
+                  <div style={{ display: "flex", gap: "0.5rem" }}>
+                    <button
+                      type="button"
+                      onClick={() => setShowExecutiveDigest(false)}
+                      style={{ background: "transparent", color: "#94a3b8", border: "1px solid #475569", padding: "0.55rem 0.9rem", borderRadius: "8px", fontSize: "0.8rem", fontWeight: 700, cursor: "pointer" }}
+                    >
+                      ปิด
+                    </button>
+                    <button
+                      type="button"
+                      onClick={sendDigestToLine}
+                      disabled={pushingDigest}
+                      style={{ background: "linear-gradient(135deg, #059669 0%, #10b981 100%)", color: "#ffffff", border: "none", padding: "0.55rem 1.15rem", borderRadius: "8px", fontSize: "0.82rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.4rem", boxShadow: "0 4px 14px rgba(16, 185, 129, 0.4)" }}
+                    >
+                      <span>📤</span>
+                      <span>{pushingDigest ? "กำลังส่ง..." : "ส่งสรุปเข้าห้อง LINE ผู้บริหาร"}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+          </div>
         </div>
       )}
     </main>

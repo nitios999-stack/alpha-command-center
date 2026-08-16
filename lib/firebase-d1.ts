@@ -135,6 +135,8 @@ function readFirestoreDocument(document: unknown): Row {
 
 class FirestoreRest {
   readonly projectId: string | undefined;
+  private token: string | null = null;
+  private tokenExpiresAt: number = 0;
 
   constructor(projectId: string | undefined) {
     this.projectId = projectId;

@@ -45,19 +45,18 @@ export async function POST(request: Request) {
       return Response.json(result);
     }
 
-    if (!body.siteId || !body.guardName) {
-      return Response.json({ ok: false, error: "กรุณาระบุชื่อจุดและชื่อ รปภ." }, { status: 400 });
-    }
+    const targetSiteId = body.siteId?.trim() || "all";
+    const targetGuardName = body.guardName?.trim() || body.displayName?.trim() || (body.id ? `สมาชิก (${body.id.slice(-6)})` : "เจ้าหน้าที่");
 
     const saved = await saveGuardProfile({
       id: body.id,
-      siteId: body.siteId,
-      guardName: body.guardName,
+      siteId: targetSiteId,
+      guardName: targetGuardName,
       displayName: body.displayName,
       pictureUrl: body.pictureUrl,
       phoneNumber: body.phoneNumber,
-      preferredShift: body.preferredShift,
-      role: body.role,
+      preferredShift: body.preferredShift || "all",
+      role: body.role || "regular",
       active: body.active,
     });
 

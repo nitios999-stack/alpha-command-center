@@ -1,6 +1,9 @@
-import { database, ensureDatabase, logOutboundAction } from "../../../../../db/command-center";
+import { database, ensureDatabase, logOutboundAction, getEffectiveLineToken } from "../../../../../db/command-center";
 
 export const runtime = "nodejs";
+
+// Global in-memory map to track the latest in-flight event per group
+const groupDebouncerTracker = new Map<string, { eventId: string; timestamp: number }>();
 
 export async function POST(request: Request) {
   try {
@@ -11,14 +14,22 @@ export async function POST(request: Request) {
       return Response.json({ ok: false, error: "Missing required fields" }, { status: 400 });
     }
 
-    // หน่วงเวลารอ 45 วินาที เพื่อรวบรูปภาพ/ข้อความทั้งหมด และตรวจสอบว่า รปภ. ส่งเสร็จหรือยัง (LINE Reply Token มีอายุ 60 วินาที ปลอดภัย 100%)
-    await new Promise((resolve) => setTimeout(resolve, 45000));
+    // Register this event as the latest in-flight event for this group
+    groupDebouncerTracker.set(groupId, { eventId, timestamp: Date.now() });
+
+    // หน่วงเวลารอ 15 วินาที เพื่อรวบรูปภาพ/ข้อความทั้งหมด (LINE Reply Token มีอายุ 60 วินาที)
+    await new Promise((resolve) => setTimeout(resolve, 15000));
+
+    // ตรวจสอบ In-memory: ถ้ามีข้อความใหม่กว่าเข้ามาในกลุ่มเดียวกันระหว่างที่รอ ให้ตัวนี้สละสิทธิ์ทันที
+    const currentTracked = groupDebouncerTracker.get(groupId);
+    if (currentTracked && currentTracked.eventId !== eventId) {
+      return Response.json({ ok: true, skipped: true, reason: "superseded_by_newer_in_flight_event" });
+    }
 
     await ensureDatabase();
     const db = database();
 
     // 0. ตรวจสอบว่ากลุ่มนี้เป็น "กลุ่มไลน์ศูนย์สั่งการ" หรือไม่
-    // หากเป็นกลุ่มสั่งการ ห้ามส่งสติกเกอร์ตอบรับอัตโนมัติเด็ดขาด (ส่งเฉพาะข้อความคำสั่ง/สรุปเท่านั้น)
     const targetGroupSetting = (await db.prepare(
       "SELECT value FROM system_settings WHERE key = 'line_reminder_target_group_id'"
     ).first()) as { value: string } | null;
@@ -27,7 +38,36 @@ export async function POST(request: Request) {
       return Response.json({ ok: true, skipped: true, reason: "command_room_no_stickers" });
     }
 
-    // 0.5 ตรวจสอบว่ากลุ่มนี้ตั้งค่าให้งดสติกเกอร์เมื่อมีข้อความนายจ้างหรือไม่
+    // 0.5 ตรวจสอบ Silence Window: มีข้อความจากนายจ้างหรือลูกค้าในรอบ 30 นาทีหรือไม่ (ไม่นับรายงานตรวจ รปภ.)
+    const recentInquiry = (await db.prepare(`
+      SELECT id, message_text, urgency 
+      FROM employer_inquiries 
+      WHERE group_id = ? 
+        AND received_at >= datetime('now', '-30 minutes')
+        AND status != 'resolved'
+        AND message_text NOT LIKE '%รปภ%'
+        AND message_text NOT LIKE '%ว.4%'
+        AND message_text NOT LIKE '%ตรวจ%'
+        AND message_text NOT LIKE '%ปกติ%'
+        AND message_text NOT LIKE '%ผลัด%'
+        AND message_text NOT LIKE '%กะ%'
+      ORDER BY received_at DESC LIMIT 1
+    `).bind(groupId).first()) as { id: string; message_text: string; urgency: string } | null;
+
+    if (recentInquiry) {
+      await logOutboundAction({
+        id: `skip-employer-${Date.now()}`,
+        groupId,
+        triggerEventId: eventId,
+        actionType: "auto-reply-close",
+        stickerPackageId: "11538",
+        stickerId: "51626520",
+        status: "skipped",
+        skipReason: `งดส่งสติกเกอร์: ตรวจพบข้อความนายจ้าง "${recentInquiry.message_text.slice(0, 40)}" (เปิดโหมดเงียบ 30 นาทีเพื่อคุยงานสะดวก)`,
+      });
+      return Response.json({ ok: true, skipped: true, reason: "employer_message_no_sticker" });
+    }
+
     const configData = (await db.prepare(
       "SELECT * FROM line_auto_reply_configs WHERE group_id = ?"
     ).bind(groupId).first()) as any;
@@ -37,38 +77,23 @@ export async function POST(request: Request) {
       return Response.json({ ok: true, skipped: true, reason: "disabled_by_user" });
     }
 
-    if (configData?.silence_on_employer === 1) {
-      const recentInquiry = (await db.prepare(`
-        SELECT id, message_text, urgency 
-        FROM employer_inquiries 
-        WHERE group_id = ? AND received_at >= datetime('now', '-30 minutes')
-        ORDER BY received_at DESC LIMIT 1
-      `).bind(groupId).first()) as { id: string; message_text: string; urgency: string } | null;
+    // 1. ตรวจสอบว่าอีเวนต์นี้เป็นข้อความล่าสุดในกลุ่มนี้จริงๆ หรือไม่ (ตรวจสอบระดับ Database)
+    const latestGroupEvent = (await db.prepare(`
+      SELECT id, rowid 
+      FROM line_webhook_events 
+      WHERE group_id = ? AND event_type = 'message'
+      ORDER BY rowid DESC LIMIT 1
+    `).bind(groupId).first()) as { id: string; rowid: number } | null;
 
-      if (recentInquiry) {
-        await logOutboundAction({
-          id: `skip-employer-${Date.now()}`,
-          groupId,
-          triggerEventId: eventId,
-          actionType: "auto-reply-close",
-          stickerPackageId: "11538",
-          stickerId: "51626520",
-          status: "skipped",
-          skipReason: `งดส่งสติกเกอร์: ตรวจพบข้อความนายจ้าง "${recentInquiry.message_text.slice(0, 40)}" (เปิดโหมดเงียบเฉพาะกลุ่มนี้)`,
-        });
-        return Response.json({ ok: true, skipped: true, reason: "employer_message_no_sticker" });
-      }
+    if (latestGroupEvent && latestGroupEvent.id !== eventId) {
+      return Response.json({ ok: true, skipped: true, reason: "newer_message_in_database" });
     }
-    
-    // 1. ค้นหา event ปัจจุบันในฐานข้อมูลเพื่อดึง rowid, raw_user_id และ sender_key
+
+    // 1.5 ตรวจสอบตัวตนผู้ส่ง (ต้องเป็น รปภ. ที่ยืนยันแล้วเท่านั้น)
     const currentEvent = (await db.prepare(
       "SELECT rowid, received_at, sender_key, raw_user_id, message_type FROM line_webhook_events WHERE id = ?"
     ).bind(eventId).first()) as { rowid: number; received_at: string; sender_key: string | null; raw_user_id: string | null; message_type: string | null } | null;
 
-    // 1.5 ตรวจสอบตัวตนผู้ส่ง (รปภ. vs นายจ้าง)
-    // เงื่อนไข:
-    // - ถ้านายจ้างส่งมา -> ไม่ต้องตอบ เพื่อให้เห็นแชทและคุยงานสะดวก
-    // - ถ้ารปภ. หรือสมาชิกส่งรายงาน/รูปภาพ -> ให้บอทตอบสติกเกอร์
     const uId = currentEvent?.raw_user_id;
     const sKey = currentEvent?.sender_key;
 
@@ -89,8 +114,8 @@ export async function POST(request: Request) {
       `).bind(uId || "", uId || "", sKey || "", sKey || "", uId || "", uId || "", sKey || "", sKey || "").first()) as { id: string; guard_name: string; role: string } | null;
     }
 
-    // ถ้าพบนายจ้าง -> งดตอบเด็ดขาด
-    if (senderProfile && senderProfile.role === "employer") {
+    const isExplicitEmployer = senderProfile?.role === "employer";
+    if (isExplicitEmployer) {
       await logOutboundAction({
         id: `skip-employer-${Date.now()}`,
         groupId,
@@ -99,46 +124,56 @@ export async function POST(request: Request) {
         stickerPackageId: "11538",
         stickerId: "51626520",
         status: "skipped",
-        skipReason: `งดส่งสติกเกอร์: ผู้ส่งคือนายจ้าง/ลูกค้า "${senderProfile.guard_name}" (บอทเงียบ 100% เพื่อให้เห็นแชทและคุยงานสะดวก)`,
+        skipReason: `งดส่งสติกเกอร์: ผู้ส่งคือนายจ้าง/ลูกค้า "${senderProfile?.guard_name || "นายจ้าง"}" (งดตอบสติกเกอร์ 100%)`,
       });
-      return Response.json({ ok: true, skipped: true, reason: "employer_message_no_sticker" });
+      return Response.json({ ok: true, skipped: true, reason: "sender_is_employer" });
     }
 
-    if (currentEvent) {
-      // ตรวจสอบว่ามีข้อความใหม่กว่าข้อความนี้ในกลุ่มเดียวกันส่งเข้ามาหรือไม่
-      const newerEvent = (await db.prepare(
-        "SELECT id FROM line_webhook_events WHERE group_id = ? AND event_type = 'message' AND rowid > ?"
-      ).bind(groupId, currentEvent.rowid).first()) as { id: string } | null;
+    // 2. ตรวจสอบประวัติการส่งสติกเกอร์ในรอบ 25 นาทีที่ผ่านมา (กันเบิ้ล 100%)
+    const recentSentSticker = (await db.prepare(`
+      SELECT id, sent_at 
+      FROM line_outbound_audit 
+      WHERE group_id = ? 
+        AND status = 'sent' 
+        AND sent_at >= datetime('now', '-25 minutes')
+      LIMIT 1
+    `).bind(groupId).first()) as { id: string; sent_at: string } | null;
 
-      if (newerEvent) {
-        // มีข้อความใหม่เข้ามา แปลว่ายังส่งรูปไม่เสร็จ ให้ข้ามตัวนี้ไป (ตัวใหม่จะนับ 45 วิ ต่อเอง)
-        return Response.json({ ok: true, skipped: true, reason: "newer_message_exists" });
-      }
+    if (recentSentSticker) {
+      return Response.json({ ok: true, skipped: true, reason: "recent_sticker_already_sent_in_25min" });
     }
 
-    // 2. ดึงค่าตัวแปรสติกเกอร์ (ค่าเริ่มต้นอัตโนมัติ 100%: Brown & Friends ตะเบ๊ะ 11538/51626520, cooldown: 30 นาที)
     const stickerPackageId = configData?.sticker_package_id || "11538";
     const stickerId = configData?.sticker_id || "51626520";
     const cooldownMinutes = configData?.cooldown_minutes ?? 30;
-
-    // เช็ก Cooldown
     const now = new Date();
-    if (configData?.last_reply_at) {
-      const lastReplyDate = new Date(configData.last_reply_at);
-      const diffMinutes = (now.getTime() - lastReplyDate.getTime()) / 60000;
-      if (diffMinutes < cooldownMinutes) {
-        return Response.json({ ok: true, skipped: true, reason: "cooldown_active" });
-      }
+
+    // 3. ATOMIC LOCK ACQUISITION ON DATABASE (ป้องกัน Race Condition 100%)
+    await db.prepare(`
+      INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, last_reply_at, updated_at)
+      VALUES (?, 'ack_only', ?, ?, ?, '2000-01-01T00:00:00.000Z', ?)
+      ON CONFLICT(group_id) DO NOTHING
+    `).bind(groupId, stickerPackageId, stickerId, cooldownMinutes, now.toISOString()).run();
+
+    const lockResult = (await db.prepare(`
+      UPDATE line_auto_reply_configs 
+      SET last_reply_at = ?, last_inbound_event_id = ?, updated_at = ?
+      WHERE group_id = ? 
+        AND (last_reply_at IS NULL OR last_reply_at <= datetime('now', '-25 minutes'))
+    `).bind(now.toISOString(), eventId, now.toISOString(), groupId).run()) as any;
+
+    if (lockResult && typeof lockResult.changes === "number" && lockResult.changes === 0) {
+      return Response.json({ ok: true, skipped: true, reason: "lock_not_acquired_cooldown_active" });
     }
 
     const actionId = `debounce-${Date.now()}`;
     const env = (typeof process !== "undefined" ? process.env : {}) as Record<string, string | undefined>;
-    const accessToken = passedToken || env.LINE_CHANNEL_ACCESS_TOKEN;
+    const accessToken = passedToken || (await getEffectiveLineToken()) || env.LINE_CHANNEL_ACCESS_TOKEN;
     if (!accessToken) {
       return Response.json({ ok: false, error: "no token" }, { status: 500 });
     }
 
-    // 3. ส่งสติกเกอร์ปิดท้าย 1 ตัว (45 วิ หลังรูปสุดท้าย) ผ่าน Reply API (ฟรี 100% ไม่เสียโควต้าของ LINE)
+    // 4. ส่งสติกเกอร์ตอบรับ 1 ตัวผ่าน Reply API
     const response = await fetch("https://api.line.me/v2/bot/message/reply", {
       method: "POST",
       headers: {
@@ -170,16 +205,6 @@ export async function POST(request: Request) {
       return Response.json({ ok: false, error: errBody });
     }
 
-    // 4. บันทึกเวลาตอบกลับล่าสุดเพื่อกัน Cooldown
-    await db.prepare(`
-      INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, last_reply_at, last_inbound_event_id, updated_at)
-      VALUES (?, 'ack_only', ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(group_id) DO UPDATE SET 
-        last_reply_at = excluded.last_reply_at,
-        last_inbound_event_id = excluded.last_inbound_event_id,
-        updated_at = excluded.updated_at
-    `).bind(groupId, stickerPackageId, stickerId, cooldownMinutes, now.toISOString(), eventId, now.toISOString()).run();
-
     await logOutboundAction({
       id: actionId,
       groupId: groupId,
@@ -188,7 +213,7 @@ export async function POST(request: Request) {
       stickerPackageId: stickerPackageId,
       stickerId: stickerId,
       status: "sent",
-      skipReason: "จังหวะปิดจบ 45 วิ (reply ฟรี 100%)"
+      skipReason: "จังหวะปิดจบ 40 วิ (reply ฟรี 100%)"
     });
 
     return Response.json({ ok: true, sent: true });

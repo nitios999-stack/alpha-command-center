@@ -1,18 +1,19 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import type { DashboardData } from "./page";
 
 type GuardProfile = {
   id: string;
   siteId: string;
+  siteIds?: string[];
   siteName?: string;
   guardName: string;
   displayName: string | null;
   pictureUrl: string | null;
   phoneNumber: string | null;
   preferredShift: "morning" | "evening" | "all";
-  role: "regular" | "spare" | "head_guard" | "employer";
+  role: "regular" | "spare" | "head_guard" | "employer" | "inspector" | "unconfirmed";
   active: number;
   createdAt: string;
   updatedAt: string;
@@ -48,17 +49,20 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
   const [recentSenders, setRecentSenders] = useState<RecentSender[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedSiteId, setSelectedSiteId] = useState<string>("all");
-  const [activeTab, setActiveTab] = useState<"sites" | "employers">("sites");
-  const [siteMemberFilter, setSiteMemberFilter] = useState<"all" | "guards" | "employers">("all");
+  const [activeTab, setActiveTab] = useState<"unconfirmed" | "sites" | "inspectors" | "employers">("unconfirmed");
+  const [siteMemberFilter, setSiteMemberFilter] = useState<"all" | "guards" | "inspectors" | "unconfirmed" | "employers">("all");
   const [siteSearch, setSiteSearch] = useState("");
+  const [memberSearch, setMemberSearch] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
-  const [autoPollActive, setAutoPollActive] = useState(true);
   const [lastSyncTime, setLastSyncTime] = useState<string>("");
   const [showTokenSetting, setShowTokenSetting] = useState(false);
   const [tokenInput, setTokenInput] = useState("");
   const [tokenStatus, setTokenStatus] = useState<{ configured: boolean; valid: boolean; botName?: string; basicId?: string; error?: string } | null>(null);
   const [testingToken, setTestingToken] = useState(false);
+
+  // In-flight race condition guard
+  const lastRequestTimeRef = useRef<number>(0);
 
   // Form modal state
   const [showModal, setShowModal] = useState(false);
@@ -69,19 +73,24 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
   const [formPictureUrl, setFormPictureUrl] = useState("");
   const [formPhone, setFormPhone] = useState("");
   const [formShift, setFormShift] = useState<"morning" | "evening" | "all">("all");
-  const [formRole, setFormRole] = useState<"regular" | "spare" | "head_guard" | "employer">("regular");
+  const [formRole, setFormRole] = useState<"regular" | "spare" | "head_guard" | "employer" | "inspector" | "unconfirmed">("regular");
 
   const sites = data?.sites || [];
 
   const loadGuards = async (silent = false) => {
     if (!silent) setLoading(true);
+    const reqTime = Date.now();
     try {
       const res = await fetch(`/api/guards?includeSenders=true`);
       if (res.ok) {
         const json = await res.json();
-        setGuards(json.guards || []);
-        setRecentSenders(json.recentSenders || []);
-        setLastSyncTime(new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+        // Only apply if this response is newer than any recent local user mutation or newer fetch
+        if (reqTime >= lastRequestTimeRef.current) {
+          lastRequestTimeRef.current = reqTime;
+          setGuards(json.guards || []);
+          setRecentSenders(json.recentSenders || []);
+          setLastSyncTime(new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+        }
       }
     } catch {
       if (!silent) setMessage("เกิดข้อผิดพลาดในการโหลดข้อมูล");
@@ -93,10 +102,12 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
     loadGuards(false);
     checkTokenStatus();
 
-    // Auto live polling every 6 seconds to capture new reports and profile pictures continuously
+    // Single unified polling interval (every 15 seconds, only when tab is visible)
     const pollInterval = setInterval(() => {
-      loadGuards(true);
-    }, 6000);
+      if (document.visibilityState === "visible") {
+        loadGuards(true);
+      }
+    }, 15000);
 
     return () => clearInterval(pollInterval);
   }, []);
@@ -188,17 +199,6 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
     setSyncing(false);
   };
 
-  useEffect(() => {
-    loadGuards();
-    checkTokenStatus();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") {
-        void loadGuards();
-      }
-    }, 8_000);
-    return () => window.clearInterval(timer);
-  }, []);
-
   // Set default selected site
   useEffect(() => {
     if (selectedSiteId === "all" && sites.length > 0) {
@@ -214,7 +214,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
     setFormPictureUrl("");
     setFormPhone("");
     setFormShift("all");
-    setFormRole(activeTab === "spares" ? "spare" : activeTab === "employers" ? "employer" : "regular");
+    setFormRole(activeTab === "employers" ? "employer" : "regular");
     setShowModal(true);
   };
 
@@ -230,7 +230,29 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
     setShowModal(true);
   };
 
-  const handleToggleRole = async (guard: GuardProfile, newRole: "regular" | "spare" | "employer") => {
+  // Instant Optimistic Role Toggle
+  const handleToggleRole = async (guard: GuardProfile, newRole: "regular" | "spare" | "employer" | "inspector" | "unconfirmed") => {
+    const previousGuards = guards;
+    lastRequestTimeRef.current = Date.now();
+
+    const roleText = newRole === "employer" 
+      ? "👔 นายจ้าง / ลูกค้า (บอทเงียบ 100%)" 
+      : newRole === "inspector"
+      ? "🔍 สายตรวจ / หัวหน้าสายตรวจ (บอทเงียบ 100%)"
+      : newRole === "unconfirmed"
+      ? "⏳ สมาชิกใหม่ / รอยืนยัน"
+      : "👮‍♂️ รปภ. ประจำจุด (เปิดบอทตอบ)";
+
+    // 1. Instant optimistic local update
+    setGuards((prev) =>
+      prev.map((g) =>
+        g.id === guard.id
+          ? { ...g, role: newRole, siteId: newRole === "spare" ? "all" : g.siteId }
+          : g
+      )
+    );
+    setMessage(`เปลี่ยนสถานะ "${guard.guardName}" เป็น ${roleText} สำเร็จ`);
+
     try {
       const payload = {
         id: guard.id,
@@ -249,17 +271,72 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
         body: JSON.stringify(payload),
       });
 
-      if (res.ok) {
-        setMessage(`เปลี่ยนสถานะ "${guard.guardName}" เป็น ${newRole === 'employer' ? '👔 นายจ้าง (บอทเงียบ 100%)' : '👮‍♂️ รปภ. (เปิดบอทตอบ)'} สำเร็จ`);
-        loadGuards();
-        onRefresh();
+      if (!res.ok) {
+        // Rollback on server error
+        setGuards(previousGuards);
+        alert("เกิดข้อผิดพลาดในการเปลี่ยนสถานะ (ย้อนกลับค่าเดิม)");
       }
     } catch {
-      alert("เกิดข้อผิดพลาดในการเปลี่ยนสถานะ");
+      setGuards(previousGuards);
+      alert("เกิดข้อผิดพลาดในการเชื่อมต่อ");
     }
   };
 
+  // Batch update all visible members in current site to guard or employer
+  const handleBatchSetRole = async (targetRole: "regular" | "employer") => {
+    const currentMembers = activeTab === "employers" ? siteEmployers : [...siteGuards, ...siteEmployers];
+    if (!currentMembers.length) return;
+    const targetLabel = targetRole === "employer" ? "👔 บุคคลทั่วไป / นายจ้าง (บอทเงียบ 100%)" : "👮‍♂️ รปภ. ประจำจุด (เปิดบอทตอบ)";
+    if (!confirm(`ต้องการปรับสมาชิกทั้งหมดในรายการนี้ (${currentMembers.length} คน) เป็น ${targetLabel} ใช่หรือไม่?`)) return;
+
+    const previousGuards = guards;
+    lastRequestTimeRef.current = Date.now();
+
+    const memberIds = new Set(currentMembers.map((m) => m.id));
+    setGuards((prev) =>
+      prev.map((g) => (memberIds.has(g.id) ? { ...g, role: targetRole } : g))
+    );
+    setMessage(`กำลังปรับสมาชิก ${currentMembers.length} คนเป็น ${targetLabel}...`);
+
+    try {
+      for (const member of currentMembers) {
+        await fetch("/api/guards", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: member.id,
+            siteId: member.siteId,
+            guardName: member.guardName,
+            displayName: member.displayName,
+            pictureUrl: member.pictureUrl,
+            phoneNumber: member.phoneNumber,
+            preferredShift: member.preferredShift,
+            role: targetRole,
+          }),
+        });
+      }
+      setMessage(`🎉 ปรับสมาชิกทั้งหมด (${currentMembers.length} คน) เป็น ${targetLabel} เรียบร้อยแล้ว`);
+    } catch {
+      setGuards(previousGuards);
+      alert("เกิดข้อผิดพลาดในการปรับข้อมูลเป็นกลุ่ม");
+    }
+  };
+
+  // Instant Optimistic Shift Toggle
   const handleToggleShift = async (guard: GuardProfile, newShift: "morning" | "evening" | "all") => {
+    const previousGuards = guards;
+    lastRequestTimeRef.current = Date.now();
+
+    // Instant optimistic local update
+    setGuards((prev) =>
+      prev.map((g) =>
+        g.id === guard.id
+          ? { ...g, preferredShift: newShift }
+          : g
+      )
+    );
+    setMessage(`ปรับกะของ "${guard.guardName}" เป็น ${newShift === "morning" ? "☀️ กะเช้า" : newShift === "evening" ? "🌙 กะดึก" : "🔄 ทุกกะ"} สำเร็จ`);
+
     try {
       const payload = {
         id: guard.id,
@@ -278,13 +355,13 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
         body: JSON.stringify(payload),
       });
 
-      if (res.ok) {
-        setMessage(`ปรับกะของ "${guard.guardName}" เป็น ${newShift === 'morning' ? '☀️ กะเช้า' : newShift === 'evening' ? '🌙 กะดึก' : '🔄 ทุกกะ'} สำเร็จ`);
-        loadGuards();
-        onRefresh();
+      if (!res.ok) {
+        setGuards(previousGuards);
+        alert("เกิดข้อผิดพลาดในการเปลี่ยนกะ (ย้อนกลับค่าเดิม)");
       }
     } catch {
-      alert("เกิดข้อผิดพลาดในการเปลี่ยนกะ");
+      setGuards(previousGuards);
+      alert("เกิดข้อผิดพลาดในการเชื่อมต่อ");
     }
   };
 
@@ -316,8 +393,8 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
       if (res.ok) {
         setShowModal(false);
         setMessage("บันทึกข้อมูลเรียบร้อยแล้ว");
-        loadGuards();
-        onRefresh();
+        lastRequestTimeRef.current = Date.now();
+        await loadGuards();
       } else {
         const json = await res.json();
         alert(json.error || "บันทึกไม่สำเร็จ");
@@ -329,15 +406,22 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
 
   const handleDelete = async (guard: GuardProfile) => {
     if (!confirm(`ลบ “${guard.guardName}” ใช่หรือไม่?`)) return;
+    const previousGuards = guards;
+    lastRequestTimeRef.current = Date.now();
+
+    // Instant optimistic deletion
+    setGuards((prev) => prev.filter((g) => g.id !== guard.id));
+    setMessage(`ลบ ${guard.guardName} แล้ว`);
+
     try {
       const res = await fetch(`/api/guards?id=${encodeURIComponent(guard.id)}`, { method: "DELETE" });
-      if (res.ok) {
-        setMessage(`ลบ ${guard.guardName} แล้ว`);
-        loadGuards();
-        onRefresh();
+      if (!res.ok) {
+        setGuards(previousGuards);
+        alert("ลบไม่สำเร็จ");
       }
     } catch {
-      alert("ลบไม่สำเร็จ");
+      setGuards(previousGuards);
+      alert("เกิดข้อผิดพลาดในการเชื่อมต่อ");
     }
   };
 
@@ -350,9 +434,6 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
   const selectedSite = useMemo(() => {
     return sites.find((s) => s.id === selectedSiteId) || null;
   }, [sites, selectedSiteId]);
-
-  const totalGuardsCount = useMemo(() => guards.filter((g) => g.role !== "employer").length, [guards]);
-  const totalEmployersCount = useMemo(() => guards.filter((g) => g.role === "employer").length, [guards]);
 
   // Shift timings per site from database slots and linePointDetails
   const siteShiftTimings = useMemo(() => {
@@ -384,27 +465,175 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
     return map;
   }, [data?.slots, data?.linePointDetails, data?.lineGroups]);
 
-  // Guards belonging to the selected site (or mapped to this site via webhook events)
+  // Confirmed guards belonging to the selected site (strictly real profiles only)
   const siteGuards = useMemo(() => {
-    if (activeTab === "employers") {
-      return [];
-    }
+    if (activeTab === "employers" || activeTab === "inspectors") return [];
+    const q = memberSearch.trim().toLowerCase();
     return guards.filter((g) => {
       const belongs = g.siteId === selectedSiteId || (g.siteIds && g.siteIds.includes(selectedSiteId));
-      return belongs && g.role !== "employer";
+      if (!belongs || g.role === "employer" || g.role === "inspector" || g.role === "unconfirmed") return false;
+      // Extra safety check: placeholder sender names MUST NOT be in confirmed guards
+      if (g.guardName.startsWith("ผู้ส่ง (") || g.guardName.startsWith("รปภ. (")) return false;
+      if (!q) return true;
+      return (
+        g.guardName.toLowerCase().includes(q) ||
+        (g.displayName && g.displayName.toLowerCase().includes(q)) ||
+        (g.phoneNumber && g.phoneNumber.includes(q)) ||
+        g.id.toLowerCase().includes(q)
+      );
     });
-  }, [guards, selectedSiteId, activeTab]);
+  }, [guards, selectedSiteId, activeTab, memberSearch]);
+
+  // Inspectors (สายตรวจ) across all sites or selected site
+  const siteInspectors = useMemo(() => {
+    const q = memberSearch.trim().toLowerCase();
+    return guards.filter((g) => {
+      const belongs = activeTab === "inspectors" ? true : (g.siteId === selectedSiteId || (g.siteIds && g.siteIds.includes(selectedSiteId)));
+      if (!belongs || g.role !== "inspector") return false;
+      if (!q) return true;
+      return (
+        g.guardName.toLowerCase().includes(q) ||
+        (g.displayName && g.displayName.toLowerCase().includes(q)) ||
+        (g.phoneNumber && g.phoneNumber.includes(q)) ||
+        g.id.toLowerCase().includes(q)
+      );
+    });
+  }, [guards, selectedSiteId, activeTab, memberSearch]);
+
+  // Set of confirmed guard and employer names to prevent ghost unconfirmed duplicates
+  const confirmedNames = useMemo(() => {
+    const set = new Set<string>();
+    for (const g of guards) {
+      if (g.role !== "unconfirmed" && !g.guardName.startsWith("ผู้ส่ง (") && !g.guardName.startsWith("รปภ. (")) {
+        if (g.guardName) {
+          set.add(g.guardName.trim().toLowerCase());
+        }
+        if (g.displayName && !g.displayName.startsWith("ผู้ส่ง (") && !g.displayName.startsWith("รปภ. (")) {
+          set.add(g.displayName.trim().toLowerCase());
+        }
+      }
+    }
+    return set;
+  }, [guards]);
+
+  // Unconfirmed / new members in the selected site
+  const siteUnconfirmed = useMemo(() => {
+    if (activeTab === "employers" || activeTab === "inspectors") return [];
+    const q = memberSearch.trim().toLowerCase();
+    return guards.filter((g) => {
+      const belongs = g.siteId === selectedSiteId || (g.siteIds && g.siteIds.includes(selectedSiteId));
+      const isPlace = g.guardName.startsWith("ผู้ส่ง (") || g.guardName.startsWith("รปภ. (");
+      if (!belongs) return false;
+      if (g.role !== "unconfirmed" && !isPlace) return false;
+      if (g.role === "employer" || g.role === "inspector") return false;
+
+      // If this person has already been confirmed as regular / spare / employer in this site or system, skip duplicate
+      const gName = (g.guardName || "").trim().toLowerCase();
+      const dName = (g.displayName || "").trim().toLowerCase();
+      if (!isPlace && (confirmedNames.has(gName) || confirmedNames.has(dName))) {
+        return false;
+      }
+
+      if (!q) return true;
+      return (
+        g.guardName.toLowerCase().includes(q) ||
+        (g.displayName && g.displayName.toLowerCase().includes(q)) ||
+        (g.phoneNumber && g.phoneNumber.includes(q)) ||
+        g.id.toLowerCase().includes(q)
+      );
+    });
+  }, [guards, selectedSiteId, activeTab, memberSearch, confirmedNames]);
 
   // Employers in the selected site (or all employers if activeTab === 'employers')
   const siteEmployers = useMemo(() => {
-    if (activeTab === "employers") {
-      return guards.filter((g) => g.role === "employer");
-    }
+    const q = memberSearch.trim().toLowerCase();
     return guards.filter((g) => {
-      const belongs = g.siteId === selectedSiteId || (g.siteIds && g.siteIds.includes(selectedSiteId));
-      return belongs && g.role === "employer";
+      const belongs = activeTab === "employers" ? true : (g.siteId === selectedSiteId || (g.siteIds && g.siteIds.includes(selectedSiteId)));
+      if (!belongs || g.role !== "employer") return false;
+      if (!q) return true;
+      return (
+        g.guardName.toLowerCase().includes(q) ||
+        (g.displayName && g.displayName.toLowerCase().includes(q)) ||
+        (g.phoneNumber && g.phoneNumber.includes(q)) ||
+        g.id.toLowerCase().includes(q)
+      );
     });
-  }, [guards, selectedSiteId, activeTab]);
+  }, [guards, selectedSiteId, activeTab, memberSearch]);
+
+  const totalInspectorsCount = useMemo(() => guards.filter((g) => g.role === "inspector").length, [guards]);
+  const totalEmployersCount = useMemo(() => guards.filter((g) => g.role === "employer").length, [guards]);
+  const totalGuardsCount = useMemo(() => guards.filter((g) => (g.role === "regular" || g.role === "spare" || g.role === "head_guard") && !g.guardName.startsWith("ผู้ส่ง (") && !g.guardName.startsWith("รปภ. (")).length, [guards]);
+
+  // Global all unconfirmed members across all sites (including placeholders)
+  const allUnconfirmedMembers = useMemo(() => {
+    const q = memberSearch.trim().toLowerCase();
+    return guards.filter((g) => {
+      const isPlace = g.guardName.startsWith("ผู้ส่ง (") || g.guardName.startsWith("รปภ. (");
+      if (g.role !== "unconfirmed" && !isPlace) return false;
+      if (g.role === "employer" || g.role === "inspector") return false;
+
+      // If this person has already been confirmed as regular / spare / employer, skip duplicate
+      const gName = (g.guardName || "").trim().toLowerCase();
+      const dName = (g.displayName || "").trim().toLowerCase();
+      if (!isPlace && (confirmedNames.has(gName) || confirmedNames.has(dName))) {
+        return false;
+      }
+
+      if (!q) return true;
+      return (
+        g.guardName.toLowerCase().includes(q) ||
+        (g.displayName && g.displayName.toLowerCase().includes(q)) ||
+        (g.phoneNumber && g.phoneNumber.includes(q)) ||
+        g.id.toLowerCase().includes(q)
+      );
+    });
+  }, [guards, memberSearch, confirmedNames]);
+
+  const unconfirmedWithRealNames = useMemo(() => {
+    return allUnconfirmedMembers.filter((g) => !g.guardName.startsWith("ผู้ส่ง (") && !g.guardName.startsWith("รปภ. ("));
+  }, [allUnconfirmedMembers]);
+
+  const unconfirmedPlaceholders = useMemo(() => {
+    return allUnconfirmedMembers.filter((g) => g.guardName.startsWith("ผู้ส่ง (") || g.guardName.startsWith("รปภ. ("));
+  }, [allUnconfirmedMembers]);
+
+  const handleBatchConfirmRealNames = async () => {
+    if (!unconfirmedWithRealNames.length) return;
+    if (!confirm(`⚡ ต้องการยืนยันคนที่มีชื่อจริง/โปรไฟล์จาก LINE ทั้งหมด (${unconfirmedWithRealNames.length} คน) เป็น รปภ. ประจำจุด ทันทีหรือไม่?`)) return;
+
+    const previousGuards = guards;
+    lastRequestTimeRef.current = Date.now();
+
+    const targetIds = new Set(unconfirmedWithRealNames.map((m) => m.id));
+    setGuards((prev) =>
+      prev.map((g) => (targetIds.has(g.id) ? { ...g, role: "regular" } : g))
+    );
+    setMessage(`✅ กำลังยืนยัน รปภ. ที่มีชื่อจริง ${unconfirmedWithRealNames.length} คน...`);
+
+    try {
+      for (const member of unconfirmedWithRealNames) {
+        await fetch("/api/guards", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: member.id,
+            siteId: member.siteId,
+            guardName: member.guardName,
+            displayName: member.displayName,
+            pictureUrl: member.pictureUrl,
+            phoneNumber: member.phoneNumber,
+            preferredShift: member.preferredShift,
+            role: "regular",
+          }),
+        });
+      }
+      setMessage(`✅ ยืนยัน รปภ. ที่มีชื่อจริงเรียบร้อยแล้ว (${unconfirmedWithRealNames.length} คน)`);
+      onRefresh();
+    } catch {
+      setGuards(previousGuards);
+      alert("เกิดข้อผิดพลาดในการบันทึก");
+    }
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
@@ -590,14 +819,347 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
         </div>
       )}
 
-      {/* MASTER-DETAIL SPLIT LAYOUT */}
+      {/* MASTER TOP LEVEL TABS SWITCHER */}
+      <div style={{ display: "flex", gap: "0.5rem", background: "#090d16", padding: "0.4rem", borderRadius: "14px", border: "1px solid #1e293b", flexWrap: "wrap" }}>
+        <button
+          onClick={() => setActiveTab("unconfirmed")}
+          style={{
+            background: activeTab === "unconfirmed" ? "linear-gradient(135deg, #d97706, #b45309)" : "transparent",
+            color: activeTab === "unconfirmed" ? "#ffffff" : "#f59e0b",
+            border: activeTab === "unconfirmed" ? "1px solid #f59e0b" : "none",
+            padding: "0.6rem 1.25rem",
+            borderRadius: "10px",
+            fontWeight: 800,
+            fontSize: "0.88rem",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: "0.45rem",
+            boxShadow: activeTab === "unconfirmed" ? "0 4px 14px rgba(217, 119, 6, 0.4)" : "none",
+          }}
+        >
+          <span>⏳</span>
+          <span>รอยืนยันตัวตนทั้งหมด ({allUnconfirmedMembers.length} คน)</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab("sites")}
+          style={{
+            background: activeTab === "sites" ? "#0284c7" : "transparent",
+            color: activeTab === "sites" ? "#ffffff" : "#94a3b8",
+            border: activeTab === "sites" ? "1px solid #38bdf8" : "none",
+            padding: "0.6rem 1.25rem",
+            borderRadius: "10px",
+            fontWeight: 800,
+            fontSize: "0.88rem",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: "0.45rem",
+          }}
+        >
+          <span>🏢</span>
+          <span>ทำเนียบ รปภ. ประจำจุด ({totalGuardsCount} นาย)</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab("inspectors")}
+          style={{
+            background: activeTab === "inspectors" ? "linear-gradient(135deg, #0284c7, #0369a1)" : "transparent",
+            color: activeTab === "inspectors" ? "#ffffff" : "#38bdf8",
+            border: activeTab === "inspectors" ? "1px solid #38bdf8" : "none",
+            padding: "0.6rem 1.25rem",
+            borderRadius: "10px",
+            fontWeight: 800,
+            fontSize: "0.88rem",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: "0.45rem",
+            boxShadow: activeTab === "inspectors" ? "0 4px 14px rgba(2, 132, 199, 0.4)" : "none",
+          }}
+        >
+          <span>🔍</span>
+          <span>ทีมสายตรวจ ({totalInspectorsCount} นาย)</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab("employers")}
+          style={{
+            background: activeTab === "employers" ? "#f43f5e" : "transparent",
+            color: activeTab === "employers" ? "#ffffff" : "#94a3b8",
+            border: activeTab === "employers" ? "1px solid #fb7185" : "none",
+            padding: "0.6rem 1.25rem",
+            borderRadius: "10px",
+            fontWeight: 800,
+            fontSize: "0.88rem",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: "0.45rem",
+          }}
+        >
+          <span>👔</span>
+          <span>ทำเนียบนายจ้าง / ลูกค้า ({totalEmployersCount} คน)</span>
+        </button>
+      </div>
+
+      {/* 1. GLOBAL UNCONFIRMED MEMBERS HUB (หน้ารวมสมาชิกใหม่ / รอยืนยันทั้งหมดข้ามทุกกลุ่ม) */}
+      {activeTab === "unconfirmed" && (
+        <div style={{ background: "#0f172a", border: "1.5px solid #d97706", borderRadius: "16px", padding: "1.25rem", display: "flex", flexDirection: "column", gap: "1rem", boxShadow: "0 8px 30px rgba(217, 119, 6, 0.15)" }}>
+          
+          {/* HEADER & SMART BATCH CONTROLS */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.85rem", borderBottom: "1px solid rgba(217, 119, 6, 0.25)", paddingBottom: "1rem" }}>
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                <span style={{ fontSize: "1.4rem" }}>⏳</span>
+                <h3 style={{ margin: 0, fontSize: "1.25rem", fontWeight: 900, color: "#f59e0b" }}>
+                  ศูนย์รวมสมาชิกใหม่ & รอยืนยันตัวตน (ทั่วทุกกลุ่ม LINE)
+                </h3>
+              </div>
+              <p style={{ margin: "0.25rem 0 0 0", color: "#94a3b8", fontSize: "0.84rem" }}>
+                รวมทุกคนที่ส่งข้อความในกลุ่ม LINE แต่ยังไม่ได้จัดบทบาท — สามารถเช็คได้ทันทีว่าใครมีรูป/ชื่อแล้ว และกดยืนยันในคลิกเดียว
+              </p>
+            </div>
+
+            {/* BATCH BUTTONS */}
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+              {unconfirmedWithRealNames.length > 0 && (
+                <button
+                  onClick={handleBatchConfirmRealNames}
+                  style={{
+                    background: "linear-gradient(135deg, #059669, #10b981)",
+                    color: "#ffffff",
+                    border: "none",
+                    padding: "0.55rem 1.1rem",
+                    borderRadius: "10px",
+                    fontWeight: 800,
+                    cursor: "pointer",
+                    fontSize: "0.84rem",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.4rem",
+                    boxShadow: "0 4px 14px rgba(16, 185, 129, 0.35)",
+                  }}
+                >
+                  <span>⚡</span>
+                  <span>ยืนยันคนที่มีชื่อจริงเป็น รปภ. ({unconfirmedWithRealNames.length} คน)</span>
+                </button>
+              )}
+              <button
+                onClick={() => handleAutoSyncGuards()}
+                disabled={syncing}
+                style={{
+                  background: "#1e293b",
+                  color: "#cbd5e1",
+                  border: "1px solid #334155",
+                  padding: "0.55rem 0.95rem",
+                  borderRadius: "10px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  fontSize: "0.82rem",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.35rem",
+                }}
+              >
+                <span>{syncing ? "⏳" : "🔄"}</span>
+                <span>{syncing ? "กำลังดึงรูป..." : "ดึงรูป LINE ซ้ำ"}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* METRIC STRIP */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "0.75rem" }}>
+            <div style={{ background: "#181308", border: "1px solid #78350f", borderRadius: "10px", padding: "0.65rem 0.9rem" }}>
+              <div style={{ fontSize: "0.72rem", color: "#f59e0b", fontWeight: 700 }}>⏳ รอยืนยันทั้งหมด</div>
+              <div style={{ fontSize: "1.3rem", fontWeight: 900, color: "#ffffff" }}>{allUnconfirmedMembers.length} <small style={{ fontSize: "0.75rem" }}>คน</small></div>
+            </div>
+            <div style={{ background: "#051e18", border: "1px solid #065f46", borderRadius: "10px", padding: "0.65rem 0.9rem" }}>
+              <div style={{ fontSize: "0.72rem", color: "#34d399", fontWeight: 700 }}>📸 มีรูป/ชื่อจริงจาก LINE แล้ว</div>
+              <div style={{ fontSize: "1.3rem", fontWeight: 900, color: "#34d399" }}>{unconfirmedWithRealNames.length} <small style={{ fontSize: "0.75rem" }}>คน</small></div>
+            </div>
+            <div style={{ background: "#111827", border: "1px solid #374151", borderRadius: "10px", padding: "0.65rem 0.9rem" }}>
+              <div style={{ fontSize: "0.72rem", color: "#9ca3af", fontWeight: 700 }}>⏳ รอดึงข้อมูล (รหัสชั่วคราว)</div>
+              <div style={{ fontSize: "1.3rem", fontWeight: 900, color: "#9ca3af" }}>{unconfirmedPlaceholders.length} <small style={{ fontSize: "0.75rem" }}>คน</small></div>
+            </div>
+          </div>
+
+          {/* SEARCH INPUT */}
+          <div style={{ display: "flex", gap: "0.5rem" }}>
+            <input
+              type="text"
+              placeholder="🔍 ค้นหาชื่อสมาชิก / รหัส / จุดตรวจ..."
+              value={memberSearch}
+              onChange={(e) => setMemberSearch(e.target.value)}
+              style={{ width: "100%", background: "#090d16", border: "1px solid #334155", color: "#ffffff", padding: "0.6rem 0.9rem", borderRadius: "10px", fontSize: "0.86rem" }}
+            />
+          </div>
+
+          {/* UNCONFIRMED CARDS GRID */}
+          {allUnconfirmedMembers.length === 0 ? (
+            <div style={{ background: "#090d16", border: "1px dashed #334155", borderRadius: "12px", padding: "3rem 1.5rem", textAlign: "center", color: "#94a3b8" }}>
+              <div style={{ fontSize: "2.5rem", marginBottom: "0.5rem" }}>🎉</div>
+              <div style={{ fontSize: "1.1rem", fontWeight: 800, color: "#ffffff" }}>ไม่พบสมาชิกที่รอยืนยัน</div>
+              <div style={{ fontSize: "0.85rem", color: "#64748b", marginTop: "0.25rem" }}>ยืนยันบทบาทครบถ้วนทุกคนแล้ว 100%</div>
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: "0.85rem" }}>
+              {allUnconfirmedMembers.map((member) => {
+                const isRealName = !member.guardName.startsWith("ผู้ส่ง (") && !member.guardName.startsWith("รปภ. (");
+                const assignedSite = sites.find((s) => s.id === member.siteId);
+
+                return (
+                  <div
+                    key={member.id}
+                    style={{
+                      background: "linear-gradient(145deg, #131b2e 0%, #0d1527 100%)",
+                      border: isRealName ? "1.5px solid #10b981" : "1.5px solid #d97706",
+                      borderRadius: "14px",
+                      padding: "1rem",
+                      display: "flex",
+                      flexDirection: "column",
+                      justifyContent: "space-between",
+                      gap: "0.75rem",
+                      boxShadow: isRealName ? "0 4px 16px rgba(16, 185, 129, 0.15)" : "0 4px 16px rgba(217, 119, 6, 0.15)",
+                    }}
+                  >
+                    <div>
+                      <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
+                        {member.pictureUrl && member.pictureUrl.startsWith("http") ? (
+                          <img src={member.pictureUrl} alt={member.guardName} style={{ width: "52px", height: "52px", borderRadius: "50%", objectFit: "cover", border: isRealName ? "2px solid #10b981" : "2px solid #f59e0b" }} />
+                        ) : (
+                          <div style={{ width: "52px", height: "52px", borderRadius: "50%", background: "#1e293b", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.5rem", border: isRealName ? "2px solid #10b981" : "2px solid #f59e0b" }}>
+                            {member.pictureUrl || (isRealName ? "👮‍♂️" : "👤")}
+                          </div>
+                        )}
+
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+                            <span style={{ fontSize: "1rem", fontWeight: 900, color: "#ffffff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {member.guardName}
+                            </span>
+                            {isRealName && (
+                              <span style={{ background: "#064e3b", color: "#34d399", fontSize: "0.65rem", padding: "0.1rem 0.35rem", borderRadius: "4px", fontWeight: 800 }}>
+                                📸 รูปจริง
+                              </span>
+                            )}
+                          </div>
+
+                          <div style={{ fontSize: "0.74rem", color: "#f59e0b", marginTop: "0.15rem", display: "flex", alignItems: "center", gap: "0.25rem" }}>
+                            <span>⏳ สมาชิกใหม่ / รอยืนยันบทบาท</span>
+                          </div>
+
+                          <div style={{ fontSize: "0.72rem", color: "#94a3b8", marginTop: "0.2rem" }}>
+                            🏢 {assignedSite ? assignedSite.siteName : member.siteName || "ยังไม่ระบุจุด"}
+                            {member.siteIds && member.siteIds.length > 1 && ` (ส่งใน ${member.siteIds.length} จุด)`}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* ACTION BUTTONS */}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 36px", gap: "0.35rem", borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: "0.65rem" }}>
+                      <button
+                        onClick={() => handleToggleRole(member, "regular")}
+                        style={{
+                          background: "#059669",
+                          color: "#ffffff",
+                          border: "none",
+                          padding: "0.45rem 0.3rem",
+                          borderRadius: "8px",
+                          fontWeight: 800,
+                          fontSize: "0.74rem",
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: "0.2rem",
+                        }}
+                        title="ยืนยันว่าเป็น รปภ. ประจำจุด (บอทส่งสติกเกอร์ตอบรับ)"
+                      >
+                        <span>✅</span> รปภ.
+                      </button>
+
+                      <button
+                        onClick={() => handleToggleRole(member, "inspector")}
+                        style={{
+                          background: "#0369a1",
+                          color: "#e0f2fe",
+                          border: "1px solid #38bdf8",
+                          padding: "0.45rem 0.3rem",
+                          borderRadius: "8px",
+                          fontWeight: 800,
+                          fontSize: "0.74rem",
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: "0.2rem",
+                        }}
+                        title="ตั้งเป็นสายตรวจ / หัวหน้าสายตรวจ (บอทเงียบ 100% ไม่ส่งสติกเกอร์ และไม่แจ้งเตือนซ้ำซ้อน)"
+                      >
+                        <span>🔍</span> สายตรวจ
+                      </button>
+
+                      <button
+                        onClick={() => handleToggleRole(member, "employer")}
+                        style={{
+                          background: "#881337",
+                          color: "#fecdd3",
+                          border: "1px solid #e11d48",
+                          padding: "0.45rem 0.3rem",
+                          borderRadius: "8px",
+                          fontWeight: 800,
+                          fontSize: "0.74rem",
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: "0.2rem",
+                        }}
+                        title="ตั้งเป็นนายจ้าง / ลูกค้า (บอทเงียบ 100% + แจ้งเตือนเข้าสั่งการ)"
+                      >
+                        <span>👔</span> นายจ้าง
+                      </button>
+
+                      <button
+                        onClick={() => openEditModal(member)}
+                        style={{
+                          background: "#1e293b",
+                          color: "#cbd5e1",
+                          border: "1px solid #334155",
+                          padding: "0.45rem",
+                          borderRadius: "8px",
+                          fontWeight: 700,
+                          fontSize: "0.8rem",
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                        title="แก้ไขชื่อ / สลับจุด / เพิ่มเบอร์โทร"
+                      >
+                        ✏️
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* MASTER-DETAIL SPLIT LAYOUT (FOR SITES & EMPLOYERS TABS) */}
+      {activeTab !== "unconfirmed" && (
       <div style={{ display: "grid", gridTemplateColumns: "340px 1fr", gap: "1.25rem", alignItems: "start" }}>
         
         {/* LEFT COLUMN: SITES & GROUPS LIST */}
         <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "14px", padding: "1rem", display: "flex", flexDirection: "column", gap: "0.75rem", maxHeight: "800px", overflowY: "auto" }}>
           
           {/* VIEW TABS */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.35rem", background: "#1e293b", padding: "0.3rem", borderRadius: "8px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "0.25rem", background: "#1e293b", padding: "0.3rem", borderRadius: "8px" }}>
             <button
               onClick={() => setActiveTab("sites")}
               style={{
@@ -607,12 +1169,28 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                 padding: "0.45rem 0.2rem",
                 borderRadius: "6px",
                 fontWeight: 800,
-                fontSize: "0.82rem",
+                fontSize: "0.76rem",
                 cursor: "pointer",
                 textAlign: "center",
               }}
             >
-              🏢 จุดตรวจ ({sites.length})
+              🏢 จุด ({sites.length})
+            </button>
+            <button
+              onClick={() => setActiveTab("inspectors")}
+              style={{
+                background: activeTab === "inspectors" ? "#0369a1" : "transparent",
+                color: activeTab === "inspectors" ? "#ffffff" : "#38bdf8",
+                border: "none",
+                padding: "0.45rem 0.2rem",
+                borderRadius: "6px",
+                fontWeight: 800,
+                fontSize: "0.76rem",
+                cursor: "pointer",
+                textAlign: "center",
+              }}
+            >
+              🔍 สายตรวจ ({totalInspectorsCount})
             </button>
             <button
               onClick={() => setActiveTab("employers")}
@@ -623,7 +1201,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                 padding: "0.45rem 0.2rem",
                 borderRadius: "6px",
                 fontWeight: 800,
-                fontSize: "0.82rem",
+                fontSize: "0.76rem",
                 cursor: "pointer",
                 textAlign: "center",
               }}
@@ -722,9 +1300,15 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.75rem", borderBottom: "1px solid #1e293b", paddingBottom: "0.85rem" }}>
             <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
               <h3 style={{ margin: 0, fontSize: "1.2rem", fontWeight: 800, color: "#ffffff", display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                <span>{activeTab === "employers" ? "👔 รายชื่อนายจ้าง / ลูกค้าทั้งหมด" : `🏢 ${selectedSite?.siteName || "เลือกจุดตรวจ"}`}</span>
+                <span>{activeTab === "inspectors" ? "🔍 รายชื่อทีมสายตรวจ & หัวหน้าชุดทั้งหมด" : activeTab === "employers" ? "👔 รายชื่อนายจ้าง / ลูกค้าทั้งหมด" : `🏢 ${selectedSite?.siteName || "เลือกจุดตรวจ"}`}</span>
               </h3>
               
+              {activeTab === "inspectors" && (
+                <div style={{ color: "#38bdf8", fontSize: "0.82rem", lineHeight: 1.5 }}>
+                  🛡️ เจ้าหน้าที่สายตรวจ: เมื่อพิมพ์ในกลุ่ม LINE บอทจะงดส่งสติกเกอร์ 100% และถ้าสายตรวจคุยกับนายจ้าง ระบบจะไม่ส่งแจ้งเตือนซ้ำซ้อนเข้าศูนย์สั่งการ
+                </div>
+              )}
+
               {activeTab === "sites" && selectedSite && (
                 <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", alignItems: "center" }}>
                   <span style={{ color: "#94a3b8", fontSize: "0.8rem" }}>ลูกค้า: {selectedSite.customerName || "ทั่วไป"}</span>
@@ -762,12 +1346,12 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
               style={{ background: "#0284c7", color: "#ffffff", border: "none", padding: "0.5rem 0.95rem", borderRadius: "8px", fontWeight: 800, cursor: "pointer", fontSize: "0.84rem", display: "flex", alignItems: "center", gap: "0.35rem" }}
             >
               <span>➕</span>
-              <span>เพิ่มคนในจุดนี้</span>
+              <span>{activeTab === "inspectors" ? "เพิ่มสายตรวจ" : activeTab === "employers" ? "เพิ่มนายจ้าง" : "เพิ่มคนในจุดนี้"}</span>
             </button>
           </div>
 
-          {/* SUB-FILTER TABS (ALL / GUARDS / EMPLOYERS) */}
-          {(siteGuards.length > 0 || siteEmployers.length > 0) && (
+          {/* SUB-FILTER TABS (ALL / GUARDS / INSPECTORS / UNCONFIRMED / EMPLOYERS) */}
+          {(siteGuards.length > 0 || siteInspectors.length > 0 || siteEmployers.length > 0 || siteUnconfirmed.length > 0) && (
             <div style={{ display: "flex", gap: "0.4rem", borderBottom: "1px solid #1e293b", paddingBottom: "0.6rem", alignItems: "center", flexWrap: "wrap" }}>
               <button
                 onClick={() => setSiteMemberFilter("all")}
@@ -782,7 +1366,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                   cursor: "pointer",
                 }}
               >
-                📋 แสดงทุกคน ({siteGuards.length + siteEmployers.length})
+                📋 แสดงทุกคน ({siteGuards.length + siteInspectors.length + siteUnconfirmed.length + siteEmployers.length})
               </button>
               <button
                 onClick={() => setSiteMemberFilter("guards")}
@@ -797,8 +1381,40 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                   cursor: "pointer",
                 }}
               >
-                👮‍♂️ รปภ. ประจำจุด ({siteGuards.length})
+                👮‍♂️ รปภ. ({siteGuards.length})
               </button>
+              <button
+                onClick={() => setSiteMemberFilter("inspectors")}
+                style={{
+                  background: siteMemberFilter === "inspectors" ? "#0284c7" : "#1e293b",
+                  color: siteMemberFilter === "inspectors" ? "#ffffff" : "#38bdf8",
+                  border: "none",
+                  padding: "0.35rem 0.75rem",
+                  borderRadius: "6px",
+                  fontSize: "0.76rem",
+                  fontWeight: 800,
+                  cursor: "pointer",
+                }}
+              >
+                🔍 สายตรวจ ({siteInspectors.length})
+              </button>
+              {siteUnconfirmed.length > 0 && (
+                <button
+                  onClick={() => setSiteMemberFilter("unconfirmed")}
+                  style={{
+                    background: siteMemberFilter === "unconfirmed" ? "#f59e0b" : "#1e293b",
+                    color: siteMemberFilter === "unconfirmed" ? "#0f172a" : "#fde68a",
+                    border: "none",
+                    padding: "0.35rem 0.75rem",
+                    borderRadius: "6px",
+                    fontSize: "0.76rem",
+                    fontWeight: 800,
+                    cursor: "pointer",
+                  }}
+                >
+                  ⏳ รอยืนยัน ({siteUnconfirmed.length})
+                </button>
+              )}
               <button
                 onClick={() => setSiteMemberFilter("employers")}
                 style={{
@@ -812,13 +1428,71 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                   cursor: "pointer",
                 }}
               >
-                👤 บุคคลทั่วไป / นายจ้าง ({siteEmployers.length})
+                👔 นายจ้าง ({siteEmployers.length})
               </button>
             </div>
           )}
 
+          {/* MEMBER SEARCH & BATCH ACTIONS TOOLBAR */}
+          {(siteGuards.length > 0 || siteUnconfirmed.length > 0 || siteEmployers.length > 0 || memberSearch.trim().length > 0) && (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", background: "#0b1220", padding: "0.6rem 0.75rem", borderRadius: "10px", border: "1px solid #1e293b" }}>
+              <div style={{ flex: 1, minWidth: "220px", display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                <input
+                  type="text"
+                  placeholder="🔍 ค้นหาชื่อ รปภ. / นายจ้าง / ชื่อไลน์ / เบอร์..."
+                  value={memberSearch}
+                  onChange={(e) => setMemberSearch(e.target.value)}
+                  style={{ width: "100%", background: "#1e293b", border: "1px solid #334155", color: "#ffffff", padding: "0.45rem 0.75rem", borderRadius: "8px", fontSize: "0.82rem" }}
+                />
+                {memberSearch && (
+                  <button onClick={() => setMemberSearch("")} style={{ background: "#334155", border: "none", color: "#cbd5e1", borderRadius: "6px", padding: "0.45rem 0.6rem", cursor: "pointer", fontSize: "0.75rem", fontWeight: 700 }}>
+                    ✕ ล้าง
+                  </button>
+                )}
+              </div>
+
+              {/* BATCH ACTION SHORTCUTS */}
+              <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
+                {siteUnconfirmed.length > 0 && (
+                  <button
+                    onClick={() => {
+                      const resolvedMembers = siteUnconfirmed.filter((m) => !m.guardName.startsWith("ผู้ส่ง (") && !m.guardName.startsWith("รปภ. ("));
+                      if (!resolvedMembers.length) {
+                        alert("ไม่มีสมาชิกที่มีชื่อจริงที่รอยืนยัน (เป็นรหัสชั่วคราวทั้งหมด)");
+                        return;
+                      }
+                      if (!confirm(`ต้องการยืนยันสมาชิกที่มีชื่อ-รูปจริง (${resolvedMembers.length} คน) เป็น รปภ. ประจำจุด ใช่หรือไม่?`)) return;
+                      resolvedMembers.forEach((m) => handleToggleRole(m, "regular"));
+                    }}
+                    style={{ background: "linear-gradient(135deg, #059669, #10b981)", color: "#ffffff", border: "1px solid #34d399", padding: "0.4rem 0.7rem", borderRadius: "6px", fontSize: "0.74rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.3rem" }}
+                    title="ยืนยันทุกคนที่มีชื่อจริงและโปรไฟล์เป็น รปภ. ประจำจุด"
+                  >
+                    <span>✅</span>
+                    <span>ยืนยันคนที่มีชื่อจริงเป็น รปภ.</span>
+                  </button>
+                )}
+                <button
+                  onClick={() => handleBatchSetRole("regular")}
+                  style={{ background: "linear-gradient(135deg, #064e3b, #047857)", color: "#a7f3d0", border: "1px solid #059669", padding: "0.4rem 0.7rem", borderRadius: "6px", fontSize: "0.74rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.3rem" }}
+                  title="ปรับทุกคนในจุดนี้เป็น รปภ. (เปิดระบบบอทตรวจเวรและสติกเกอร์)"
+                >
+                  <span>👮‍♂️</span>
+                  <span>ปรับทุกคนเป็น รปภ.</span>
+                </button>
+                <button
+                  onClick={() => handleBatchSetRole("employer")}
+                  style={{ background: "linear-gradient(135deg, #4c0519, #881337)", color: "#fecdd3", border: "1px solid #e11d48", padding: "0.4rem 0.7rem", borderRadius: "6px", fontSize: "0.74rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.3rem" }}
+                  title="ปรับทุกคนในจุดนี้เป็น นายจ้าง (บอทจะงดส่งสติกเกอร์ 100%)"
+                >
+                  <span>👔</span>
+                  <span>ปรับทุกคนเป็น นายจ้าง</span>
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* MEMBERS LIST */}
-          {siteGuards.length === 0 && siteEmployers.length === 0 ? (
+          {siteGuards.length === 0 && siteUnconfirmed.length === 0 && siteEmployers.length === 0 ? (
             <div style={{ background: "#0b1220", border: "1px dashed #334155", borderRadius: "12px", padding: "3rem 1.5rem", textAlign: "center", color: "#64748b" }}>
               <div style={{ fontSize: "2rem", marginBottom: "0.4rem" }}>👤</div>
               <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "#94a3b8" }}>ยังไม่มีรายชื่อที่ลงทะเบียนในจุดนี้</div>
@@ -939,15 +1613,33 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                             </div>
 
                             {/* ROLE & EDIT BUTTONS */}
-                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.3rem" }}>
-                              <button
-                                onClick={() => handleToggleRole(guard, "employer")}
-                                style={{ background: "#4c0519", color: "#fecdd3", border: "1px solid #e11d48", padding: "0.28rem 0.6rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.25rem" }}
-                                title="ปรับเป็นบุคคลทั่วไป/นายจ้าง บอทจะงดตอบสติกเกอร์ 100%"
-                              >
-                                <span>👤</span>
-                                <span>ปรับเป็นบุคคลทั่วไป / นายจ้าง</span>
-                              </button>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.3rem", flexWrap: "wrap" }}>
+                              <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
+                                <button
+                                  onClick={() => handleToggleRole(guard, "inspector")}
+                                  style={{ background: "#0c4a6e", color: "#bae6fd", border: "1px solid #0284c7", padding: "0.28rem 0.55rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.25rem" }}
+                                  title="ปรับเป็นสายตรวจ บอทจะงดตอบสติกเกอร์ 100%"
+                                >
+                                  <span>🔍</span>
+                                  <span>ตั้งเป็นสายตรวจ</span>
+                                </button>
+                                <button
+                                  onClick={() => handleToggleRole(guard, "employer")}
+                                  style={{ background: "#4c0519", color: "#fecdd3", border: "1px solid #e11d48", padding: "0.28rem 0.55rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.25rem" }}
+                                  title="ปรับเป็นนายจ้าง บอทจะงดตอบสติกเกอร์ 100%"
+                                >
+                                  <span>👔</span>
+                                  <span>ตั้งเป็นนายจ้าง</span>
+                                </button>
+                                <button
+                                  onClick={() => handleToggleRole(guard, "unconfirmed")}
+                                  style={{ background: "#27272a", color: "#fde68a", border: "1px solid #71717a", padding: "0.28rem 0.55rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.25rem" }}
+                                  title="ยกเลิกการยืนยัน ย้ายกลับไปช่องรอยืนยัน บอทจะไม่ตอบรับจนกว่าจะยืนยันใหม่"
+                                >
+                                  <span>⏳</span>
+                                  <span>ยกเลิกยืนยัน</span>
+                                </button>
+                              </div>
 
                               <div style={{ display: "flex", gap: "0.3rem" }}>
                                 <button
@@ -972,9 +1664,188 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                 </div>
               )}
 
+              {/* INSPECTORS SECTION */}
+              {siteInspectors.length > 0 && (siteMemberFilter === "all" || siteMemberFilter === "inspectors" || activeTab === "inspectors") && (
+                <div style={{ marginTop: (siteGuards.length > 0 || siteUnconfirmed.length > 0) && siteMemberFilter === "all" ? "0.75rem" : 0 }}>
+                  <div style={{ fontSize: "0.82rem", fontWeight: 800, color: "#38bdf8", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.35rem" }}>
+                    <span>🔍</span>
+                    <span>ทีมสายตรวจ ({siteInspectors.length} นาย) — บอทเงียบ 100% / ไม่ส่งแจ้งเตือนซ้ำซ้อน</span>
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "0.75rem" }}>
+                    {siteInspectors.map((insp) => (
+                      <div
+                        key={insp.id}
+                        style={{
+                          background: "#0c2135",
+                          border: "1.5px solid #0284c7",
+                          borderRadius: "12px",
+                          padding: "0.85rem",
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "0.6rem",
+                        }}
+                      >
+                        <div style={{ display: "flex", gap: "0.65rem", alignItems: "center" }}>
+                          {insp.pictureUrl && insp.pictureUrl.startsWith("http") ? (
+                            <img src={insp.pictureUrl} alt={insp.guardName} style={{ width: "44px", height: "44px", borderRadius: "50%", objectFit: "cover", border: "2px solid #0284c7" }} />
+                          ) : (
+                            <div style={{ width: "44px", height: "44px", borderRadius: "50%", background: "#0369a1", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.3rem", border: "2px solid #0284c7" }}>
+                              {insp.pictureUrl || "🔍"}
+                            </div>
+                          )}
+
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ fontSize: "0.95rem", fontWeight: 800, color: "#ffffff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {insp.guardName}
+                            </div>
+                            <div style={{ fontSize: "0.74rem", color: "#7dd3fc", fontWeight: 700 }}>
+                              🔍 เจ้าหน้าที่สายตรวจ (บอทเงียบ 100%)
+                            </div>
+                          </div>
+                        </div>
+
+                        {insp.displayName && (
+                          <div style={{ fontSize: "0.72rem", color: "#94a3b8", background: "#0b1220", padding: "0.25rem 0.5rem", borderRadius: "6px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <span>💬 LINE: {insp.displayName}</span>
+                            {insp.siteIds && insp.siteIds.length > 1 && (
+                              <span style={{ color: "#38bdf8", fontWeight: 700, fontSize: "0.68rem" }}>
+                                🌐 ตรวจ {insp.siteIds.length} จุด
+                              </span>
+                            )}
+                          </div>
+                        )}
+
+                        {/* ROLE & ACTION CONTROLS */}
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.3rem", flexWrap: "wrap", borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: "0.5rem" }}>
+                          <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
+                            <button
+                              onClick={() => handleToggleRole(insp, "regular")}
+                              style={{ background: "#064e3b", color: "#a7f3d0", border: "1px solid #10b981", padding: "0.28rem 0.55rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.25rem" }}
+                              title="เปลี่ยนเป็น รปภ. ประจำจุด"
+                            >
+                              <span>✅</span>
+                              <span>เป็น รปภ.</span>
+                            </button>
+                            <button
+                              onClick={() => handleToggleRole(insp, "employer")}
+                              style={{ background: "#4c0519", color: "#fecdd3", border: "1px solid #e11d48", padding: "0.28rem 0.55rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.25rem" }}
+                              title="เปลี่ยนเป็นนายจ้าง"
+                            >
+                              <span>👔</span>
+                              <span>เป็นนายจ้าง</span>
+                            </button>
+                          </div>
+
+                          <div style={{ display: "flex", gap: "0.3rem" }}>
+                            <button
+                              onClick={() => openEditModal(insp)}
+                              style={{ background: "#1e293b", border: "1px solid #334155", color: "#cbd5e1", padding: "0.25rem 0.5rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 700, cursor: "pointer" }}
+                            >
+                              ✏️
+                            </button>
+                            <button
+                              onClick={() => handleDelete(insp)}
+                              style={{ background: "transparent", border: "1px solid #ef4444", color: "#f87171", padding: "0.25rem 0.45rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 700, cursor: "pointer" }}
+                            >
+                              🗑️
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* UNCONFIRMED NEW MEMBERS SECTION */}
+              {siteUnconfirmed.length > 0 && (siteMemberFilter === "all" || siteMemberFilter === "unconfirmed") && (
+                <div style={{ marginTop: (siteGuards.length > 0 || siteInspectors.length > 0) && siteMemberFilter === "all" ? "0.75rem" : 0 }}>
+                  <div style={{ fontSize: "0.82rem", fontWeight: 800, color: "#f59e0b", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.35rem" }}>
+                    <span>⏳</span>
+                    <span>สมาชิกใหม่ / รอยืนยัน ({siteUnconfirmed.length} คน) — บอทยังไม่ส่งสติกเกอร์จนกว่าจะยืนยัน</span>
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "0.75rem" }}>
+                    {siteUnconfirmed.map((member) => (
+                      <div
+                        key={member.id}
+                        style={{
+                          background: "#1c1917",
+                          border: "1.5px solid #f59e0b",
+                          borderRadius: "12px",
+                          padding: "0.85rem",
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "0.6rem",
+                        }}
+                      >
+                        <div style={{ display: "flex", gap: "0.65rem", alignItems: "center" }}>
+                          {member.pictureUrl && member.pictureUrl.startsWith("http") ? (
+                            <img src={member.pictureUrl} alt={member.guardName} style={{ width: "44px", height: "44px", borderRadius: "50%", objectFit: "cover", border: "2px solid #f59e0b" }} />
+                          ) : (
+                            <div style={{ width: "44px", height: "44px", borderRadius: "50%", background: "#451a03", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.3rem", border: "2px solid #f59e0b" }}>
+                              {member.pictureUrl || "⏳"}
+                            </div>
+                          )}
+
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ fontSize: "0.95rem", fontWeight: 800, color: "#ffffff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {member.guardName}
+                            </div>
+                            <div style={{ fontSize: "0.74rem", color: "#fde68a", fontWeight: 700 }}>
+                              ⏳ สมาชิกใหม่ / รอยืนยันบทบาท
+                            </div>
+                          </div>
+                        </div>
+
+                        {member.displayName && (
+                          <div style={{ fontSize: "0.72rem", color: "#94a3b8", background: "#0b1220", padding: "0.25rem 0.5rem", borderRadius: "6px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <span>💬 LINE: {member.displayName}</span>
+                            {member.siteIds && member.siteIds.length > 1 && (
+                              <span style={{ color: "#38bdf8", fontWeight: 700, fontSize: "0.68rem" }}>
+                                🌐 ส่งใน {member.siteIds.length} จุด
+                              </span>
+                            )}
+                          </div>
+                        )}
+
+                        {/* CONFIRMATION ACTIONS */}
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "0.3rem", borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: "0.5rem" }}>
+                          <button
+                            onClick={() => handleToggleRole(member, "regular")}
+                            style={{ background: "#064e3b", color: "#a7f3d0", border: "1px solid #10b981", padding: "0.35rem 0.2rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.2rem" }}
+                            title="ยืนยันว่าเป็น รปภ. ประจำจุด เพื่อเปิดระบบบอทตรวจเวรและส่งสติกเกอร์"
+                          >
+                            <span>✅</span>
+                            <span>รปภ.</span>
+                          </button>
+                          <button
+                            onClick={() => handleToggleRole(member, "inspector")}
+                            style={{ background: "#0c4a6e", color: "#bae6fd", border: "1px solid #0284c7", padding: "0.35rem 0.2rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.2rem" }}
+                            title="ตั้งเป็นสายตรวจ บอทจะงดส่งสติกเกอร์ 100%"
+                          >
+                            <span>🔍</span>
+                            <span>สายตรวจ</span>
+                          </button>
+                          <button
+                            onClick={() => handleToggleRole(member, "employer")}
+                            style={{ background: "#4c0519", color: "#fecdd3", border: "1px solid #e11d48", padding: "0.35rem 0.2rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.2rem" }}
+                            title="ตั้งเป็นนายจ้างหรือบุคคลทั่วไป บอทจะงดส่งสติกเกอร์ 100%"
+                          >
+                            <span>👔</span>
+                            <span>นายจ้าง</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* EMPLOYERS SECTION */}
-              {siteEmployers.length > 0 && siteMemberFilter !== "guards" && (
-                <div style={{ marginTop: siteGuards.length > 0 && siteMemberFilter === "all" ? "0.75rem" : 0 }}>
+              {siteEmployers.length > 0 && (siteMemberFilter === "all" || siteMemberFilter === "employers") && (
+                <div style={{ marginTop: (siteGuards.length > 0 || siteUnconfirmed.length > 0) && siteMemberFilter === "all" ? "0.75rem" : 0 }}>
                   <div style={{ fontSize: "0.82rem", fontWeight: 800, color: "#f87171", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.35rem" }}>
                     <span>👔</span>
                     <span>บุคคลทั่วไป / นายจ้างในกลุ่มนี้ ({siteEmployers.length} คน) — บอทเงียบ 100%</span>
@@ -1025,15 +1896,25 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                         )}
 
                         {/* ACTION BUTTONS */}
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: "0.5rem", gap: "0.3rem" }}>
-                          <button
-                            onClick={() => handleToggleRole(emp, "regular")}
-                            style={{ background: "#064e3b", color: "#a7f3d0", border: "1px solid #10b981", padding: "0.28rem 0.6rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.25rem" }}
-                            title="ยืนยันเป็น รปภ. ประจำจุด เพื่อเปิดระบบบอทตอบรับและเช็คเวร"
-                          >
-                            <span>👮‍♂️</span>
-                            <span>ยืนยันเป็น รปภ. (เปิดบอทตอบ)</span>
-                          </button>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: "0.5rem", gap: "0.3rem", flexWrap: "wrap" }}>
+                          <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
+                            <button
+                              onClick={() => handleToggleRole(emp, "regular")}
+                              style={{ background: "#064e3b", color: "#a7f3d0", border: "1px solid #10b981", padding: "0.28rem 0.55rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.25rem" }}
+                              title="ยืนยันเป็น รปภ. ประจำจุด เพื่อเปิดระบบบอทตอบรับและเช็คเวร"
+                            >
+                              <span>👮‍♂️</span>
+                              <span>เป็น รปภ.</span>
+                            </button>
+                            <button
+                              onClick={() => handleToggleRole(emp, "inspector")}
+                              style={{ background: "#0c4a6e", color: "#bae6fd", border: "1px solid #0284c7", padding: "0.28rem 0.55rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.25rem" }}
+                              title="ตั้งเป็นสายตรวจ บอทจะงดส่งสติกเกอร์ 100% และไม่ส่งแจ้งเตือนซ้ำซ้อน"
+                            >
+                              <span>🔍</span>
+                              <span>ตั้งเป็นสายตรวจ</span>
+                            </button>
+                          </div>
 
                           <div style={{ display: "flex", gap: "0.3rem" }}>
                             <button
@@ -1059,6 +1940,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
           )}
         </div>
       </div>
+      )}
 
       {/* FORM MODAL */}
       {showModal && (
@@ -1124,8 +2006,9 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
                   >
                     <option value="regular">🛡️ รปภ. ประจำจุด (บอทตรวจเวร & ตอบรับสติกเกอร์)</option>
                     <option value="spare">🔄 รปภ. สแปร์กลาง (บอทตรวจเวร & ตอบรับสติกเกอร์)</option>
-                    <option value="head_guard">👮‍♂️ หัวหน้าชุด / สายตรวจ (บอทตรวจเวร & ตอบรับ)</option>
-                    <option value="employer">👤 บุคคลทั่วไป / นายจ้าง / ลูกค้า (บอทเงียบ 100%)</option>
+                    <option value="inspector">🔍 สายตรวจ / หัวหน้าสายตรวจ (บอทเงียบ 100% / ไม่ส่งแจ้งเตือนซ้ำซ้อน)</option>
+                    <option value="employer">👔 นายจ้าง / ลูกค้า (บอทเงียบ 100% + แจ้งเตือนเข้าสั่งการ)</option>
+                    <option value="unconfirmed">⏳ สมาชิกใหม่ / รอยืนยัน (บอทยังไม่ตอบ)</option>
                   </select>
                 </div>
               </div>

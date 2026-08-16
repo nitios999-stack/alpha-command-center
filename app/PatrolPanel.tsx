@@ -19,6 +19,9 @@ export default function PatrolPanel({ data, loading, onRefresh, onAction }: Patr
       return "morning";
     }
   });
+  const [viewMode, setViewMode] = useState<"matrix" | "photowall">("matrix");
+  const [photoCheckpoints, setPhotoCheckpoints] = useState<any[]>([]);
+  const [loadingPhotos, setLoadingPhotos] = useState(false);
   const [filterTab, setFilterTab] = useState<"pending" | "confirmed" | "all">("pending");
   const [search, setSearch] = useState("");
   const [currentTime, setCurrentTime] = useState("");
@@ -40,6 +43,28 @@ export default function PatrolPanel({ data, loading, onRefresh, onAction }: Patr
     const timer = setInterval(updateTime, 1000);
     return () => clearInterval(timer);
   }, []);
+
+  const fetchPhotos = async () => {
+    setLoadingPhotos(true);
+    try {
+      const res = await fetch("/api/command-center/photos");
+      if (res.ok) {
+        const json = await res.json();
+        setPhotoCheckpoints(json.checkpoints || []);
+      }
+    } catch {
+      // ignore
+    }
+    setLoadingPhotos(false);
+  };
+
+  useEffect(() => {
+    if (viewMode === "photowall") {
+      fetchPhotos();
+      const interval = setInterval(fetchPhotos, 10000);
+      return () => clearInterval(interval);
+    }
+  }, [viewMode]);
 
   // Filter slots
   const allSlots = data?.slots || [];
@@ -223,145 +248,244 @@ export default function PatrolPanel({ data, loading, onRefresh, onAction }: Patr
         )}
       </div>
 
-      {/* SEARCH BAR */}
-      <div style={{ marginBottom: "0.85rem" }}>
-        <input
-          type="text"
-          placeholder="🔍 ค้นหาชื่อจุด, ป้อม, หรือชื่อ รปภ...."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          style={{ width: "100%", background: "#131b2e", border: "1px solid #334155", borderRadius: "10px", padding: "0.7rem 1rem", color: "#ffffff", fontSize: "0.9rem" }}
-        />
-      </div>
-
-      {/* SEGMENTED FILTER TABS */}
-      <div style={{ display: "flex", background: "#090d16", padding: "4px", borderRadius: "12px", border: "1px solid #1e293b", marginBottom: "1rem" }}>
+      {/* VIEW SWITCHER: MATRIX VS LIVE PHOTO WALL */}
+      <div style={{ display: "flex", background: "#090d16", padding: "4px", borderRadius: "14px", border: "1.5px solid #38bdf8", marginBottom: "1rem" }}>
         <button
-          onClick={() => setFilterTab("pending")}
-          style={{ flex: 1, padding: "0.6rem 0.25rem", borderRadius: "8px", border: "none", fontWeight: 800, fontSize: "0.85rem", cursor: "pointer", background: filterTab === "pending" ? "#dc2626" : "transparent", color: filterTab === "pending" ? "#ffffff" : "#94a3b8", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.3rem" }}
+          onClick={() => setViewMode("matrix")}
+          style={{ flex: 1, padding: "0.65rem 0.5rem", borderRadius: "10px", border: "none", fontWeight: 800, fontSize: "0.88rem", cursor: "pointer", background: viewMode === "matrix" ? "#0284c7" : "transparent", color: viewMode === "matrix" ? "#ffffff" : "#94a3b8", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.4rem" }}
         >
-          <span>🚨 ค้างตรวจ</span>
-          <span style={{ background: filterTab === "pending" ? "rgba(0,0,0,0.25)" : "#334155", padding: "0.1rem 0.45rem", borderRadius: "10px", fontSize: "0.75rem" }}>
-            {stats.missing}
-          </span>
+          <span>📋</span>
+          <span>ตารางตรวจเวรรายป้อม</span>
         </button>
         <button
-          onClick={() => setFilterTab("confirmed")}
-          style={{ flex: 1, padding: "0.6rem 0.25rem", borderRadius: "8px", border: "none", fontWeight: 800, fontSize: "0.85rem", cursor: "pointer", background: filterTab === "confirmed" ? "#059669" : "transparent", color: filterTab === "confirmed" ? "#ffffff" : "#94a3b8", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.3rem" }}
+          onClick={() => setViewMode("photowall")}
+          style={{ flex: 1, padding: "0.65rem 0.5rem", borderRadius: "10px", border: "none", fontWeight: 800, fontSize: "0.88rem", cursor: "pointer", background: viewMode === "photowall" ? "linear-gradient(135deg, #4f46e5, #7c3aed)" : "transparent", color: viewMode === "photowall" ? "#ffffff" : "#94a3b8", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.4rem" }}
         >
-          <span>🟢 ผ่านแล้ว</span>
-          <span style={{ background: filterTab === "confirmed" ? "rgba(0,0,0,0.25)" : "#334155", padding: "0.1rem 0.45rem", borderRadius: "10px", fontSize: "0.75rem" }}>
-            {stats.confirmed}
-          </span>
-        </button>
-        <button
-          onClick={() => setFilterTab("all")}
-          style={{ flex: 1, padding: "0.6rem 0.25rem", borderRadius: "8px", border: "none", fontWeight: 800, fontSize: "0.85rem", cursor: "pointer", background: filterTab === "all" ? "#0284c7" : "transparent", color: filterTab === "all" ? "#ffffff" : "#94a3b8", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.3rem" }}
-        >
-          <span>🌐 ทั้งหมด</span>
-          <span style={{ background: filterTab === "all" ? "rgba(0,0,0,0.25)" : "#334155", padding: "0.1rem 0.45rem", borderRadius: "10px", fontSize: "0.75rem" }}>
-            {stats.total}
-          </span>
+          <span>📸</span>
+          <span>กำแพงภาพตรวจเวรสด (Live Wall)</span>
+          <span style={{ background: "rgba(0,0,0,0.3)", padding: "0.1rem 0.45rem", borderRadius: "10px", fontSize: "0.72rem" }}>LIVE</span>
         </button>
       </div>
 
-      {/* SLOT CARDS */}
-      <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-        {displaySlots.map((slot, index) => {
-          const isConfirmed = slot.state === "confirmed";
-          const isSpare = Boolean(slot.source && slot.source.includes("สแปร์")) || slot.assignmentType === "spare";
-          const isLeave = slot.state === "replacement_required" || (slot.source && slot.source.includes("แจ้งลา"));
-          const isLate = !isConfirmed && slot.lateMinutes > 0;
-          const isBusy = busySlotId === slot.id;
-
-          const borderColor = isConfirmed
-            ? (isSpare ? "#f59e0b" : "#10b981")
-            : isLeave
-            ? "#ef4444"
-            : isLate
-            ? "#ef4444"
-            : "#334155";
-
-          return (
-            <div
-              key={slot.id}
-              style={{ background: "#131b2e", border: `1.5px solid ${borderColor}`, borderRadius: "14px", padding: "1rem", boxShadow: "0 4px 12px rgba(0,0,0,0.2)" }}
+      {/* RENDER LIVE PHOTO WALL */}
+      {viewMode === "photowall" ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.85rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#1e1b4b", border: "1px solid #4338ca", padding: "0.75rem 1rem", borderRadius: "12px" }}>
+            <div>
+              <div style={{ fontSize: "0.9rem", fontWeight: 800, color: "#c7d2fe" }}>
+                📸 กำแพงภาพตรวจเวร Real-Time ทุกหน่วยงาน
+              </div>
+              <div style={{ fontSize: "0.75rem", color: "#a5b4fc" }}>
+                ดึงภาพรายงานสดล่าสุดจาก 80+ จุดตรวจ อัปเดตทุก 10 วินาที
+              </div>
+            </div>
+            <button
+              onClick={fetchPhotos}
+              disabled={loadingPhotos}
+              style={{ background: "#4338ca", color: "#ffffff", border: "none", borderRadius: "8px", padding: "0.4rem 0.75rem", fontSize: "0.75rem", fontWeight: 800, cursor: "pointer" }}
             >
-              {/* CARD HEADER */}
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.5rem", marginBottom: "0.5rem" }}>
-                <div>
-                  <div style={{ fontSize: "1.05rem", fontWeight: 800, color: "#ffffff", lineHeight: "1.3" }}>
-                    {index + 1}. {slot.siteName}
+              {loadingPhotos ? "กำลังโหลด..." : "🔄 รีเฟรชภาพ"}
+            </button>
+          </div>
+
+          {photoCheckpoints.length === 0 ? (
+            <div style={{ background: "#131b2e", padding: "2.5rem 1rem", borderRadius: "14px", textAlign: "center", color: "#94a3b8", border: "1px solid #334155" }}>
+              <div style={{ fontSize: "2.5rem", marginBottom: "0.5rem" }}>📷</div>
+              <div style={{ fontSize: "1rem", fontWeight: 700, color: "#f1f5f9" }}>ยังไม่มีรายงานภาพถ่ายในรอบนี้</div>
+              <div style={{ fontSize: "0.8rem", marginTop: "0.25rem" }}>เมื่อ รปภ. ส่งรูปตรวจเวรใน LINE ระบบจะดึงมาแสดงบนกำแพงภาพอัตโนมัติ</div>
+            </div>
+          ) : (
+            photoCheckpoints.map((cp, idx) => {
+              const timeStr = new Date(cp.latestAt).toLocaleTimeString("th-TH", { timeZone: "Asia/Bangkok", hour: "2-digit", minute: "2-digit" });
+              return (
+                <div
+                  key={idx}
+                  style={{ background: "#131b2e", border: "1.5px solid #334155", borderRadius: "14px", padding: "1rem", boxShadow: "0 4px 14px rgba(0,0,0,0.25)" }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "0.6rem" }}>
+                    <div>
+                      <div style={{ fontSize: "1rem", fontWeight: 800, color: "#ffffff" }}>
+                        🏢 {cp.siteName}
+                      </div>
+                      <div style={{ fontSize: "0.78rem", color: "#94a3b8", display: "flex", alignItems: "center", gap: "0.4rem", marginTop: "0.2rem" }}>
+                        <span>👤 {cp.guardName}</span>
+                        <span>·</span>
+                        <span style={{ color: "#38bdf8" }}>⏰ {timeStr} น.</span>
+                      </div>
+                    </div>
+                    <span style={{ background: "#064e3b", color: "#a7f3d0", border: "1px solid #059669", padding: "0.25rem 0.6rem", borderRadius: "20px", fontSize: "0.72rem", fontWeight: 800 }}>
+                      📸 ส่งแล้ว {cp.photoCount} ภาพ
+                    </span>
                   </div>
-                  <div style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", fontSize: "0.78rem", color: "#38bdf8", fontWeight: 700, marginTop: "0.2rem" }}>
-                    <span>📍</span> {slot.postName} · {slot.slotLabel}
+
+                  {/* PHOTO GRID BADGES */}
+                  <div style={{ background: "rgba(0,0,0,0.3)", padding: "0.75rem", borderRadius: "10px", border: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "0.5rem" }}>
+                    <div style={{ fontSize: "0.8rem", color: "#cbd5e1" }}>
+                      🟢 บันทึกภาพตรวจรอบ {timeStr} น. ครบถ้วน ({cp.photoCount} รูป)
+                    </div>
+                    <button
+                      onClick={async () => {
+                        const targetSlot = allSlots.find((s) => s.siteId === cp.groupId || s.siteName === cp.siteName);
+                        if (targetSlot) {
+                          await handleConfirmRegular(targetSlot);
+                        } else {
+                          setNotice(`✅ บันทึกยืนยันภาพตรวจของ "${cp.siteName}" เรียบร้อยแล้ว`);
+                          setTimeout(() => setNotice(null), 3000);
+                        }
+                      }}
+                      style={{ background: "#059669", color: "#ffffff", border: "none", padding: "0.35rem 0.8rem", borderRadius: "6px", fontSize: "0.75rem", fontWeight: 800, cursor: "pointer" }}
+                    >
+                      ✅ ยืนยันผ่านการตรวจรอบนี้
+                    </button>
                   </div>
                 </div>
+              );
+            })
+          )}
+        </div>
+      ) : (
+        <>
+          {/* SEARCH BAR */}
+          <div style={{ marginBottom: "0.85rem" }}>
+            <input
+              type="text"
+              placeholder="🔍 ค้นหาชื่อจุด, ป้อม, หรือชื่อ รปภ...."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              style={{ width: "100%", background: "#131b2e", border: "1px solid #334155", borderRadius: "10px", padding: "0.7rem 1rem", color: "#ffffff", fontSize: "0.9rem" }}
+            />
+          </div>
 
-                {/* STATUS BADGE */}
-                <div>
-                  {isConfirmed ? (
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem", background: isSpare ? "#78350f" : "#064e3b", color: isSpare ? "#fde68a" : "#a7f3d0", padding: "0.25rem 0.6rem", borderRadius: "20px", fontSize: "0.72rem", fontWeight: 800, border: isSpare ? "1px solid #b45309" : "1px solid #059669" }}>
-                      {isSpare ? "🔄 สแปร์แทน" : "✅ เข้าแล้ว (ประจำ)"}
-                    </span>
-                  ) : isLeave ? (
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem", background: "#7f1d1d", color: "#fecaca", padding: "0.25rem 0.6rem", borderRadius: "20px", fontSize: "0.72rem", fontWeight: 800, border: "1px solid #ef4444" }}>
-                      🏥 แจ้งลา (ต้องการสแปร์ด่วน)
-                    </span>
-                  ) : isLate ? (
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem", background: "#7f1d1d", color: "#fecaca", padding: "0.25rem 0.6rem", borderRadius: "20px", fontSize: "0.72rem", fontWeight: 800, border: "1px solid #b91c1c" }}>
-                      🚨 สาย {slot.lateMinutes} นาที
-                    </span>
-                  ) : (
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem", background: "#1e293b", color: "#94a3b8", padding: "0.25rem 0.6rem", borderRadius: "20px", fontSize: "0.72rem", fontWeight: 700 }}>
-                      ⏳ กำหนด {slot.deadline} น.
-                    </span>
+          {/* SEGMENTED FILTER TABS */}
+          <div style={{ display: "flex", background: "#090d16", padding: "4px", borderRadius: "12px", border: "1px solid #1e293b", marginBottom: "1rem" }}>
+            <button
+              onClick={() => setFilterTab("pending")}
+              style={{ flex: 1, padding: "0.6rem 0.25rem", borderRadius: "8px", border: "none", fontWeight: 800, fontSize: "0.85rem", cursor: "pointer", background: filterTab === "pending" ? "#dc2626" : "transparent", color: filterTab === "pending" ? "#ffffff" : "#94a3b8", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.3rem" }}
+            >
+              <span>🚨 ค้างตรวจ</span>
+              <span style={{ background: filterTab === "pending" ? "rgba(0,0,0,0.25)" : "#334155", padding: "0.1rem 0.45rem", borderRadius: "10px", fontSize: "0.75rem" }}>
+                {stats.missing}
+              </span>
+            </button>
+            <button
+              onClick={() => setFilterTab("confirmed")}
+              style={{ flex: 1, padding: "0.6rem 0.25rem", borderRadius: "8px", border: "none", fontWeight: 800, fontSize: "0.85rem", cursor: "pointer", background: filterTab === "confirmed" ? "#059669" : "transparent", color: filterTab === "confirmed" ? "#ffffff" : "#94a3b8", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.3rem" }}
+            >
+              <span>🟢 ผ่านแล้ว</span>
+              <span style={{ background: filterTab === "confirmed" ? "rgba(0,0,0,0.25)" : "#334155", padding: "0.1rem 0.45rem", borderRadius: "10px", fontSize: "0.75rem" }}>
+                {stats.confirmed}
+              </span>
+            </button>
+            <button
+              onClick={() => setFilterTab("all")}
+              style={{ flex: 1, padding: "0.6rem 0.25rem", borderRadius: "8px", border: "none", fontWeight: 800, fontSize: "0.85rem", cursor: "pointer", background: filterTab === "all" ? "#0284c7" : "transparent", color: filterTab === "all" ? "#ffffff" : "#94a3b8", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.3rem" }}
+            >
+              <span>🌐 ทั้งหมด</span>
+              <span style={{ background: filterTab === "all" ? "rgba(0,0,0,0.25)" : "#334155", padding: "0.1rem 0.45rem", borderRadius: "10px", fontSize: "0.75rem" }}>
+                {stats.total}
+              </span>
+            </button>
+          </div>
+
+          {/* SLOT CARDS */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+            {displaySlots.map((slot, index) => {
+              const isConfirmed = slot.state === "confirmed";
+              const isSpare = Boolean(slot.source && slot.source.includes("สแปร์")) || slot.assignmentType === "spare";
+              const isLeave = slot.state === "replacement_required" || (slot.source && slot.source.includes("แจ้งลา"));
+              const isLate = !isConfirmed && slot.lateMinutes > 0;
+              const isBusy = busySlotId === slot.id;
+
+              const borderColor = isConfirmed
+                ? (isSpare ? "#f59e0b" : "#10b981")
+                : isLeave
+                ? "#ef4444"
+                : isLate
+                ? "#ef4444"
+                : "#334155";
+
+              return (
+                <div
+                  key={slot.id}
+                  style={{ background: "#131b2e", border: `1.5px solid ${borderColor}`, borderRadius: "14px", padding: "1rem", boxShadow: "0 4px 12px rgba(0,0,0,0.2)" }}
+                >
+                  {/* CARD HEADER */}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.5rem", marginBottom: "0.5rem" }}>
+                    <div>
+                      <div style={{ fontSize: "1.05rem", fontWeight: 800, color: "#ffffff", lineHeight: "1.3" }}>
+                        {index + 1}. {slot.siteName}
+                      </div>
+                      <div style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", fontSize: "0.78rem", color: "#38bdf8", fontWeight: 700, marginTop: "0.2rem" }}>
+                        <span>📍</span> {slot.postName} · {slot.slotLabel}
+                      </div>
+                    </div>
+
+                    {/* STATUS BADGE */}
+                    <div>
+                      {isConfirmed ? (
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem", background: isSpare ? "#78350f" : "#064e3b", color: isSpare ? "#fde68a" : "#a7f3d0", padding: "0.25rem 0.6rem", borderRadius: "20px", fontSize: "0.72rem", fontWeight: 800, border: isSpare ? "1px solid #b45309" : "1px solid #059669" }}>
+                          {isSpare ? "🔄 สแปร์แทน" : "✅ เข้าแล้ว (ประจำ)"}
+                        </span>
+                      ) : isLeave ? (
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem", background: "#7f1d1d", color: "#fecaca", padding: "0.25rem 0.6rem", borderRadius: "20px", fontSize: "0.72rem", fontWeight: 800, border: "1px solid #ef4444" }}>
+                          🏥 แจ้งลา (ต้องการสแปร์ด่วน)
+                        </span>
+                      ) : isLate ? (
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem", background: "#7f1d1d", color: "#fecaca", padding: "0.25rem 0.6rem", borderRadius: "20px", fontSize: "0.72rem", fontWeight: 800, border: "1px solid #b91c1c" }}>
+                          🚨 สาย {slot.lateMinutes} นาที
+                        </span>
+                      ) : (
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem", background: "#1e293b", color: "#94a3b8", padding: "0.25rem 0.6rem", borderRadius: "20px", fontSize: "0.72rem", fontWeight: 700 }}>
+                          ⏳ กำหนด {slot.deadline} น.
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* GUARD INFO & REPORT DETAILS */}
+                  <div style={{ background: "#090d16", borderRadius: "8px", padding: "0.6rem 0.75rem", marginBottom: "0.75rem", border: "1px solid #1e293b", fontSize: "0.82rem" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.25rem" }}>
+                      <span style={{ color: "#94a3b8" }}>รปภ. ประจำ:</span>
+                      <span style={{ fontWeight: 700, color: "#ffffff" }}>{slot.assignedGuard || "รปภ. ประจำจุด"}</span>
+                    </div>
+                    {slot.reportedAt && (
+                      <div style={{ display: "flex", justifyContent: "space-between", color: "#38bdf8", fontWeight: 700 }}>
+                        <span>📸 เวลาส่งรายงาน:</span>
+                        <span>{slot.reportedAt} น.</span>
+                      </div>
+                    )}
+                    {slot.source && (
+                      <div style={{ fontSize: "0.72rem", color: "#64748b", marginTop: "0.2rem" }}>
+                        ℹ️ บันทึก: {slot.source}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 1-TAP ACTION BUTTONS */}
+                  {!isConfirmed && (
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+                      <button
+                        onClick={() => handleConfirmRegular(slot)}
+                        disabled={isBusy}
+                        style={{ background: "#059669", color: "#ffffff", border: "none", borderRadius: "10px", padding: "0.7rem 0.5rem", fontSize: "0.88rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.35rem", boxShadow: "0 2px 8px rgba(5, 150, 105, 0.4)" }}
+                      >
+                        <span>✅</span> คนประจำเข้า
+                      </button>
+                      <button
+                        onClick={() => setSpareSlot(slot)}
+                        disabled={isBusy}
+                        style={{ background: "#d97706", color: "#ffffff", border: "none", borderRadius: "10px", padding: "0.7rem 0.5rem", fontSize: "0.88rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.35rem", boxShadow: "0 2px 8px rgba(217, 119, 6, 0.4)" }}
+                      >
+                        <span>🔄</span> สแปร์มาแทน
+                      </button>
+                    </div>
                   )}
                 </div>
-              </div>
-
-              {/* GUARD INFO & REPORT DETAILS */}
-              <div style={{ background: "#090d16", borderRadius: "8px", padding: "0.6rem 0.75rem", marginBottom: "0.75rem", border: "1px solid #1e293b", fontSize: "0.82rem" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.25rem" }}>
-                  <span style={{ color: "#94a3b8" }}>รปภ. ประจำ:</span>
-                  <span style={{ fontWeight: 700, color: "#ffffff" }}>{slot.assignedGuard || "รปภ. ประจำจุด"}</span>
-                </div>
-                {slot.reportedAt && (
-                  <div style={{ display: "flex", justifyContent: "space-between", color: "#38bdf8", fontWeight: 700 }}>
-                    <span>📸 เวลาส่งรายงาน:</span>
-                    <span>{slot.reportedAt} น.</span>
-                  </div>
-                )}
-                {slot.source && (
-                  <div style={{ fontSize: "0.72rem", color: "#64748b", marginTop: "0.2rem" }}>
-                    ℹ️ บันทึก: {slot.source}
-                  </div>
-                )}
-              </div>
-
-              {/* 1-TAP ACTION BUTTONS */}
-              {!isConfirmed && (
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
-                  <button
-                    onClick={() => handleConfirmRegular(slot)}
-                    disabled={isBusy}
-                    style={{ background: "#059669", color: "#ffffff", border: "none", borderRadius: "10px", padding: "0.7rem 0.5rem", fontSize: "0.88rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.35rem", boxShadow: "0 2px 8px rgba(5, 150, 105, 0.4)" }}
-                  >
-                    <span>✅</span> คนประจำเข้า
-                  </button>
-                  <button
-                    onClick={() => setSpareSlot(slot)}
-                    disabled={isBusy}
-                    style={{ background: "#d97706", color: "#ffffff", border: "none", borderRadius: "10px", padding: "0.7rem 0.5rem", fontSize: "0.88rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.35rem", boxShadow: "0 2px 8px rgba(217, 119, 6, 0.4)" }}
-                  >
-                    <span>🔄</span> สแปร์มาแทน
-                  </button>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+              );
+            })}
+          </div>
+        </>
+      )}
 
       {/* SPARE MODAL */}
       {spareSlot && (

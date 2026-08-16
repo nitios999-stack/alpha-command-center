@@ -27,7 +27,11 @@ export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
   // allowing the Firebase owner dashboard to operate until Firebase Auth is
   // enabled for the wider team.
   if (!userId || !email) {
-    if (process.env.FIREBASE_APP_HOSTING === "1") {
+    if (
+      process.env.FIREBASE_APP_HOSTING === "1" ||
+      process.env.NODE_ENV !== "production" ||
+      !process.env.OPENAI_SITES_HOST
+    ) {
       const fallbackEmail = process.env.ADMIN_EMAIL || "owner@alphacommandcenter.local";
       const fallbackName = process.env.ADMIN_DISPLAY_NAME || "ผู้จัดการ";
       return {

@@ -127,6 +127,39 @@ export function InquiriesPanel({ data, onRefresh }: InquiriesPanelProps) {
     return () => clearInterval(interval);
   }, []);
 
+  const [activeReplyId, setActiveReplyId] = useState<string | null>(null);
+  const [customReplyText, setCustomReplyText] = useState<{ [key: string]: string }>({});
+
+  const handleSendReply = async (inquiryId: string, groupId: string, replyText: string) => {
+    if (!replyText.trim()) return;
+    setBusyId(inquiryId);
+    try {
+      const res = await fetch("/api/inquiries/reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          inquiryId,
+          groupId,
+          messageText: replyText,
+          actor: "เจ้าหน้าที่ศูนย์สั่งการ",
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setMessage(`ส่งข้อความตอบกลับเข้า LINE เรียบร้อยแล้ว`);
+        setActiveReplyId(null);
+        setCustomReplyText((prev) => ({ ...prev, [inquiryId]: "" }));
+        fetchInquiries(true);
+        onRefresh();
+      } else {
+        alert(`ส่งไม่สำเร็จ: ${data.error || "เกิดข้อผิดพลาด"}`);
+      }
+    } catch {
+      alert("เกิดข้อผิดพลาดในการเชื่อมต่อ");
+    }
+    setBusyId(null);
+  };
+
   const handleAction = async (inquiryId: string, action: "acknowledged" | "dispatched" | "resolved") => {
     setBusyId(inquiryId);
     try {
@@ -392,18 +425,136 @@ export function InquiriesPanel({ data, onRefresh }: InquiriesPanelProps) {
                   "{inq.messageText}"
                 </div>
 
+                {/* SMART QUICK-REPLY PRESETS & WEB-TO-LINE CHAT */}
+                <div style={{ background: "rgba(15, 23, 42, 0.6)", padding: "0.6rem 0.8rem", borderRadius: "10px", border: "1px solid rgba(56, 189, 248, 0.15)", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ fontSize: "0.75rem", fontWeight: 800, color: "#38bdf8", display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                      <span>⚡</span>
+                      <span>Smart Quick-Reply ตอบกลับนายจ้างทันที (เข้ากลุ่ม LINE):</span>
+                    </div>
+                    <button
+                      onClick={() => setActiveReplyId(activeReplyId === inq.id ? null : inq.id)}
+                      style={{ background: "transparent", border: "none", color: "#94a3b8", fontSize: "0.72rem", cursor: "pointer", textDecoration: "underline" }}
+                    >
+                      {activeReplyId === inq.id ? "▲ ซ่อนช่องพิมพ์" : "💬 พิมพ์ข้อความเอง..."}
+                    </button>
+                  </div>
+
+                  <div style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
+                    <button
+                      onClick={() => handleSendReply(inq.id, inq.groupId, "รับทราบครับ ประสานงานเจ้าหน้าที่ รปภ. ประจำจุดตรวจสอบให้ทันทีครับ")}
+                      disabled={busyId === inq.id}
+                      style={{ background: "#0c4a6e", color: "#bae6fd", border: "1px solid #0284c7", padding: "0.28rem 0.6rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 700, cursor: "pointer" }}
+                    >
+                      📦 รับทราบ ประสานงาน รปภ. ตรวจสอบทันที
+                    </button>
+                    <button
+                      onClick={() => handleSendReply(inq.id, inq.groupId, "รับทราบครับ กำลังส่งเจ้าหน้าที่เข้าอำนวยความสะดวกและดูแลพื้นที่ครับ")}
+                      disabled={busyId === inq.id}
+                      style={{ background: "#1e1b4b", color: "#c7d2fe", border: "1px solid #4f46e5", padding: "0.28rem 0.6rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 700, cursor: "pointer" }}
+                    >
+                      🚗 รับทราบ กำลังส่งเจ้าหน้าที่เข้าดูแล
+                    </button>
+                    <button
+                      onClick={() => handleSendReply(inq.id, inq.groupId, "รับทราบครับ ได้แจ้ง รปภ. หน้าป้อมอำนวยความสะดวกและแลกบัตรเรียบร้อยครับ")}
+                      disabled={busyId === inq.id}
+                      style={{ background: "#064e3b", color: "#a7f3d0", border: "1px solid #059669", padding: "0.28rem 0.6rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 700, cursor: "pointer" }}
+                    >
+                      🛠️ รับทราบ แจ้ง รปภ. อำนวยความสะดวกแล้ว
+                    </button>
+                    <button
+                      onClick={() => handleSendReply(inq.id, inq.groupId, "รับทราบข้อความเรียบร้อยครับ ขอบคุณที่แจ้งข้อมูลให้ศูนย์สั่งการทราบครับผม")}
+                      disabled={busyId === inq.id}
+                      style={{ background: "#334155", color: "#f1f5f9", border: "1px solid #475569", padding: "0.28rem 0.6rem", borderRadius: "6px", fontSize: "0.72rem", fontWeight: 700, cursor: "pointer" }}
+                    >
+                      💬 รับทราบ ขอบคุณที่แจ้งข้อมูลครับ
+                    </button>
+                  </div>
+
+                  {/* EXPANDABLE CUSTOM CHAT BOX */}
+                  {activeReplyId === inq.id && (
+                    <div style={{ display: "flex", gap: "0.4rem", marginTop: "0.3rem" }}>
+                      <input
+                        type="text"
+                        placeholder="พิมพ์ข้อความที่ต้องการส่งเข้ากลุ่ม LINE นี้โดยตรง..."
+                        value={customReplyText[inq.id] || ""}
+                        onChange={(e) => setCustomReplyText({ ...customReplyText, [inq.id]: e.target.value })}
+                        style={{ flex: 1, background: "#1e293b", border: "1px solid #0284c7", color: "#ffffff", padding: "0.4rem 0.75rem", borderRadius: "6px", fontSize: "0.82rem" }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            handleSendReply(inq.id, inq.groupId, customReplyText[inq.id] || "");
+                          }
+                        }}
+                      />
+                      <button
+                        onClick={() => handleSendReply(inq.id, inq.groupId, customReplyText[inq.id] || "")}
+                        disabled={busyId === inq.id || !(customReplyText[inq.id] || "").trim()}
+                        style={{ background: "linear-gradient(135deg, #0284c7, #0369a1)", color: "#ffffff", border: "none", padding: "0.4rem 0.9rem", borderRadius: "6px", fontSize: "0.78rem", fontWeight: 800, cursor: "pointer" }}
+                      >
+                        📤 ส่งเข้า LINE
+                      </button>
+                    </div>
+                  )}
+                </div>
+
                 {/* ACTION BAR */}
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: "0.6rem", flexWrap: "wrap", gap: "0.5rem" }}>
                   <div style={{ fontSize: "0.75rem", color: "#64748b" }}>
-                    {inq.acknowledgedBy && <span>ผู้ดูแล: {inq.acknowledgedBy}</span>}
+                    {inq.acknowledgedBy && <span>ผู้ดูแล: <strong style={{ color: "#38bdf8" }}>{inq.acknowledgedBy}</strong></span>}
                   </div>
 
-                  <div style={{ display: "flex", gap: "0.4rem" }}>
+                  <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap", alignItems: "center" }}>
+                    {/* QUICK ROLE CLASSIFICATION BUTTONS */}
+                    <button
+                      onClick={async () => {
+                        const sKey = inq.senderKey || inq.id;
+                        await fetch("/api/guards", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            id: sKey,
+                            guardName: inq.senderName,
+                            displayName: inq.senderName,
+                            role: "regular",
+                            siteId: inq.groupId,
+                          }),
+                        });
+                        setMessage(`✅ ยืนยัน "${inq.senderName}" เป็น รปภ. ประจำจุด เรียบร้อยแล้ว`);
+                      }}
+                      style={{ background: "#064e3b", color: "#a7f3d0", border: "1px solid #059669", padding: "0.35rem 0.65rem", borderRadius: "6px", fontSize: "0.74rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.25rem" }}
+                      title="ยืนยันผู้ส่งคนนี้เป็น รปภ. เพื่อเปิดระบบบอทตรวจเวร"
+                    >
+                      <span>👮‍♂️</span>
+                      <span>ยืนยันเป็น รปภ.</span>
+                    </button>
+                    <button
+                      onClick={async () => {
+                        const sKey = inq.senderKey || inq.id;
+                        await fetch("/api/guards", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            id: sKey,
+                            guardName: inq.senderName,
+                            displayName: inq.senderName,
+                            role: "employer",
+                            siteId: inq.groupId,
+                          }),
+                        });
+                        setMessage(`👔 ตั้ง "${inq.senderName}" เป็นนายจ้าง (งดตอบสติกเกอร์ 100%) เรียบร้อยแล้ว`);
+                      }}
+                      style={{ background: "#4c0519", color: "#fecdd3", border: "1px solid #e11d48", padding: "0.35rem 0.65rem", borderRadius: "6px", fontSize: "0.74rem", fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: "0.25rem" }}
+                      title="ตั้งเป็นนายจ้าง บอทจะงดส่งสติกเกอร์ 100%"
+                    >
+                      <span>👔</span>
+                      <span>ตั้งเป็นนายจ้าง</span>
+                    </button>
+
                     {isPending && (
                       <button
                         onClick={() => handleAction(inq.id, "acknowledged")}
                         disabled={busyId === inq.id}
-                        style={{ background: "#0284c7", color: "#ffffff", border: "none", padding: "0.4rem 0.8rem", borderRadius: "6px", fontSize: "0.78rem", fontWeight: 800, cursor: "pointer" }}
+                        style={{ background: "#0284c7", color: "#ffffff", border: "none", padding: "0.35rem 0.75rem", borderRadius: "6px", fontSize: "0.76rem", fontWeight: 800, cursor: "pointer" }}
                       >
                         👁️ รับเรื่อง
                       </button>
@@ -413,7 +564,7 @@ export function InquiriesPanel({ data, onRefresh }: InquiriesPanelProps) {
                       <button
                         onClick={() => handleAction(inq.id, "dispatched")}
                         disabled={busyId === inq.id}
-                        style={{ background: "#4f46e5", color: "#ffffff", border: "none", padding: "0.4rem 0.8rem", borderRadius: "6px", fontSize: "0.78rem", fontWeight: 800, cursor: "pointer" }}
+                        style={{ background: "#4f46e5", color: "#ffffff", border: "none", padding: "0.35rem 0.75rem", borderRadius: "6px", fontSize: "0.76rem", fontWeight: 800, cursor: "pointer" }}
                       >
                         🚗 ส่งสายตรวจเข้าจุด
                       </button>
@@ -423,7 +574,7 @@ export function InquiriesPanel({ data, onRefresh }: InquiriesPanelProps) {
                       <button
                         onClick={() => handleAction(inq.id, "resolved")}
                         disabled={busyId === inq.id}
-                        style={{ background: "#10b981", color: "#ffffff", border: "none", padding: "0.4rem 0.8rem", borderRadius: "6px", fontSize: "0.78rem", fontWeight: 800, cursor: "pointer" }}
+                        style={{ background: "#10b981", color: "#ffffff", border: "none", padding: "0.35rem 0.75rem", borderRadius: "6px", fontSize: "0.76rem", fontWeight: 800, cursor: "pointer" }}
                       >
                         ✅ ปิดเคส
                       </button>

@@ -1,4 +1,5 @@
-import { recordLineWebhookCallback, saveLineWebhookEvent, updateLineGroupProfile, consumeAutoReplyQuota, consumeQueuedSticker, logOutboundAction, evaluateShiftCheckIn, buildMissingShiftAlertSummary, buildShiftAttendanceFlexMessage, confirmSlotFromLineCommand, confirmSlotById, batchApproveSlotsWithPhotos, detectSpecialIncidentsAndLeave, sendIncidentAlertToCommandRoom, recordEmployerInquiry, getEffectiveLineToken } from "../db/command-center";
+import { recordLineWebhookCallback, saveLineWebhookEvent, updateLineGroupProfile, consumeAutoReplyQuota, consumeQueuedSticker, logOutboundAction, evaluateShiftCheckIn, buildMissingShiftAlertSummary, buildShiftAttendanceFlexMessage, confirmSlotFromLineCommand, confirmSlotById, batchApproveSlotsWithPhotos, recordEmployerInquiry, isGuardReportMessage, getEffectiveLineToken, database, bangkokNow, linePointSiteIdentifier } from "../db/command-center";
+import { scheduleGroupStickerDebounce } from "./line-debouncer";
 
 type LineEnv = { LINE_CHANNEL_ACCESS_TOKEN?: string; LINE_CHANNEL_SECRET?: string; LINE_REPORT_SENDER_SALT?: string };
 type LineEvent = {
@@ -171,17 +172,43 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
           const db = database();
           const now = bangkokNow().iso;
           const targetSiteId = linePointSiteIdentifier(group.groupId);
-          const targetIds = Array.from(new Set([group.senderKey, group.rawUserId].filter(Boolean) as string[]));
-          for (const tid of targetIds) {
+          const canonicalId = String(group.rawUserId || group.senderKey || "").trim();
+
+          if (canonicalId) {
+            // Check if profile already exists to preserve custom role (e.g. employer / regular)
+            const existingProfile = (await db.prepare(`
+              SELECT id, role, guard_name, display_name 
+              FROM guard_profiles 
+              WHERE id = ? 
+                 OR (display_name = ? AND display_name IS NOT NULL AND display_name != '')
+                 OR (guard_name = ? AND guard_name NOT LIKE 'ผู้ส่ง (%' AND guard_name NOT LIKE 'รปภ. (%')
+              ORDER BY CASE WHEN id LIKE 'U%' THEN 1 ELSE 2 END, CASE WHEN role != 'unconfirmed' THEN 1 ELSE 2 END
+              LIMIT 1
+            `).bind(canonicalId, profileJson.displayName, profileJson.displayName).first()) as { id: string; role: string; guard_name: string; display_name: string } | null;
+
+            // Preserve role if already set, otherwise default to unconfirmed until admin verifies
+            const targetRole = existingProfile?.role || "unconfirmed";
+
             await db.prepare(`
               INSERT INTO guard_profiles (id, site_id, guard_name, display_name, picture_url, preferred_shift, role, active, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, 'all', 'regular', 1, ?, ?)
+              VALUES (?, ?, ?, ?, ?, 'all', ?, 1, ?, ?)
               ON CONFLICT(id) DO UPDATE SET
                 guard_name = CASE WHEN guard_profiles.guard_name LIKE 'ผู้ส่ง (%' OR guard_profiles.guard_name LIKE 'รปภ. (%' THEN excluded.guard_name ELSE guard_profiles.guard_name END,
                 display_name = COALESCE(excluded.display_name, guard_profiles.display_name),
                 picture_url = COALESCE(excluded.picture_url, guard_profiles.picture_url),
+                role = CASE WHEN guard_profiles.role != 'unconfirmed' THEN guard_profiles.role ELSE excluded.role END,
                 updated_at = excluded.updated_at
-            `).bind(tid, targetSiteId, profileJson.displayName, profileJson.displayName, profileJson.pictureUrl || null, now, now).run().catch(() => {});
+            `).bind(canonicalId, targetSiteId, profileJson.displayName, profileJson.displayName, profileJson.pictureUrl || null, targetRole, now, now).run().catch(() => {});
+
+            // If canonicalId starts with 'U' (real LINE user ID), clean up any old hash rows sharing the same display_name
+            if (canonicalId.startsWith("U")) {
+              await db.prepare(`
+                DELETE FROM guard_profiles 
+                WHERE id != ? 
+                  AND (display_name = ? OR guard_name = ?)
+                  AND id NOT LIKE 'U%'
+              `).bind(canonicalId, profileJson.displayName, profileJson.displayName).run().catch(() => {});
+            }
           }
         }
       } catch {}
@@ -392,52 +419,239 @@ export async function receiveLineWebhook(request: Request, config: LineEnv, sche
         continue;
       }
 
-      // Record any non-command incoming text message into the Employer Sentinel Live Feed (Zero-Quota)
-      if (trimmedText && !isSummaryCommand && !confirmMatch) {
+      const db = database();
+      const uId = group.rawUserId || "";
+      const sKey = group.senderKey || "";
+      let senderProfile: { id: string; guard_name: string; role: string } | null = null;
+      if (uId || sKey) {
+        senderProfile = (await db.prepare(`
+          SELECT id, guard_name, role 
+          FROM guard_profiles 
+          WHERE active = 1 
+            AND (
+              (id = ? AND ? != '') OR 
+              (id = ? AND ? != '')
+            )
+          LIMIT 1
+        `).bind(uId, uId, sKey, sKey).first()) as { id: string; guard_name: string; role: string } | null;
+      }
+
+      const isEmployer = senderProfile?.role === "employer";
+      const isInspector = senderProfile?.role === "inspector";
+      const isConfirmedGuard = senderProfile?.role === "regular" || senderProfile?.role === "spare" || senderProfile?.role === "head_guard";
+      const isUnconfirmed = !isEmployer && !isInspector && !isConfirmedGuard;
+      const isGuardReport = isGuardReportMessage(trimmedText);
+
+      // --- MENTION DETECTION (EMPLOYER & INSPECTOR) ---
+      let matchedEmployerName: string | null = null;
+      let matchedInspectorName: string | null = null;
+
+      if (trimmedText) {
+        // 1. Employer Names
+        const employerProfiles = (await db.prepare(
+          "SELECT guard_name, display_name FROM guard_profiles WHERE role = 'employer' AND active = 1"
+        ).all<any>()).results || [];
+
+        const allEmployerNames = new Set<string>();
+        employerProfiles.forEach((p: any) => {
+          if (p.guard_name && !p.guard_name.startsWith("ผู้ส่ง (") && !p.guard_name.startsWith("รปภ. (")) allEmployerNames.add(p.guard_name.trim());
+          if (p.display_name && !p.display_name.startsWith("ผู้ส่ง (") && !p.display_name.startsWith("รปภ. (")) allEmployerNames.add(p.display_name.trim());
+        });
+        allEmployerNames.add("THANAKORN");
+        allEmployerNames.add("ธนากร");
+
+        const customAlertNamesSetting = (await db.prepare(
+          "SELECT value FROM system_settings WHERE key = 'employer_alert_names'"
+        ).first()) as { value: string } | null;
+
+        if (customAlertNamesSetting?.value) {
+          customAlertNamesSetting.value.split(/[,;\n]/).map((s: string) => s.trim()).filter(Boolean).forEach((s: string) => allEmployerNames.add(s));
+        }
+
+        // Exact full name / word boundary regex matching
+        for (const name of allEmployerNames) {
+          if (!name || name.length < 2) continue;
+          const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const regex = new RegExp(`(?:^|[^a-zA-Z0-9ก-๙])@?${escaped}(?:$|[^a-zA-Z0-9ก-๙])`, "i");
+          if (regex.test(trimmedText)) {
+            matchedEmployerName = name;
+            break;
+          }
+        }
+
+        // 2. Inspector Names & Keywords
+        const inspectorProfiles = (await db.prepare(
+          "SELECT guard_name, display_name FROM guard_profiles WHERE role = 'inspector' AND active = 1"
+        ).all<any>()).results || [];
+
+        const allInspectorNames = new Set<string>(["สายตรวจ", "inspector", "หัวหน้าสายตรวจ", "สายตรวจกลาง"]);
+        inspectorProfiles.forEach((p: any) => {
+          if (p.guard_name && !p.guard_name.startsWith("ผู้ส่ง (") && !p.guard_name.startsWith("รปภ. (")) allInspectorNames.add(p.guard_name.trim());
+          if (p.display_name && !p.display_name.startsWith("ผู้ส่ง (") && !p.display_name.startsWith("รปภ. (")) allInspectorNames.add(p.display_name.trim());
+        });
+
+        for (const name of allInspectorNames) {
+          if (!name || name.length < 2) continue;
+          const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const regex = new RegExp(`(?:^|[^a-zA-Z0-9ก-๙])@?${escaped}(?:$|[^a-zA-Z0-9ก-๙])`, "i");
+          if (regex.test(trimmedText)) {
+            matchedInspectorName = name;
+            break;
+          }
+        }
+
+        // 3. LINE Official Account / Bot Name Mentions (สนง.สายตรวจแอลฟา คอพ / @bmx3192k)
+        const allOaKeywords = new Set<string>([
+          "สนง.สายตรวจแอลฟา คอพ",
+          "สนง.สายตรวจแอลฟาคอฟ",
+          "สนง.สายตรวจ",
+          "สายตรวจแอลฟา",
+          "แอลฟาคอฟ",
+          "แอลฟา คอพ",
+          "bmx3192k",
+          "สนง.",
+          "แอดมิน",
+          "admin",
+          "บอท",
+        ]);
+
+        var matchedOaName: string | null = null;
+        for (const kw of allOaKeywords) {
+          const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const regex = new RegExp(`(?:^|[^a-zA-Z0-9ก-๙])@?${escaped}(?:$|[^a-zA-Z0-9ก-๙])`, "i");
+          if (regex.test(trimmedText)) {
+            matchedOaName = kw;
+            break;
+          }
+        }
+      }
+
+      // Check @all / @everyone emergency vs routine patrol
+      const hasAllTag = trimmedText ? /@(all|everyone)/i.test(trimmedText) : false;
+      const isAllEmergency = hasAllTag && (!isConfirmedGuard || !isGuardReport || /(ด่วน|ช่วย|เปิด|ติด|หาย|พัง|ร้องเรียน|สอบถาม|รบกวน|นายจ้าง|ผู้จัดการ)/i.test(trimmedText));
+
+      // --- ALERT ROUTING RULES ---
+      // 1. Inspector speaking -> DO NOT alert Command Center (avoid duplicate noise)
+      // 2. Employer speaking -> ALWAYS ALERT Command Center (especially if tagging OA, inspector, or asking work)
+      // 3. Guard / Member speaking -> DO NOT alert for "สายตรวจ" keyword (it's part of routine report template footer).
+      //    ONLY alert if guard explicitly mentions an EMPLOYER name (e.g. @THANAKORN) or emergency @all
+      let shouldAlertCommandRoom = false;
+      let alertHeader = "";
+
+      if (isInspector) {
+        shouldAlertCommandRoom = false;
+      } else if (isEmployer) {
+        shouldAlertCommandRoom = true;
+        alertHeader = (typeof matchedOaName !== "undefined" && matchedOaName)
+          ? `🚨 [นายจ้างแท็กเรียก สนง.สายตรวจ / LINE OA: "${matchedOaName}"]`
+          : (matchedInspectorName 
+            ? `🚨 [นายจ้างแท็กเรียกสายตรวจ: "${matchedInspectorName}"]`
+            : (matchedEmployerName ? `🚨 [นายจ้างกล่าวถึง: "${matchedEmployerName}"]` : `🚨 [ข้อความจากนายจ้าง/ลูกค้า]`));
+      } else {
+        // Regular guards or unconfirmed members sending messages
+        if (matchedEmployerName) {
+          shouldAlertCommandRoom = true;
+          alertHeader = `🚨 [รปภ. กล่าวถึงนายจ้าง: "${matchedEmployerName}"]`;
+        } else if (isAllEmergency) {
+          shouldAlertCommandRoom = true;
+          alertHeader = `🚨 [รปภ. แท็ก @ALL ฉุกเฉิน]`;
+        }
+      }
+
+      // Send Push Alert to Command Center LINE Group if required (with 5-minute debounce to save quota)
+      if (shouldAlertCommandRoom && trimmedText && !isSummaryCommand && !confirmMatch && accessToken) {
         recordEmployerInquiry({
           groupId: group.groupId,
           senderKey: group.senderKey,
+          senderName: senderProfile?.guard_name,
           messageText: trimmedText,
         }).catch(() => {});
-      }
 
-      const actionId = `auto-${Date.now()}-${idx}`;
-      const queuedSticker = await consumeQueuedSticker(group.groupId);
-      
-      let stickerPackageId = "";
-      let stickerId = "";
-      let actionType = "auto-reply";
-      let triggerEventId = group.eventId;
+        const targetGroupSetting = (await db.prepare(
+          "SELECT value FROM system_settings WHERE key = 'line_reminder_target_group_id'"
+        ).first()) as { value: string } | null;
 
-      if (queuedSticker) {
-        stickerPackageId = queuedSticker.stickerPackageId;
-        stickerId = queuedSticker.stickerId;
-        actionType = "manual-batch-queued";
-        triggerEventId = queuedSticker.queuedId;
-      } else {
-        // TRIGGER DEBOUNCER ONLY ON THE LAST MESSAGE OF THE BATCH (45s after the last photo/message)
-        if (isLastInBatch) {
-          try {
-            const receivedAt = new Date().toISOString();
-            const debouncerPromise = fetch(`${origin}/api/line/stickers/debouncer`, {
+        if (targetGroupSetting?.value && targetGroupSetting.value !== group.groupId) {
+          // Check if we recently pushed an alert for this group in the last 5 minutes
+          const pushDebounceCutoff = new Date(Date.now() - 5 * 60_000).toISOString();
+          const recentPush = (await db.prepare(`
+            SELECT id FROM line_outbound_audit 
+            WHERE group_id = ? AND action_type = 'push-alert' AND status = 'sent' AND sent_at >= ?
+            LIMIT 1
+          `).bind(group.groupId, pushDebounceCutoff).first()) as any;
+
+          if (!recentPush) {
+            const groupInfo = (await db.prepare("SELECT group_name FROM line_group_registry WHERE id = ?").bind(group.groupId).first()) as { group_name: string } | null;
+            const groupDisplayName = groupInfo?.group_name || `กลุ่ม (${group.groupId.slice(-6)})`;
+            const senderLabel = senderProfile?.guard_name || (isEmployer ? "นายจ้าง/ลูกค้า" : "สมาชิกในกลุ่ม");
+            const alertMsg = `${alertHeader}\n🏢 กลุ่ม: ${groupDisplayName}\n👤 ผู้ส่ง: ${senderLabel}\n💬 ข้อความ:\n"${trimmedText.slice(0, 300)}"\n⏰ เวลา: ${bangkokNow().time} น.`;
+
+            const pushRes = await fetch("https://api.line.me/v2/bot/message/push", {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${accessToken}`
+              },
               body: JSON.stringify({
-                groupId: group.groupId,
-                eventId: group.eventId,
-                replyToken: group.replyToken,
-                receivedAt: receivedAt,
-                accessToken: accessToken
+                to: targetGroupSetting.value,
+                messages: [{ type: "text", text: alertMsg }]
               })
-            }).catch(() => {});
+            }).catch(() => null);
 
-            if (typeof schedule === "function") {
-              schedule(debouncerPromise);
+            if (pushRes && pushRes.ok) {
+              await logOutboundAction({
+                id: `push-${Date.now()}`,
+                groupId: group.groupId,
+                triggerEventId: group.eventId,
+                actionType: "push-alert",
+                status: "sent",
+                skipReason: `✓ ส่งแจ้งเตือนศูนย์สั่งการสำเร็จ (${alertHeader})`,
+              });
             }
-          } catch (e) {
-            // Ignore fetch errors
+          } else {
+            await logOutboundAction({
+              id: `skip-push-debounce-${Date.now()}`,
+              groupId: group.groupId,
+              triggerEventId: group.eventId,
+              actionType: "push-alert",
+              status: "skipped",
+              skipReason: "งดส่ง Push ซ้ำ: เพิ่งส่งแจ้งเตือนกลุ่มนี้ไปในรอบ 5 นาที (บันทึกเข้าระบบแล้ว ประหยัดโควต้า)",
+            });
           }
         }
+      }
+
+      // --- SILENCE RULES FOR BOT ---
+      // If sender is Employer or Inspector -> Bot is 100% SILENT! (No sticker)
+      if (isEmployer || isInspector) {
+        await logOutboundAction({
+          id: `skip-${isEmployer ? "employer" : "inspector"}-${Date.now()}`,
+          groupId: group.groupId,
+          triggerEventId: group.eventId,
+          actionType: "auto-reply-close",
+          stickerPackageId: "11538",
+          stickerId: "51626520",
+          status: "skipped",
+          skipReason: `งดส่งสติกเกอร์: ผู้ส่งคือ${isEmployer ? "นายจ้าง/ลูกค้า" : "สายตรวจ"} "${senderProfile?.guard_name || "เจ้าหน้าที่"}" (บอทเงียบ 100% เพื่อความสะดวกในการคุยงาน)`,
+        });
+        continue;
+      }
+
+      // --- 45-SECOND PATROL REPORT DEBOUNCER FOR GUARDS (ANTI-DOUBLE STICKER & PER-GROUP ISOLATION) ---
+      // When a guard sends messages/photos during duty check-in, the bot waits 45 seconds of silence
+      // before sending exactly 1 acknowledgment sticker. If more photos/messages arrive, the timer resets.
+      const isEligibleForSticker = isLastInBatch && !isEmployer && !isInspector && Boolean(group.replyToken);
+
+      if (isEligibleForSticker) {
+        const effectiveToken = accessToken || (await getEffectiveLineToken()) || undefined;
+        scheduleGroupStickerDebounce({
+          groupId: group.groupId,
+          eventId: group.eventId,
+          replyToken: group.replyToken!,
+          rawUserId: group.rawUserId,
+          senderKey: group.senderKey,
+          accessToken: effectiveToken,
+        });
       }
     }
   }));
