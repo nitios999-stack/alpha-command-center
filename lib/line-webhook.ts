@@ -767,10 +767,11 @@ AND (last_reply_at IS NULL OR last_reply_at <= ?)
         stickerPackageId: "11538",
         stickerId: "51626520",
         status: "error",
-        skipReason: `Exception: ${e?.message || "unknown"}`
+        skipReason: `Exception: ${e?.message || "unknown"}`,
       }).catch(() => { });
     }
   }
+}
 }
 }));
 void schedule;
