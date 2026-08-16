@@ -360,7 +360,7 @@ export async function getEffectiveLineToken(): Promise<string | null> {
         return val;
       }
     }
-  } catch {}
+  } catch { }
   const envToken = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
   if (envToken) return envToken.trim();
   return null;
@@ -577,7 +577,7 @@ async function initializeDatabase() {
     db.prepare("ALTER TABLE line_webhook_events ADD COLUMN raw_user_id TEXT"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_events_report_candidate ON line_webhook_events(group_id, message_type, received_at)"),
   ]);
-  await db.prepare("UPDATE line_auto_reply_configs SET cooldown_minutes = 30 WHERE cooldown_minutes = 3").run().catch(() => {});
+  await db.prepare("UPDATE line_auto_reply_configs SET cooldown_minutes = 30 WHERE cooldown_minutes = 3").run().catch(() => { });
   await db.prepare(`
     DELETE FROM employer_inquiries 
     WHERE message_text LIKE '%รปภ%' 
@@ -588,7 +588,7 @@ async function initializeDatabase() {
        OR message_text LIKE '%ปกติครับ%' 
        OR message_text LIKE '%ปกติค่ะ%'
        OR message_text LIKE '%หน่วยงานโครงการ%'
-  `).run().catch(() => {});
+  `).run().catch(() => { });
 
   // Deduplicate and cleanup old senderKey hash rows that share the same real display_name
   await db.prepare(`
@@ -604,7 +604,7 @@ async function initializeDatabase() {
           AND gp2.display_name = guard_profiles.display_name
           AND (gp2.role = 'regular' OR gp2.role = 'spare' OR gp2.role = 'employer' OR gp2.id LIKE 'U%')
       )
-  `).run().catch(() => {});
+  `).run().catch(() => { });
 
   const seedSetting = await db.prepare("SELECT value FROM system_settings WHERE key = 'demo_seeded'").first<{ value: string }>();
   if (!seedSetting) {
@@ -791,15 +791,15 @@ export async function syncTodayCoverageSlotsFromTemplates(operationalDate?: stri
             updated_at = ?
         WHERE site_id = ? AND wave = ? AND operational_date = ?
       `).bind(
-        cleanDeadline, 
-        String(t.site_name), 
-        String(t.customer_name), 
+        cleanDeadline,
+        String(t.site_name),
+        String(t.customer_name),
         String(t.post_name || "จุดประจำ"),
         String(t.slot_label || "ช่อง 1"),
-        assignedGuard, 
-        nowIso, 
-        String(t.site_id), 
-        String(t.wave), 
+        assignedGuard,
+        nowIso,
+        String(t.site_id),
+        String(t.wave),
         date
       )
     );
@@ -849,7 +849,7 @@ export async function syncTodayCoverageSlotsFromTemplates(operationalDate?: stri
           AND st.active = 1
           AND os.active = 1
       )
-  `).bind(date).run().catch(() => {});
+  `).bind(date).run().catch(() => { });
 }
 
 export async function getDashboard() {
@@ -1464,7 +1464,7 @@ export async function sendLineConnectionTest(input: { groupId: string; actor: st
   const token = lineEnvironment().LINE_CHANNEL_ACCESS_TOKEN;
   if (!cleanId) throw new Error("ไม่พบกลุ่ม LINE ที่ต้องการทดสอบ");
   if (!token) throw new Error("ยังไม่ได้ตั้งค่า Channel access token ในระบบที่ปลอดภัย");
-  
+
   const group = await database().prepare("SELECT group_name FROM line_group_registry WHERE id = ? OR id = ?").bind(cleanId, rawGroupId).first<D1Row>();
   const groupName = group ? String(group.group_name) : cleanId;
 
@@ -1472,8 +1472,8 @@ export async function sendLineConnectionTest(input: { groupId: string; actor: st
   if (cleanId !== rawGroupId) {
     const db = database();
     const now = bangkokNow().iso;
-    await db.prepare("INSERT INTO line_group_registry (id, group_name, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, updated_at = excluded.updated_at").bind(cleanId, groupName, now).run().catch(() => {});
-    await db.prepare("DELETE FROM line_group_registry WHERE id = ?").bind(rawGroupId).run().catch(() => {});
+    await db.prepare("INSERT INTO line_group_registry (id, group_name, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET group_name = excluded.group_name, updated_at = excluded.updated_at").bind(cleanId, groupName, now).run().catch(() => { });
+    await db.prepare("DELETE FROM line_group_registry WHERE id = ?").bind(rawGroupId).run().catch(() => { });
   }
 
   const response = await fetch("https://api.line.me/v2/bot/message/push", {
@@ -2059,7 +2059,7 @@ export async function consumeAutoReplyQuota(groupId: string, eventId: string): P
 
   const [currentHourStr, currentMinuteStr] = now.time.split(':');
   const currentStr = `${currentHourStr}:${currentMinuteStr}`;
-  
+
   if (currentStr < config.active_hours_start || currentStr > config.active_hours_end) {
     return { allowed: false, reason: "outside_active_hours" };
   }
@@ -2105,8 +2105,8 @@ export async function logOutboundAction(input: {
   groupId: string;
   triggerEventId?: string;
   actionType: string;
-  stickerPackageId: string;
-  stickerId: string;
+  stickerPackageId?: string;
+  stickerId?: string;
   status: string;
   skipReason?: string;
 }) {
@@ -2116,8 +2116,8 @@ export async function logOutboundAction(input: {
     INSERT INTO line_outbound_audit (id, group_id, trigger_event_id, action_type, sticker_package_id, sticker_id, status, skip_reason, sent_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
-    input.id, input.groupId, input.triggerEventId || null, input.actionType, 
-    input.stickerPackageId, input.stickerId, input.status, input.skipReason || null, bangkokNow().iso
+    input.id, input.groupId, input.triggerEventId || null, input.actionType,
+    input.stickerPackageId || "", input.stickerId || "", input.status, input.skipReason || null, bangkokNow().iso
   ).run();
 }
 
@@ -2127,21 +2127,21 @@ export async function logOutboundAction(input: {
 
 // 1. คำที่บ่งบอกว่าเป็นการออกเวร/ส่งมอบเวรของกะเดิม (Outgoing Shift / Leaving Handover)
 const SHIFT_LEAVE_KEYWORDS = [
-  "ออกเวร", "เลิกงาน", "เลิกกะ", "ลงเวร", "หมดกะ", "หมดเวลา", "กลับบ้าน", 
+  "ออกเวร", "เลิกงาน", "เลิกกะ", "ลงเวร", "หมดกะ", "หมดเวลา", "กลับบ้าน",
   "ส่งเวร", "ส่งมอบแล้ว", "ส่งมอบงาน", "กลับแล้ว", "บ๊ายบาย", "จบกะ", "ส่งมอบหน้าที่", "เลิกผลัด"
 ];
 
 // 2. คำที่บ่งบอกว่าเป็นการคุยงานของนายจ้าง / ลูกค้า / นิติบุคคล / ลูกบ้าน (Client / Employer Phrases)
 const CLIENT_EMPLOYER_KEYWORDS = [
-  "ฝากดู", "แจ้งเรื่อง", "ช่วยดู", "ทำไม", "รปภ.อยู่ไหน", "นิติ", "ช่าง", 
-  "พัสดุ", "กุญแจ", "ประตูค้าง", "น้ำรั่ว", "ขยะ", "ลูกค้า", "ร้องเรียน", 
+  "ฝากดู", "แจ้งเรื่อง", "ช่วยดู", "ทำไม", "รปภ.อยู่ไหน", "นิติ", "ช่าง",
+  "พัสดุ", "กุญแจ", "ประตูค้าง", "น้ำรั่ว", "ขยะ", "ลูกค้า", "ร้องเรียน",
   "ขอความร่วมมือ", "ที่จอดรถ", "บอร์ด", "กรรมการ", "ช่วยตาม", "เช็คกล้อง", "ทำไมไม่มีรปภ", "รปภไปไหน"
 ];
 
 // 3. คำที่ รปภ. มักใช้เมื่อเข้าเวร/รับมอบเวร (Incoming Guard Check-in Phrases)
 const GUARD_ENTER_KEYWORDS = [
-  "รับมอบเวร", "รับเวร", "เข้าเวร", "พร้อมปฏิบัติหน้าที่", "ว.4", "ว4", 
-  "ผลัด1", "ผลัด2", "ผลัดเช้า", "ผลัดดึก", "เข้าจุด", "ประจำจุด", "เริ่มงาน", 
+  "รับมอบเวร", "รับเวร", "เข้าเวร", "พร้อมปฏิบัติหน้าที่", "ว.4", "ว4",
+  "ผลัด1", "ผลัด2", "ผลัดเช้า", "ผลัดดึก", "เข้าจุด", "ประจำจุด", "เริ่มงาน",
   "รายงานผลัด", "รายงานเข้าเวร", "เข้าป้อม", "สแตนด์บาย", "standby", "เหตุการณ์ปกติ",
   "มาแล้ว", "ถึงแล้ว", "ป้อมหน้า", "ป้อมหลัง"
 ];
@@ -2181,7 +2181,7 @@ export async function evaluateShiftCheckIn(input: {
   try {
     await ensureDatabase();
     const db = database();
-    
+
     // 1. ค้นหา site_id ที่ผูกกับกลุ่มนี้
     const group = (await db.prepare(
       "SELECT site_id, group_name FROM line_groups WHERE id = ?"
@@ -2291,7 +2291,7 @@ export async function evaluateShiftCheckIn(input: {
 
       if (shouldConfirm) {
         const lateMins = Math.max(0, currentMinutes - deadlineMins);
-        
+
         const isSpareExplicit = cleanText && (/สแปร์|แทน|แทนเวร|สแปร์แทน/.test(cleanText));
         const isSpare = isSpareExplicit || registeredGuard?.role === "spare" || registeredGuard?.site_id === "all";
         const guardId = String(registeredGuard?.id || input.rawUserId || input.senderKey || "guard-anon").trim();
@@ -2305,7 +2305,7 @@ export async function evaluateShiftCheckIn(input: {
             const parsed = JSON.parse(slot.source);
             if (Array.isArray(parsed.checkedIn)) checkedInGuards = parsed.checkedIn;
           }
-        } catch {}
+        } catch { }
 
         // Add this distinct guard ID if not already present
         const existingIdx = checkedInGuards.findIndex((g) => g.id === guardId || g.name === guardName);
@@ -2350,24 +2350,24 @@ export async function evaluateShiftCheckIn(input: {
         `).bind(newState, now.time, sourcePayload, lateMins, now.iso, slot.id).run();
 
         await addAudit(
-          "coverage_slot", 
-          slot.id, 
-          isFull ? "shift_full_attendance" : "shift_partial_checkin", 
-          "LINE Multi-Guard ID Check-in Engine", 
+          "coverage_slot",
+          slot.id,
+          isFull ? "shift_full_attendance" : "shift_partial_checkin",
+          "LINE Multi-Guard ID Check-in Engine",
           `รปภ. [${guardName}] เข้าเวรจุด ${slot.site_name} (${checkedInGuards.length}/${requiredHeadcount} คน) เวลา ${now.time}${lateMins > 0 ? ` (สาย ${lateMins} นาที)` : ""} · ${isFull ? "✅ มาครบแล้ว" : `⏳ รออีก ${requiredHeadcount - checkedInGuards.length} คน`}`
         );
 
-        return { 
-          checkedIn: true, 
-          siteName: slot.site_name, 
-          deadline: slot.deadline, 
+        return {
+          checkedIn: true,
+          siteName: slot.site_name,
+          deadline: slot.deadline,
           lateMinutes: lateMins,
           checkedCount: checkedInGuards.length,
           target: requiredHeadcount,
           isFull
         };
       }
-      }
+    }
 
     return { checkedIn: false };
   } catch (err) {
@@ -2394,7 +2394,7 @@ export async function confirmSlotById(input: {
   const currentMins = minuteFromTime(now.time);
   const lateMinutes = Math.max(0, currentMins - deadlineMins);
 
-  const guardTitle = guardType === "spare" 
+  const guardTitle = guardType === "spare"
     ? (input.spareName ? `รปภ. สแปร์แทน (${input.spareName})` : "รปภ. สแปร์แทนเวร")
     : (slot.assigned_guard ? `รปภ. ประจำ (${slot.assigned_guard})` : "รปภ. ประจำจุด");
 
@@ -2520,13 +2520,13 @@ export async function buildShiftAttendanceFlexMessage(input?: { wave?: "morning"
 
   const isClear = !summary.hasMissing;
   const headerBgColor = isClear ? "#059669" : summary.wave === "evening" ? "#4f46e5" : "#d97706";
-  const headerTitle = isClear 
-    ? "✅ กำลังพลเข้าเวรครบถ้วน 100%" 
+  const headerTitle = isClear
+    ? "✅ กำลังพลเข้าเวรครบถ้วน 100%"
     : `🚨 สรุปกำลังพลค้างเข้าเวร (${summary.wave === "evening" ? "ผลัดดึก" : "ผลัดเช้า"})`;
 
   // สร้างแถวรายการจุดที่ขาดพร้อมปุ่มกด Postback 2 ปุ่ม: [ประจำ] และ [สแปร์แทน]
   const missingRows: any[] = [];
-  
+
   if (summary.hasMissing && summary.missingSlots) {
     summary.missingSlots.slice(0, 10).forEach((slot: any, idx: number) => {
       const deadline = slot.deadline || "00:00";
@@ -2664,32 +2664,32 @@ export async function buildShiftAttendanceFlexMessage(input?: { wave?: "morning"
       paddingAll: "12px",
       contents: isClear
         ? [
-            {
-              type: "text",
-              text: `🎉 ยอดเยี่ยม! กำลังพลทุกจุดรายงานตัวครบถ้วน 100% เรียบร้อยแล้ว`,
-              size: "sm",
-              color: "#16a34a",
-              weight: "bold",
-              align: "center",
-              margin: "md",
-            },
-          ]
+          {
+            type: "text",
+            text: `🎉 ยอดเยี่ยม! กำลังพลทุกจุดรายงานตัวครบถ้วน 100% เรียบร้อยแล้ว`,
+            size: "sm",
+            color: "#16a34a",
+            weight: "bold",
+            align: "center",
+            margin: "md",
+          },
+        ]
         : [
-            {
-              type: "text",
-              text: `❌ รายชื่อจุดและป้อมที่ยังค้างเข้าเวร (${summary.missingCount} นาย):`,
-              size: "xs",
-              weight: "bold",
-              color: "#ef4444",
-              margin: "none",
-            },
-            {
-              type: "box",
-              layout: "vertical",
-              margin: "sm",
-              contents: missingRows,
-            },
-          ],
+          {
+            type: "text",
+            text: `❌ รายชื่อจุดและป้อมที่ยังค้างเข้าเวร (${summary.missingCount} นาย):`,
+            size: "xs",
+            weight: "bold",
+            color: "#ef4444",
+            margin: "none",
+          },
+          {
+            type: "box",
+            layout: "vertical",
+            margin: "sm",
+            contents: missingRows,
+          },
+        ],
     },
     footer: {
       type: "box",
@@ -2770,7 +2770,7 @@ export async function buildShiftAttendanceFlexMessage(input?: { wave?: "morning"
 export async function getShiftGroupConfigurations() {
   await ensureDatabase();
   const db = database();
-  
+
   // ดึงกลุ่มจากทุกแหล่ง ทั้ง registry, groups, และ webhook events
   const groupsResult = await db.prepare(`
     SELECT DISTINCT 
@@ -2859,7 +2859,7 @@ export async function getShiftGroupConfigurations() {
     const eveningShift = templates.find((t) => t.wave === "evening");
     const isConfigured = Boolean(g.site_id && g.site_active === 1 && (morningShift || eveningShift));
     const isCommandRoom = g.group_id === commandTargetGroupId;
-    
+
     const replyConfig = autoReplyByGroup.get(g.group_id);
     const autoReplyEnabled = isCommandRoom ? false : (replyConfig ? replyConfig.mode !== "disabled" : true);
 
@@ -3163,7 +3163,7 @@ export async function updateGroupShiftConfiguration(input: {
     const registry = (await db.prepare("SELECT group_name, picture_url FROM line_group_registry WHERE id = ?").bind(input.groupId).first()) as any;
     const groupName = registry?.group_name || `กลุ่ม LINE ${input.groupId.slice(-6)}`;
     const siteId = linePointSiteIdentifier(input.groupId);
-    
+
     await db.batch([
       db.prepare("INSERT OR IGNORE INTO operational_sites (id, site_name, customer_name, active, created_at, updated_at) VALUES (?, ?, 'ยังไม่ระบุลูกค้า', 1, ?, ?)").bind(siteId, groupName, now, now),
       db.prepare("INSERT OR IGNORE INTO line_groups (id, site_id, group_name, picture_url, updated_at) VALUES (?, ?, ?, ?, ?)").bind(input.groupId, siteId, groupName, registry?.picture_url || null, now),
@@ -3437,8 +3437,8 @@ export async function confirmSlotFromLineCommand(input: {
     };
   }
 
-  const guardTitle = isSpare 
-    ? "รปภ. สแปร์แทนเวร" 
+  const guardTitle = isSpare
+    ? "รปภ. สแปร์แทนเวร"
     : (targetSlot.assigned_guard ? `รปภ. ประจำ (${targetSlot.assigned_guard})` : "รปภ. ประจำจุด");
 
   const deadlineMins = minuteFromTime(targetSlot.deadline || "00:00");
@@ -3533,7 +3533,7 @@ export async function purgeAllLegacyEventsAndPlaceholders(actor = "admin"): Prom
 }> {
   await ensureDatabase();
   const db = database();
-  
+
   // 1. Delete all fake placeholder guards, legacy hashes, and bot accounts
   const gRes = await db.prepare(`
     DELETE FROM guard_profiles 
@@ -3595,7 +3595,7 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
         userSiteMap.set(u, set);
       }
     }
-  } catch {}
+  } catch { }
 
   // 3. Fetch all active guard and employer profiles
   let query = `
@@ -3617,7 +3617,7 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
   query += " ORDER BY gp.updated_at DESC, gp.created_at DESC";
 
   const rows = (await db.prepare(query).bind(...params).all<any>()).results || [];
-  
+
   // Deduplicate and merge profiles that share the same display_name / guard_name
   const mergedMap = new Map<string, GuardProfile>();
 
@@ -3640,8 +3640,8 @@ export async function getGuardProfiles(siteId?: string): Promise<GuardProfile[]>
 
     // Deduplication Key: Canonical LINE Display Name if resolved, or raw uId
     const isPlaceholder = !canonicalRealName;
-    const dedupKey = canonicalRealName 
-      ? `name:${canonicalRealName.trim().toLowerCase()}` 
+    const dedupKey = canonicalRealName
+      ? `name:${canonicalRealName.trim().toLowerCase()}`
       : `id:${uId}`;
 
     const allSites = Array.from(userSiteMap.get(uId) || []);
@@ -3754,7 +3754,7 @@ export async function saveGuardProfile(data: {
       UPDATE guard_profiles 
       SET role = ?, updated_at = ?
       WHERE (display_name = ? AND ? IS NOT NULL) OR (guard_name = ? AND guard_name NOT LIKE 'ผู้ส่ง (%' AND guard_name NOT LIKE 'รปภ. (%')
-    `).bind(role, now, dName, dName, name).run().catch(() => {});
+    `).bind(role, now, dName, dName, name).run().catch(() => { });
   }
 
   await addAudit("guard_profile", id, "save", "admin", `บันทึกข้อมูล รปภ. ${name} (สถานะ: ${role})`);
@@ -3965,7 +3965,7 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
                       profilesFetched++;
                     }
                   }
-                } catch {}
+                } catch { }
               }
 
               const profile = profileCache.get(uId);
@@ -4061,7 +4061,7 @@ export async function autoSyncGuardsFromLine(actor = "admin"): Promise<{
                 profilesFetched++;
               }
             }
-          } catch {}
+          } catch { }
         })
       );
     }
@@ -4298,13 +4298,13 @@ export function classifyEmployerMessage(text: string): {
 export function isGuardReportMessage(text: string): boolean {
   if (!text) return false;
   const clean = text.trim();
-  
+
   // Guard check-in / patrol keywords
   const guardRegex = /(?:รปภ\.?|ว\.4|ว\.24|ว\.00|ว\.8|ว\.60|ผลัด|กะเช้า|กะดึก|ผลัดเช้า|ผลัดดึก|เข้าเวร|ออกเวร|ส่งเวร|รับเวร|ตรวจแล้ว|ออกตรวจ|เดินตรวจ|ลาดตระเวน|ตรวจเช็ค|ตรวจพื้นที่|เหตุการณ์ทั่วไป|เหตุการณ์ปกติ|สถานการณ์ปกติ|ปกติครับ|ปกติค่ะ|เรียบร้อยครับ|เรียบร้อยค่ะ|ประจำป้อม|ป้อม|สแปร์|สายตรวจ|หน่วยงานโครงการ)/i;
-  
+
   // Time pattern e.g. 02.00 น. or 19.00น.
   const timePattern = /\b\d{1,2}[\.:]\d{2}\s*น\.?/i;
-  
+
   // Date pattern e.g. 16 สิงหาคม or วันที่ 16
   const datePattern = /(?:วันที่\s*\d{1,2}|\d{1,2}\s*(?:มกราคม|กุมภาพันธ์|มีนาคม|เมษายน|พฤษภาคม|มิถุนายน|กรกฎาคม|สิงหาคม|กันยายน|ตุลาคม|พฤศจิกายน|ธันวาคม|ส\.ค\.|ก\.ย\.|ต\.ค\.|พ\.ย\.|ธ\.ค\.|ม\.ค\.|ก\.พ\.|มี\.ค\.|เม\.ย\.|พ\.ค\.|มิ\.ย\.|ก\.ค\.))/i;
 
@@ -4556,7 +4556,7 @@ export async function getLineBotInfo(): Promise<{
   if (!token) {
     return { configured: false, valid: false, error: "ยังไม่ได้ระบุ LINE Channel Access Token" };
   }
-  
+
   try {
     const res = await fetch("https://api.line.me/v2/bot/info", {
       headers: { Authorization: `Bearer ${token}` },
@@ -4619,7 +4619,7 @@ export async function saveLineAccessToken(token: string, actor = "admin"): Promi
     await addAudit("system_setting", "line_token", "updated", actor, `อัปเดต LINE Channel Access Token สำหรับบอท ${json.displayName || json.basicId}`);
 
     // Trigger autoSyncGuardsFromLine in background
-    autoSyncGuardsFromLine(actor).catch(() => {});
+    autoSyncGuardsFromLine(actor).catch(() => { });
 
     return {
       ok: true,

@@ -3,7 +3,6 @@ import {
   ensureDatabase,
   logOutboundAction,
   getEffectiveLineToken,
-  consumeQueuedSticker,
   bangkokNow,
 } from "../db/command-center";
 
@@ -91,7 +90,7 @@ export function scheduleGroupStickerDebounce(input: DebounceEventInput): void {
 /**
  * Executes all safety validations and sends a single sticker reply.
  */
-export async function executeGroupStickerReply(session: GroupDebounceSession): Promise<{ ok: boolean; skipped?: boolean; reason?: string; error?: string }> {
+export async function executeGroupStickerReply(session: GroupDebounceSession): Promise<{ ok: boolean; sent?: boolean; skipped?: boolean; reason?: string; error?: string }> {
   const { groupId, eventId, replyToken, rawUserId, senderKey, accessToken: passedToken } = session;
 
   // 1. In-memory supersession check
@@ -113,12 +112,11 @@ export async function executeGroupStickerReply(session: GroupDebounceSession): P
   }
 
   // 3. Employer silence window: if any employer inquiry occurred in the last 30 minutes, stay silent
-  const inquiryCutoffIso = new Date(Date.now() - 30 * 60_000).toISOString();
   const recentInquiry = (await db.prepare(`
     SELECT id, message_text, urgency 
     FROM employer_inquiries 
     WHERE group_id = ? 
-      AND (received_at >= datetime('now', '-30 minutes') OR replace(received_at, ' ', 'T') >= ?)
+      AND received_at >= datetime('now', '-30 minutes')
       AND status != 'resolved'
       AND message_text NOT LIKE '%รปภ%'
       AND message_text NOT LIKE '%ว.4%'
@@ -127,7 +125,7 @@ export async function executeGroupStickerReply(session: GroupDebounceSession): P
       AND message_text NOT LIKE '%ผลัด%'
       AND message_text NOT LIKE '%กะ%'
     ORDER BY received_at DESC LIMIT 1
-  `).bind(groupId, inquiryCutoffIso).first()) as { id: string; message_text: string } | null;
+  `).bind(groupId).first()) as { id: string; message_text: string } | null;
 
   if (recentInquiry) {
     await logOutboundAction({
@@ -198,9 +196,9 @@ export async function executeGroupStickerReply(session: GroupDebounceSession): P
     FROM line_outbound_audit 
     WHERE group_id = ? 
       AND status = 'sent' 
-      AND (sent_at >= ? OR replace(sent_at, ' ', 'T') >= ?)
+      AND sent_at >= ?
     LIMIT 1
-  `).bind(groupId, debounceCutoffIso, debounceCutoffIso).first()) as { id: string; sent_at: string } | null;
+  `).bind(groupId, debounceCutoffIso).first()) as { id: string; sent_at: string } | null;
 
   if (recentSentSticker) {
     await logOutboundAction({
@@ -216,12 +214,8 @@ export async function executeGroupStickerReply(session: GroupDebounceSession): P
     return { ok: true, skipped: true, reason: "cooldown_active" };
   }
 
-  // Check if there is a manual queued sticker for this group first
-  const queuedSticker = await consumeQueuedSticker(groupId);
-  const stickerPackageId = queuedSticker?.stickerPackageId || configData?.sticker_package_id || "11538";
-  const stickerId = queuedSticker?.stickerId || configData?.sticker_id || "51626520";
-  const actionType = queuedSticker ? "manual-batch-queued" : "auto-reply-close";
-  const triggerEventId = queuedSticker ? queuedSticker.queuedId : eventId;
+  const stickerPackageId = configData?.sticker_package_id || "11538";
+  const stickerId = configData?.sticker_id || "51626520";
   const nowIso = bangkokNow().iso;
 
   // 7. Atomic DB Lock Acquisition
@@ -229,7 +223,7 @@ export async function executeGroupStickerReply(session: GroupDebounceSession): P
     INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, last_reply_at, updated_at)
     VALUES (?, 'ack_only', ?, ?, ?, '2000-01-01T00:00:00.000Z', ?)
     ON CONFLICT(group_id) DO NOTHING
-  `).bind(groupId, stickerPackageId, stickerId, cooldownMin, nowIso).run().catch(() => {});
+  `).bind(groupId, stickerPackageId, stickerId, cooldownMin, nowIso).run().catch(() => { });
 
   const lockResult = (await db.prepare(`
     UPDATE line_auto_reply_configs 
@@ -248,8 +242,8 @@ export async function executeGroupStickerReply(session: GroupDebounceSession): P
     await logOutboundAction({
       id: `fail-token-${Date.now()}`,
       groupId,
-      triggerEventId,
-      actionType,
+      triggerEventId: eventId,
+      actionType: "auto-reply-close",
       stickerPackageId,
       stickerId,
       status: "failed",
@@ -283,14 +277,12 @@ export async function executeGroupStickerReply(session: GroupDebounceSession): P
     await logOutboundAction({
       id: `reply-${Date.now()}`,
       groupId,
-      triggerEventId,
-      actionType,
+      triggerEventId: eventId,
+      actionType: "auto-reply-close",
       stickerPackageId,
       stickerId,
       status: "sent",
-      skipReason: queuedSticker
-        ? "✓ ส่งสติกเกอร์ตอบรับ (คิวส่งแมนนวลสำเร็จ)"
-        : "✓ ส่งสติกเกอร์ตอบรับรายงาน รปภ. สำเร็จ (จังหวะปิดจบ 45 วิ)",
+      skipReason: "✓ ส่งสติกเกอร์ตอบรับรายงาน รปภ. สำเร็จ (จังหวะปิดจบ 45 วิ)",
     });
     return { ok: true, sent: true };
   }
@@ -299,8 +291,8 @@ export async function executeGroupStickerReply(session: GroupDebounceSession): P
   await logOutboundAction({
     id: `fail-${Date.now()}`,
     groupId,
-    triggerEventId,
-    actionType,
+    triggerEventId: eventId,
+    actionType: "auto-reply-close",
     stickerPackageId,
     stickerId,
     status: "failed",

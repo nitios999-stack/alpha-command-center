@@ -281,7 +281,7 @@ function siteStatusSummary(site: SiteCard) {
   if (slot?.source && slot.source.startsWith("{")) {
     try {
       parsedPayload = JSON.parse(slot.source);
-    } catch {}
+    } catch { }
   }
 
   const checkedCount = parsedPayload?.checkedCount ?? (site.status === "green" ? 1 : 0);
@@ -325,15 +325,15 @@ function lineSignalStatus(group: LineGroup, nowTime: string): LineSignalStatus {
   if (!timestamp) return "gray";
   const seenAt = Date.parse(timestamp);
   if (!Number.isFinite(seenAt)) return "gray";
-  
+
   const ageMinutes = Math.max(0, Math.floor((Date.now() - seenAt) / 60_000));
-  
+
   // 🟢 เขียวสด: ส่งรายงาน/สัญญาณสดไม่เกิน 2 ชั่วโมง
   if (ageMinutes <= 120) return "green";
-  
+
   // 🟡 เหลืองเฝ้าระวัง: เริ่มชะลอตัว (2 ถึง 4 ชั่วโมง)
   if (ageMinutes <= 240) return "yellow";
-  
+
   // 🔴 แดงวิกฤติ: เงียบเกิน 4 ชั่วโมงขึ้นไป
   return "red";
 }
@@ -914,13 +914,13 @@ function handleLocalAction(payload: Record<string, unknown>, currentData: Dashbo
 
 export default function Home() {
   const [data, setData] = useState<DashboardData | null>(null);
-  const [tab, setTab] = useState<"photowall" | "ops" | "billing" | "setup" | "line" | "reports" | "stickers" | "shifts" | "patrol" | "guards" | "inquiries" | "quota">("reports");
+  const [tab, setTab] = useState<"photowall" | "ops" | "billing" | "setup" | "line" | "reports" | "stickers" | "shifts" | "patrol" | "guards" | "inquiries" | "quota">("ops");
 
   useEffect(() => {
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       const tabParam = params.get("tab");
-      if (tabParam === "photowall" || tabParam === "patrol" || tabParam === "guards" || tabParam === "inquiries" || tabParam === "ops" || tabParam === "quota" || tabParam === "reports" || tabParam === "stickers" || tabParam === "shifts" || tabParam === "billing" || tabParam === "setup" || tabParam === "line") {
+      if (tabParam === "photowall" || tabParam === "patrol" || tabParam === "guards" || tabParam === "inquiries" || tabParam === "ops" || tabParam === "quota") {
         setTab(tabParam as any);
       }
     }
@@ -1134,14 +1134,14 @@ export default function Home() {
       const priority: Record<LineSignalStatus, number> = { red: 0, yellow: 1, green: 2, gray: 3 };
       const leftSignal = lineSignalStatus(left, lineNowTime);
       const rightSignal = lineSignalStatus(right, lineNowTime);
-      
+
       if (priority[leftSignal] !== priority[rightSignal]) {
         return priority[leftSignal] - priority[rightSignal];
       }
-      
+
       const leftTime = Date.parse(left.lastReportAt || left.lastSeenAt || "") || 0;
       const rightTime = Date.parse(right.lastReportAt || right.lastSeenAt || "") || 0;
-      
+
       // สำหรับกลุ่มแดง/เหลือง ให้เรียงกลุ่มที่เงียบหายไปนานที่สุดขึ้นก่อน
       if (leftSignal === "red" || leftSignal === "yellow") {
         return leftTime - rightTime || left.groupName.localeCompare(right.groupName, "th");
@@ -1976,95 +1976,95 @@ export default function Home() {
             </div>
           </div>
           {showReportSettings && <div className="report-settings-panel">
-          <section className="reminder-panel" aria-label="ตั้งค่าการแจ้งเตือนกลุ่มหลัก">
-            <div className="reminder-panel-head">
-              <div>
-                <p className="eyebrow">LINE ALERT ROUTING</p>
-                <h3>แจ้งเตือนกลุ่มเงียบเข้ากลุ่มหลัก</h3>
-                <p>ระบบจะสรุปเฉพาะจุดที่เงียบ แล้วส่งข้อความติดตามไปยังกลุ่มสายตรวจที่เลือก โดยไม่ส่งข้อมูลกำลังภายในเกินจำเป็น</p>
-              </div>
-              <div className="reminder-target">
-                <label>กลุ่ม LINE หลัก
-                  <select value={reminderTargetId} onChange={(event) => setReminderTargetDraft(event.target.value)}>
-                    <option value="">เลือกกลุ่มหลัก…</option>
-                    {(data?.lineGroups ?? []).filter((group) => group.nameResolved).map((group) => <option key={group.id} value={group.id}>{group.groupName}</option>)}
-                  </select>
-                </label>
-                <label>แชทสั่งการกรณีติดนาน
-                  <select value={reminderEscalationTargetId} onChange={(event) => setReminderEscalationTargetDraft(event.target.value)}>
-                    <option value="">ใช้เฉพาะกลุ่มหลัก</option>
-                    {(data?.lineGroups ?? []).filter((group) => group.nameResolved && group.id !== reminderTargetId).map((group) => <option key={group.id} value={group.id}>{group.groupName}</option>)}
-                  </select>
-                </label>
-                <button className="small-secondary" onClick={saveReminderSettings} disabled={!reminderTargetId || busyId === "line-reminder-settings"}>บันทึกปลายทาง</button>
-              </div>
-            </div>
-            <div className="reminder-plan">
-              <div className="reminder-plan-copy">
-                <span className="eyebrow">AI REMINDER PLAN</span>
-                <strong>{reminderWave === "morning" ? "ผลัดเช้า 05:30–08:20" : "ผลัดเย็น 17:00–20:00"}</strong>
-                <small>รอบแนะนำถัดไป {reminderNextTime} · รอบที่ระบบคำนวณจากช่วงผลัดและกลุ่มเงียบ</small>
-              </div>
-              <label className="reminder-toggle"><input type="checkbox" checked={reminderAutoEnabled} onChange={(event) => setReminderAutoDraft(event.target.checked)} /> เปิดส่งอัตโนมัติ 24 ชั่วโมง · ทำงานแม้ปิดศูนย์สั่งการ</label>
-              <label className="reminder-toggle"><input type="checkbox" checked={reminderAutoEscalationEnabled} onChange={(event) => setReminderAutoEscalationDraft(event.target.checked)} disabled={!reminderEscalationTargetId} /> ส่งแชทสั่งการเมื่อจุดติดนาน</label>
-              <button className="small-secondary" onClick={() => void loadReminderPreview()} disabled={!reminderTargetId || busyId === "line-reminder-preview"}>{busyId === "line-reminder-preview" ? "กำลังสร้าง…" : "ดูพรีวิวก่อนส่ง"}</button>
-            </div>
-            {reminderPreview && (
-              <div className="reminder-preview" aria-live="polite">
-                <div className="reminder-preview-head">
-                  <div>
-                    <span className="eyebrow">MESSAGE PREVIEW</span>
-                    <strong>รอบ {reminderPreview.roundTime} · ค้าง {reminderPreview.pendingCount}/{reminderPreview.trackedCount} จุด</strong>
-                    <small>{reminderPreview.carryOverCount ? `มี ${reminderPreview.carryOverCount} จุดที่ค้างข้ามรอบ` : "ไม่มีจุดค้างข้ามรอบ"}{reminderPreview.escalationCount ? ` · ติดนาน ${reminderPreview.escalationCount} จุด` : ""}{reminderPreview.notArmedCount ? ` · ยังไม่เริ่มนับ ${reminderPreview.notArmedCount} จุด` : ""}</small>
-                  </div>
-                  <div className="reminder-preview-actions">
-                    <button className="small-primary" onClick={() => void sendReminder(true)} disabled={!reminderPreview.pendingCount || busyId === "line-reminder-send"}>{busyId === "line-reminder-send" ? "กำลังส่ง…" : "ส่งรายการนี้"}</button>
-                    {reminderPreview.escalationMessage && reminderEscalationTargetGroup && <button className="small-danger" onClick={() => void sendReminder(true, false, reminderWave, false, true)} disabled={busyId === "line-reminder-send"}>ส่งพร้อมแจ้งด่วน</button>}
-                  </div>
+            <section className="reminder-panel" aria-label="ตั้งค่าการแจ้งเตือนกลุ่มหลัก">
+              <div className="reminder-panel-head">
+                <div>
+                  <p className="eyebrow">LINE ALERT ROUTING</p>
+                  <h3>แจ้งเตือนกลุ่มเงียบเข้ากลุ่มหลัก</h3>
+                  <p>ระบบจะสรุปเฉพาะจุดที่เงียบ แล้วส่งข้อความติดตามไปยังกลุ่มสายตรวจที่เลือก โดยไม่ส่งข้อมูลกำลังภายในเกินจำเป็น</p>
                 </div>
-                <pre>{reminderPreview.message}</pre>
-                {reminderPreview.escalationMessage && reminderEscalationTargetGroup && <small className="reminder-preview-escalation">จะส่งติดตามด่วนไปที่ {lineGroupLabel(reminderEscalationTargetGroup)} เฉพาะ {reminderPreview.escalationCount} จุดที่เกินเกณฑ์</small>}
+                <div className="reminder-target">
+                  <label>กลุ่ม LINE หลัก
+                    <select value={reminderTargetId} onChange={(event) => setReminderTargetDraft(event.target.value)}>
+                      <option value="">เลือกกลุ่มหลัก…</option>
+                      {(data?.lineGroups ?? []).filter((group) => group.nameResolved).map((group) => <option key={group.id} value={group.id}>{group.groupName}</option>)}
+                    </select>
+                  </label>
+                  <label>แชทสั่งการกรณีติดนาน
+                    <select value={reminderEscalationTargetId} onChange={(event) => setReminderEscalationTargetDraft(event.target.value)}>
+                      <option value="">ใช้เฉพาะกลุ่มหลัก</option>
+                      {(data?.lineGroups ?? []).filter((group) => group.nameResolved && group.id !== reminderTargetId).map((group) => <option key={group.id} value={group.id}>{group.groupName}</option>)}
+                    </select>
+                  </label>
+                  <button className="small-secondary" onClick={saveReminderSettings} disabled={!reminderTargetId || busyId === "line-reminder-settings"}>บันทึกปลายทาง</button>
+                </div>
               </div>
-            )}
-            <div className="reminder-foot">
-              <span>ปลายทาง: <strong>{reminderTargetGroup ? lineGroupLabel(reminderTargetGroup) : "ยังไม่ได้เลือกกลุ่มหลัก"}</strong></span>
-              <span>{data?.lineReminder.lastSentAt ? `ส่งล่าสุด ${displayTime(data.lineReminder.lastSentAt)} · ${data.lineReminder.lastSentCount} กลุ่ม` : "ยังไม่เคยส่งแจ้งเตือนจากระบบ"}</span>
-            </div>
-          </section>
-          <section className="report-shift-config" aria-label="ตั้งค่ากะและเวลาเตือนรายจุด">
-            <div className="report-shift-config-head">
-              <div>
-                <p className="eyebrow">POINT SCHEDULE</p>
-                <h3>กำหนดกะรายจุดและรอบสรุป</h3>
-                <p>เลือกจุดที่ต้องตรวจจริง เปิด/ปิดการนับ และกำหนดเวลาที่ระบบจะสรุปเข้าไปยังกลุ่มหลัก</p>
+              <div className="reminder-plan">
+                <div className="reminder-plan-copy">
+                  <span className="eyebrow">AI REMINDER PLAN</span>
+                  <strong>{reminderWave === "morning" ? "ผลัดเช้า 05:30–08:20" : "ผลัดเย็น 17:00–20:00"}</strong>
+                  <small>รอบแนะนำถัดไป {reminderNextTime} · รอบที่ระบบคำนวณจากช่วงผลัดและกลุ่มเงียบ</small>
+                </div>
+                <label className="reminder-toggle"><input type="checkbox" checked={reminderAutoEnabled} onChange={(event) => setReminderAutoDraft(event.target.checked)} /> เปิดส่งอัตโนมัติ 24 ชั่วโมง · ทำงานแม้ปิดศูนย์สั่งการ</label>
+                <label className="reminder-toggle"><input type="checkbox" checked={reminderAutoEscalationEnabled} onChange={(event) => setReminderAutoEscalationDraft(event.target.checked)} disabled={!reminderEscalationTargetId} /> ส่งแชทสั่งการเมื่อจุดติดนาน</label>
+                <button className="small-secondary" onClick={() => void loadReminderPreview()} disabled={!reminderTargetId || busyId === "line-reminder-preview"}>{busyId === "line-reminder-preview" ? "กำลังสร้าง…" : "ดูพรีวิวก่อนส่ง"}</button>
               </div>
-              <label className="shift-config-select">จุดที่กำลังแก้ไข
-                <select value={scheduleGroupId} onChange={(event) => {
-                  const groupId = event.target.value;
-                  setScheduleDraft({ groupId, config: lineReportConfigFor(groupId, data?.lineReportConfigs) });
-                }}>
-                  <option value="">เลือกจุด…</option>
-                  {lineConfigurableGroups.map((group) => {
-                    const site = group.siteId ? operationalSiteById.get(group.siteId) : null;
-                    const enabled = lineReportConfigFor(group.id, data?.lineReportConfigs).enabled;
-                    return <option key={group.id} value={group.id}>{site?.siteName ?? group.groupName}{enabled ? "" : " · ไม่รวม"}</option>;
-                  })}
-                </select>
-              </label>
-            </div>
-            {scheduleGroupId ? (
-              <div className="shift-config-editor">
-                <label className="shift-config-toggle"><input type="checkbox" checked={scheduleConfig.enabled} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, enabled: event.target.checked } })} /> นับจุดนี้ในการตรวจรายงาน</label>
-                <label className="shift-config-row"><span>รูปแบบ</span><select value={scheduleConfig.mode} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, mode: event.target.value === "interval" || event.target.value === "observe" ? event.target.value : "schedule" } })}><option value="schedule">กำหนดรอบเวลา</option><option value="interval">ทุกกี่ชั่วโมง</option><option value="observe">สังเกต ไม่เตือน</option></select><small>เลือกได้จุดละแบบ — ไม่บังคับให้ทุกจุดใช้เวลาเดียวกัน</small></label>
-                {scheduleConfig.mode === "schedule" && <label className="shift-config-row"><span>รอบส่ง</span><input type="text" value={scheduleConfig.expectedTimes.join(", ")} onChange={(event) => { const expectedTimes = parseTimeList(event.target.value); setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, expectedTimes, morningTimes: expectedTimes.filter((time) => time < "12:00"), eveningTimes: expectedTimes.filter((time) => time >= "12:00") } }); }} placeholder="06:00, 12:00, 19:00" /><small>เช่น 19:00 = ตรวจเฉพาะรอบ 19:00 และค้างก่อนหน้าจะทบในข้อความเดียว</small></label>}
-                {scheduleConfig.mode === "interval" && <label className="shift-config-row"><span>ทุก</span><select value={scheduleConfig.intervalHours} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, intervalHours: Number(event.target.value) } })}><option value={1}>1 ชั่วโมง</option><option value={2}>2 ชั่วโมง</option><option value={3}>3 ชั่วโมง</option><option value={4}>4 ชั่วโมง</option><option value={6}>6 ชั่วโมง</option><option value={8}>8 ชั่วโมง</option><option value={12}>12 ชั่วโมง</option></select><small>นับจาก {scheduleConfig.intervalAnchor} · ระบบรวมจุดที่ค้างในแต่ละรอบ</small></label>}
-                {scheduleConfig.mode !== "observe" && <><label className="shift-config-row"><span>ผ่อนผัน</span><input type="number" min="0" max="60" value={scheduleConfig.graceMinutes} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, graceMinutes: Math.max(0, Math.min(60, Number(event.target.value) || 0)) } })} /><small>นาทีหลังเวลารอบก่อนเริ่มแจ้ง</small></label><label className="shift-config-row"><span>ติดนาน</span><input type="number" min="1" max="72" value={scheduleConfig.escalationAfterHours} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, escalationAfterHours: Math.max(1, Math.min(72, Number(event.target.value) || 1)) } })} /><small>ชั่วโมงก่อนเข้ารายการติดตามด่วน</small></label><label className="shift-config-row"><span>ยืนยัน</span><select value={scheduleConfig.verification} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, verification: event.target.value === "approved_sender" ? "approved_sender" : "text" } })}><option value="text">ข้อความตัวอักษร (ไม่รวมสติกเกอร์)</option><option value="approved_sender">เฉพาะ รปภ. ที่อนุมัติ</option></select><small>โหมดเข้มงวดจะไม่นับข้อความจากเจ้าหน้าที่ที่ยังไม่อนุมัติ</small></label></>}
-                {scheduleConfig.verification === "approved_sender" && <div className="sender-approval"><span>ผู้ส่งล่าสุด: <b>{lineConfigurableGroups.find((group) => group.id === scheduleGroupId)?.lastCandidateSenderKey ?? "ยังไม่พบข้อความตัวอักษรใหม่"}</b></span>{lineConfigurableGroups.find((group) => group.id === scheduleGroupId)?.lastCandidateSenderKey && !scheduleConfig.approvedSenderKeys.includes(lineConfigurableGroups.find((group) => group.id === scheduleGroupId)?.lastCandidateSenderKey ?? "") && <button type="button" className="small-secondary" onClick={() => { const key = lineConfigurableGroups.find((group) => group.id === scheduleGroupId)?.lastCandidateSenderKey; if (key) setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, approvedSenderKeys: [...scheduleConfig.approvedSenderKeys, key] } }); }}>นับผู้ส่งนี้เป็น รปภ.</button>}<small>รหัสเป็นรหัสทางเดียว ไม่มีเนื้อหาแชตหรือ LINE user ID ถูกเก็บไว้</small></div>}
-                {!scheduleConfig.monitoringStartedAt && scheduleConfig.mode !== "observe" && <p className="shift-config-empty">ยังไม่เริ่มนับจุดนี้ · กดบันทึกเพื่อตั้ง baseline ตั้งแต่วินาทีนี้ โดยไม่นำข้อความเก่ามาตัดสิน</p>}
-                <button className="small-secondary" onClick={saveReportSchedule} disabled={busyId === "line-report-config"}>{busyId === "line-report-config" ? "กำลังบันทึก…" : "บันทึกและเริ่มนับจุดนี้"}</button>
+              {reminderPreview && (
+                <div className="reminder-preview" aria-live="polite">
+                  <div className="reminder-preview-head">
+                    <div>
+                      <span className="eyebrow">MESSAGE PREVIEW</span>
+                      <strong>รอบ {reminderPreview.roundTime} · ค้าง {reminderPreview.pendingCount}/{reminderPreview.trackedCount} จุด</strong>
+                      <small>{reminderPreview.carryOverCount ? `มี ${reminderPreview.carryOverCount} จุดที่ค้างข้ามรอบ` : "ไม่มีจุดค้างข้ามรอบ"}{reminderPreview.escalationCount ? ` · ติดนาน ${reminderPreview.escalationCount} จุด` : ""}{reminderPreview.notArmedCount ? ` · ยังไม่เริ่มนับ ${reminderPreview.notArmedCount} จุด` : ""}</small>
+                    </div>
+                    <div className="reminder-preview-actions">
+                      <button className="small-primary" onClick={() => void sendReminder(true)} disabled={!reminderPreview.pendingCount || busyId === "line-reminder-send"}>{busyId === "line-reminder-send" ? "กำลังส่ง…" : "ส่งรายการนี้"}</button>
+                      {reminderPreview.escalationMessage && reminderEscalationTargetGroup && <button className="small-danger" onClick={() => void sendReminder(true, false, reminderWave, false, true)} disabled={busyId === "line-reminder-send"}>ส่งพร้อมแจ้งด่วน</button>}
+                    </div>
+                  </div>
+                  <pre>{reminderPreview.message}</pre>
+                  {reminderPreview.escalationMessage && reminderEscalationTargetGroup && <small className="reminder-preview-escalation">จะส่งติดตามด่วนไปที่ {lineGroupLabel(reminderEscalationTargetGroup)} เฉพาะ {reminderPreview.escalationCount} จุดที่เกินเกณฑ์</small>}
+                </div>
+              )}
+              <div className="reminder-foot">
+                <span>ปลายทาง: <strong>{reminderTargetGroup ? lineGroupLabel(reminderTargetGroup) : "ยังไม่ได้เลือกกลุ่มหลัก"}</strong></span>
+                <span>{data?.lineReminder.lastSentAt ? `ส่งล่าสุด ${displayTime(data.lineReminder.lastSentAt)} · ${data.lineReminder.lastSentCount} กลุ่ม` : "ยังไม่เคยส่งแจ้งเตือนจากระบบ"}</span>
               </div>
-            ) : <p className="shift-config-empty">ยังไม่มีจุดที่ผูกกลุ่ม LINE และเปิดใช้งานให้ตั้งค่า</p>}
-          </section>
+            </section>
+            <section className="report-shift-config" aria-label="ตั้งค่ากะและเวลาเตือนรายจุด">
+              <div className="report-shift-config-head">
+                <div>
+                  <p className="eyebrow">POINT SCHEDULE</p>
+                  <h3>กำหนดกะรายจุดและรอบสรุป</h3>
+                  <p>เลือกจุดที่ต้องตรวจจริง เปิด/ปิดการนับ และกำหนดเวลาที่ระบบจะสรุปเข้าไปยังกลุ่มหลัก</p>
+                </div>
+                <label className="shift-config-select">จุดที่กำลังแก้ไข
+                  <select value={scheduleGroupId} onChange={(event) => {
+                    const groupId = event.target.value;
+                    setScheduleDraft({ groupId, config: lineReportConfigFor(groupId, data?.lineReportConfigs) });
+                  }}>
+                    <option value="">เลือกจุด…</option>
+                    {lineConfigurableGroups.map((group) => {
+                      const site = group.siteId ? operationalSiteById.get(group.siteId) : null;
+                      const enabled = lineReportConfigFor(group.id, data?.lineReportConfigs).enabled;
+                      return <option key={group.id} value={group.id}>{site?.siteName ?? group.groupName}{enabled ? "" : " · ไม่รวม"}</option>;
+                    })}
+                  </select>
+                </label>
+              </div>
+              {scheduleGroupId ? (
+                <div className="shift-config-editor">
+                  <label className="shift-config-toggle"><input type="checkbox" checked={scheduleConfig.enabled} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, enabled: event.target.checked } })} /> นับจุดนี้ในการตรวจรายงาน</label>
+                  <label className="shift-config-row"><span>รูปแบบ</span><select value={scheduleConfig.mode} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, mode: event.target.value === "interval" || event.target.value === "observe" ? event.target.value : "schedule" } })}><option value="schedule">กำหนดรอบเวลา</option><option value="interval">ทุกกี่ชั่วโมง</option><option value="observe">สังเกต ไม่เตือน</option></select><small>เลือกได้จุดละแบบ — ไม่บังคับให้ทุกจุดใช้เวลาเดียวกัน</small></label>
+                  {scheduleConfig.mode === "schedule" && <label className="shift-config-row"><span>รอบส่ง</span><input type="text" value={scheduleConfig.expectedTimes.join(", ")} onChange={(event) => { const expectedTimes = parseTimeList(event.target.value); setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, expectedTimes, morningTimes: expectedTimes.filter((time) => time < "12:00"), eveningTimes: expectedTimes.filter((time) => time >= "12:00") } }); }} placeholder="06:00, 12:00, 19:00" /><small>เช่น 19:00 = ตรวจเฉพาะรอบ 19:00 และค้างก่อนหน้าจะทบในข้อความเดียว</small></label>}
+                  {scheduleConfig.mode === "interval" && <label className="shift-config-row"><span>ทุก</span><select value={scheduleConfig.intervalHours} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, intervalHours: Number(event.target.value) } })}><option value={1}>1 ชั่วโมง</option><option value={2}>2 ชั่วโมง</option><option value={3}>3 ชั่วโมง</option><option value={4}>4 ชั่วโมง</option><option value={6}>6 ชั่วโมง</option><option value={8}>8 ชั่วโมง</option><option value={12}>12 ชั่วโมง</option></select><small>นับจาก {scheduleConfig.intervalAnchor} · ระบบรวมจุดที่ค้างในแต่ละรอบ</small></label>}
+                  {scheduleConfig.mode !== "observe" && <><label className="shift-config-row"><span>ผ่อนผัน</span><input type="number" min="0" max="60" value={scheduleConfig.graceMinutes} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, graceMinutes: Math.max(0, Math.min(60, Number(event.target.value) || 0)) } })} /><small>นาทีหลังเวลารอบก่อนเริ่มแจ้ง</small></label><label className="shift-config-row"><span>ติดนาน</span><input type="number" min="1" max="72" value={scheduleConfig.escalationAfterHours} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, escalationAfterHours: Math.max(1, Math.min(72, Number(event.target.value) || 1)) } })} /><small>ชั่วโมงก่อนเข้ารายการติดตามด่วน</small></label><label className="shift-config-row"><span>ยืนยัน</span><select value={scheduleConfig.verification} onChange={(event) => setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, verification: event.target.value === "approved_sender" ? "approved_sender" : "text" } })}><option value="text">ข้อความตัวอักษร (ไม่รวมสติกเกอร์)</option><option value="approved_sender">เฉพาะ รปภ. ที่อนุมัติ</option></select><small>โหมดเข้มงวดจะไม่นับข้อความจากเจ้าหน้าที่ที่ยังไม่อนุมัติ</small></label></>}
+                  {scheduleConfig.verification === "approved_sender" && <div className="sender-approval"><span>ผู้ส่งล่าสุด: <b>{lineConfigurableGroups.find((group) => group.id === scheduleGroupId)?.lastCandidateSenderKey ?? "ยังไม่พบข้อความตัวอักษรใหม่"}</b></span>{lineConfigurableGroups.find((group) => group.id === scheduleGroupId)?.lastCandidateSenderKey && !scheduleConfig.approvedSenderKeys.includes(lineConfigurableGroups.find((group) => group.id === scheduleGroupId)?.lastCandidateSenderKey ?? "") && <button type="button" className="small-secondary" onClick={() => { const key = lineConfigurableGroups.find((group) => group.id === scheduleGroupId)?.lastCandidateSenderKey; if (key) setScheduleDraft({ groupId: scheduleGroupId, config: { ...scheduleConfig, approvedSenderKeys: [...scheduleConfig.approvedSenderKeys, key] } }); }}>นับผู้ส่งนี้เป็น รปภ.</button>}<small>รหัสเป็นรหัสทางเดียว ไม่มีเนื้อหาแชตหรือ LINE user ID ถูกเก็บไว้</small></div>}
+                  {!scheduleConfig.monitoringStartedAt && scheduleConfig.mode !== "observe" && <p className="shift-config-empty">ยังไม่เริ่มนับจุดนี้ · กดบันทึกเพื่อตั้ง baseline ตั้งแต่วินาทีนี้ โดยไม่นำข้อความเก่ามาตัดสิน</p>}
+                  <button className="small-secondary" onClick={saveReportSchedule} disabled={busyId === "line-report-config"}>{busyId === "line-report-config" ? "กำลังบันทึก…" : "บันทึกและเริ่มนับจุดนี้"}</button>
+                </div>
+              ) : <p className="shift-config-empty">ยังไม่มีจุดที่ผูกกลุ่ม LINE และเปิดใช้งานให้ตั้งค่า</p>}
+            </section>
           </div>}
           <section className={"report-priority " + (trackedLineOverviewStats.red > 0 ? "urgent" : trackedLineOverviewStats.yellow > 0 ? "watch" : "clear")} aria-label="ลำดับการตรวจ">
             <div>
@@ -2170,7 +2170,7 @@ export default function Home() {
                     <button type="button" className="line-ignored-setup" onClick={() => openLinePointSetup(group)} disabled={busyId === "line-point-setup-" + group.id}>{group.siteId ? "แก้ไขข้อมูลจุด" : "ตั้งเป็นจุดใช้งาน"}</button>
                     <div className="line-ignored-card-top">
                       {group.pictureUrl ? <img src={group.pictureUrl} alt="" /> : <b>LINE</b>}
-                    <strong>{lineGroupName(group)}</strong>
+                      <strong>{lineGroupName(group)}</strong>
                     </div>
                     <span>{lineIgnoredReason(group, operationalSiteById, data?.lineReportConfigs)}</span>
                     <small>ล่าสุด {displayTime(group.lastSeenAt)} · {lineAgeLabel(group.lastSeenAt, reportNowMs)}</small>
@@ -2328,26 +2328,26 @@ export default function Home() {
             {(data?.lineGroups ?? []).map((group) => {
               const pointSite = group.siteId ? operationalSiteById.get(group.siteId) : null;
               return (
-              <article className="line-group-row" key={group.id}>
-                <div className="line-group-identity">
-                  {group.pictureUrl ? <img src={group.pictureUrl} alt="" /> : <span className="line-avatar">LINE</span>}
-                  <div><strong>{lineGroupName(group)}</strong><code title={group.id}>{group.id}</code><small>{group.nameResolved ? "ชื่อจาก LINE OA" : "กลุ่มที่รับจาก LINE · ชื่อย่อใช้ระบุกลุ่มชั่วคราว"}</small></div>
-                </div>
-                <div className="line-mapping-cell">
-                  <div className="line-point-summary">
-                    <span className={pointSite?.active === 1 ? "point-ready" : "point-dormant"}>{pointSite?.active === 1 ? "พร้อมตรวจ" : group.siteId ? "บันทึกแล้ว · ยังไม่เปิดตรวจ" : "เตรียมเป็นจุดจากกลุ่มนี้"}</span>
-                    <small>{pointSite?.customerName && pointSite.customerName !== "ยังไม่ระบุลูกค้า" ? pointSite.customerName : "เติมลูกค้า กะ และเวลาในบัตรนี้"}</small>
-                    <button type="button" className="small-secondary" onClick={() => openLinePointSetup(group)} disabled={busyId === "line-point-setup-" + group.id}>{group.siteId ? "แก้ไขข้อมูลจุด" : "ตั้งเป็นจุดใช้งาน"}</button>
+                <article className="line-group-row" key={group.id}>
+                  <div className="line-group-identity">
+                    {group.pictureUrl ? <img src={group.pictureUrl} alt="" /> : <span className="line-avatar">LINE</span>}
+                    <div><strong>{lineGroupName(group)}</strong><code title={group.id}>{group.id}</code><small>{group.nameResolved ? "ชื่อจาก LINE OA" : "กลุ่มที่รับจาก LINE · ชื่อย่อใช้ระบุกลุ่มชั่วคราว"}</small></div>
                   </div>
-                  <select value={group.siteId ?? ""} onChange={(event) => linkRegistryGroup(group, event.target.value)} disabled={busyId === "line-map-" + group.id}>
-                    <option value="">เลือกจุดที่จะผูก…</option>
-                    {(data?.sites ?? []).map((site) => <option key={site.id} value={site.id}>{site.siteName} · {site.customerName}</option>)}
-                  </select>
-                  {group.siteId && <button className="action-text danger" disabled={busyId === "line-unmap-" + group.id} onClick={() => unmapRegistryGroup(group)}>ยกเลิก</button>}
-                </div>
-                <div className="line-last-seen">{displayTime(group.lastSeenAt)}<small>{group.lastSeenAt ? "เวลาไทย" : "ยังไม่ได้รับ webhook"}</small></div>
-                <div className="line-row-actions"><button className="action-confirm" disabled={!data?.lineIntegration.configured || busyId === "line-test-" + group.id} onClick={() => testLineGroup(group)}>ทดสอบ</button><button className="action-text danger" disabled={busyId === "line-delete-" + group.id} onClick={() => deleteLineRegistryGroup(group)}>{busyId === "line-delete-" + group.id ? "กำลังลบ…" : "ลบกลุ่ม"}</button></div>
-              </article>
+                  <div className="line-mapping-cell">
+                    <div className="line-point-summary">
+                      <span className={pointSite?.active === 1 ? "point-ready" : "point-dormant"}>{pointSite?.active === 1 ? "พร้อมตรวจ" : group.siteId ? "บันทึกแล้ว · ยังไม่เปิดตรวจ" : "เตรียมเป็นจุดจากกลุ่มนี้"}</span>
+                      <small>{pointSite?.customerName && pointSite.customerName !== "ยังไม่ระบุลูกค้า" ? pointSite.customerName : "เติมลูกค้า กะ และเวลาในบัตรนี้"}</small>
+                      <button type="button" className="small-secondary" onClick={() => openLinePointSetup(group)} disabled={busyId === "line-point-setup-" + group.id}>{group.siteId ? "แก้ไขข้อมูลจุด" : "ตั้งเป็นจุดใช้งาน"}</button>
+                    </div>
+                    <select value={group.siteId ?? ""} onChange={(event) => linkRegistryGroup(group, event.target.value)} disabled={busyId === "line-map-" + group.id}>
+                      <option value="">เลือกจุดที่จะผูก…</option>
+                      {(data?.sites ?? []).map((site) => <option key={site.id} value={site.id}>{site.siteName} · {site.customerName}</option>)}
+                    </select>
+                    {group.siteId && <button className="action-text danger" disabled={busyId === "line-unmap-" + group.id} onClick={() => unmapRegistryGroup(group)}>ยกเลิก</button>}
+                  </div>
+                  <div className="line-last-seen">{displayTime(group.lastSeenAt)}<small>{group.lastSeenAt ? "เวลาไทย" : "ยังไม่ได้รับ webhook"}</small></div>
+                  <div className="line-row-actions"><button className="action-confirm" disabled={!data?.lineIntegration.configured || busyId === "line-test-" + group.id} onClick={() => testLineGroup(group)}>ทดสอบ</button><button className="action-text danger" disabled={busyId === "line-delete-" + group.id} onClick={() => deleteLineRegistryGroup(group)}>{busyId === "line-delete-" + group.id ? "กำลังลบ…" : "ลบกลุ่ม"}</button></div>
+                </article>
               );
             })}
             {!loading && !(data?.lineGroups ?? []).length && <p className="line-empty">ยังไม่มีกลุ่มในทะเบียน เมื่อ OA รับ webhook จากกลุ่ม กลุ่มจะปรากฏที่นี่เพื่อให้เลือกผูกกับจุด</p>}
