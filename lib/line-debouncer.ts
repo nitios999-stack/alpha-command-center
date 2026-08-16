@@ -84,7 +84,7 @@ export function scheduleGroupStickerDebounce(input: DebounceEventInput): void {
         activeGroupDebouncers.delete(groupId);
       }
     }
-  }, 45_000);
+  }, 45_000 + Math.floor(Math.random() * 8_000));
 }
 
 /**
