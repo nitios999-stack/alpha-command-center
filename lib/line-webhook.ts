@@ -635,7 +635,7 @@ let matchedOaName: string | null = null;
         continue;
       }
 
-      // --- DIRECT SYNCHRONOUS STICKER REPLY FOR GUARDS (WITH 5-MINUTE PATROL COOLDOWN) ---
+      // --- DIRECT SYNCHRONOUS STICKER REPLY FOR GUARDS (ATOMIC ANTI-DOUBLE LOCK) ---
 const queuedSticker = await consumeQueuedSticker(group.groupId);
 let stickerPackageId = "";
 let stickerId = "";
@@ -646,8 +646,25 @@ if (queuedSticker) {
   stickerId = queuedSticker.stickerId;
   actionType = "manual-batch-queued";
   triggerEventId = queuedSticker.queuedId;
+  const queuedToken = accessToken || (await getEffectiveLineToken()) || undefined;
+  if (group.replyToken && queuedToken) {
+    const queuedRes = await fetch("https://api.line.me/v2/bot/message/reply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${queuedToken}` },
+      body: JSON.stringify({ replyToken: group.replyToken, messages: [{ type: "sticker", packageId: stickerPackageId, stickerId: stickerId }] })
+    }).catch(() => null);
+    await logOutboundAction({
+      id: `queued-${Date.now()}`,
+      groupId: group.groupId,
+      triggerEventId: triggerEventId,
+      actionType: "manual-batch-queued",
+      stickerPackageId: stickerPackageId,
+      stickerId: stickerId,
+      status: queuedRes && queuedRes.ok ? "sent" : "failed",
+      skipReason: queuedRes && queuedRes.ok ? "✓ ส่งสติกเกอร์จากคิว manual-batch แล้ว" : "ส่งสติกเกอร์จากคิวไม่สำเร็จ"
+    }).catch(() => { });
+  }
 } else {
-  // All non-employer, non-inspector messages are eligible for sticker reply.
   const isEligibleForSticker = isLastInBatch && !isEmployer && !isInspector;
   if (isEligibleForSticker) {
     try {
@@ -661,52 +678,50 @@ WHERE group_id = ?
         const stickerStk = configData?.sticker_id || "51626520";
         const cooldownMin = configData?.cooldown_minutes ?? 5;
         const nowIso = bangkokNow().iso;
-        // Smart 5-minute cooldown (300 seconds) per group so text + follow-up photos in the same patrol round receive only 1 sticker
         const debounceCutoffIso = new Date(Date.now() - (cooldownMin * 60_000)).toISOString();
-        const recentSticker = (await db.prepare(`
-SELECT id, sent_at FROM line_outbound_audit
-WHERE group_id = ? AND action_type = 'auto-reply-close' AND status = 'sent' AND sent_at >= ?
-LIMIT 1
-`).bind(group.groupId, debounceCutoffIso).first()) as any;
         const effectiveToken = accessToken || (await getEffectiveLineToken()) || undefined;
-        if (recentSticker) {
-          // Skip duplicate reply in the same patrol round (text + photos)
+        // ===== กันเบิ้ล 100%: ล็อกอะตอมมิกก่อนส่ง คำขอที่ 2 ที่เข้ามาพร้อมกันจะได้ changes=0 และถูกข้าม =====
+        await db.prepare(`
+INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, last_reply_at, updated_at)
+VALUES (?, 'ack_only', ?, ?, ?, '2000-01-01T00:00:00.000Z', ?)
+ON CONFLICT(group_id) DO NOTHING
+`).bind(group.groupId, stickerPkg, stickerStk, cooldownMin, nowIso).run().catch(() => { });
+        const lockResult = (await db.prepare(`
+UPDATE line_auto_reply_configs
+SET last_reply_at = ?, last_inbound_event_id = ?, updated_at = ?
+WHERE group_id = ?
+AND (last_reply_at IS NULL OR last_reply_at <= ?)
+`).bind(nowIso, group.eventId, nowIso, group.groupId, debounceCutoffIso).run()) as any;
+        const lockAcquired = !(lockResult && typeof lockResult.changes === "number" && lockResult.changes === 0);
+        if (!lockAcquired) {
           await logOutboundAction({
-            id: `skip-cooldown-${Date.now()}`,
+            id: `skip-double-${Date.now()}`,
             groupId: group.groupId,
             triggerEventId: group.eventId,
             actionType: "auto-reply-close",
             stickerPackageId: stickerPkg,
             stickerId: stickerStk,
             status: "skipped",
-            skipReason: `งดส่งซ้ำ: เพิ่งตอบรับรายงานไปในรอบ ${cooldownMin} นาที (รวบยอดข้อความ+ภาพเข้าเวร)`,
+            skipReason: `กันเบิ้ล: มีสติกเกอร์ตอบรับในรอบ ${cooldownMin} นาทีแล้ว (ข้อความ+ภาพรอบเดียวกันได้ 1 ตัว)`
           });
-        } else if (group.replyToken && effectiveToken) {
-          // Direct synchronous reply to LINE
+        } else if (!effectiveToken) {
+          await logOutboundAction({
+            id: `fail-token-${Date.now()}`,
+            groupId: group.groupId,
+            triggerEventId: group.eventId,
+            actionType: "auto-reply-close",
+            stickerPackageId: stickerPkg,
+            stickerId: stickerStk,
+            status: "failed",
+            skipReason: "ไม่พบ LINE Channel Access Token ในระบบ"
+          });
+        } else if (group.replyToken) {
           const replyRes = await fetch("https://api.line.me/v2/bot/message/reply", {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${effectiveToken}`
-            },
-            body: JSON.stringify({
-              replyToken: group.replyToken,
-              messages: [{
-                type: "sticker",
-                packageId: stickerPkg,
-                stickerId: stickerStk
-              }]
-            })
-          }).catch((err) => {
-            console.error("Fetch reply error:", err);
-            return null;
-          });
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${effectiveToken}` },
+            body: JSON.stringify({ replyToken: group.replyToken, messages: [{ type: "sticker", packageId: stickerPkg, stickerId: stickerStk }] })
+          }).catch((err) => { console.error("Fetch reply error:", err); return null; });
           if (replyRes && replyRes.ok) {
-            await db.prepare(`
-INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, last_reply_at, updated_at)
-VALUES (?, 'ack_only', ?, ?, ?, ?, ?)
-ON CONFLICT(group_id) DO UPDATE SET last_reply_at = excluded.last_reply_at, updated_at = excluded.updated_at
-`).bind(group.groupId, stickerPkg, stickerStk, cooldownMin, nowIso, nowIso).run().catch(() => { });
             await logOutboundAction({
               id: `reply-${Date.now()}`,
               groupId: group.groupId,
@@ -715,7 +730,7 @@ ON CONFLICT(group_id) DO UPDATE SET last_reply_at = excluded.last_reply_at, upda
               stickerPackageId: stickerPkg,
               stickerId: stickerStk,
               status: "sent",
-              skipReason: "✓ ส่งสติกเกอร์ตอบรับเข้าเวร รปภ. สำเร็จ (Direct Reply)"
+              skipReason: "✓ ส่งสติกเกอร์ตอบรับเข้าเวร รปภ. สำเร็จ (กันเบิ้ลด้วย atomic lock)"
             });
           } else if (replyRes) {
             const errJson = await replyRes.json().catch(() => ({}));
@@ -741,17 +756,6 @@ ON CONFLICT(group_id) DO UPDATE SET last_reply_at = excluded.last_reply_at, upda
               skipReason: "เชื่อมต่อ LINE API ไม่สำเร็จ (Network / Timeout)"
             });
           }
-        } else if (!effectiveToken) {
-          await logOutboundAction({
-            id: `fail-token-${Date.now()}`,
-            groupId: group.groupId,
-            triggerEventId: group.eventId,
-            actionType: "auto-reply-close",
-            stickerPackageId: stickerPkg,
-            stickerId: stickerStk,
-            status: "failed",
-            skipReason: "ไม่พบ LINE Channel Access Token ในระบบ"
-          });
         }
       }
     } catch (e: any) {
@@ -763,11 +767,10 @@ ON CONFLICT(group_id) DO UPDATE SET last_reply_at = excluded.last_reply_at, upda
         stickerPackageId: "11538",
         stickerId: "51626520",
         status: "error",
-        skipReason: `Exception: ${e?.message || "unknown"}`,
+        skipReason: `Exception: ${e?.message || "unknown"}`
       }).catch(() => { });
     }
   }
-}
 }
 }));
 void schedule;
