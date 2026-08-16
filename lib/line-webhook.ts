@@ -649,6 +649,7 @@ if (queuedSticker) {
   actionType = "manual-batch-queued";
   triggerEventId = queuedSticker.queuedId;
 } else {
+  // All non-employer, non-inspector messages are eligible for sticker reply.
   const isEligibleForSticker = isLastInBatch && !isEmployer && !isInspector;
   if (isEligibleForSticker) {
     try {
@@ -662,6 +663,7 @@ WHERE group_id = ?
         const stickerStk = configData?.sticker_id || "51626520";
         const cooldownMin = configData?.cooldown_minutes ?? 5;
         const nowIso = bangkokNow().iso;
+        // Smart 5-minute cooldown (300 seconds) per group so text + follow-up photos in the same patrol round receive only 1 sticker
         const debounceCutoffIso = new Date(Date.now() - (cooldownMin * 60_000)).toISOString();
         const recentSticker = (await db.prepare(`
 SELECT id, sent_at FROM line_outbound_audit
@@ -670,6 +672,7 @@ LIMIT 1
 `).bind(group.groupId, debounceCutoffIso).first()) as any;
         const effectiveToken = accessToken || (await getEffectiveLineToken()) || undefined;
         if (recentSticker) {
+          // Skip duplicate reply in the same patrol round (text + photos)
           await logOutboundAction({
             id: `skip-cooldown-${Date.now()}`,
             groupId: group.groupId,
@@ -681,6 +684,7 @@ LIMIT 1
             skipReason: `งดส่งซ้ำ: เพิ่งตอบรับรายงานไปในรอบ ${cooldownMin} นาที (รวบยอดข้อความ+ภาพเข้าเวร)`,
           });
         } else if (group.replyToken && effectiveToken) {
+          // Direct synchronous reply to LINE
           const replyRes = await fetch("https://api.line.me/v2/bot/message/reply", {
             method: "POST",
             headers: {
