@@ -107,7 +107,7 @@ export function GuardsPanel({ data, onRefresh }: GuardsPanelProps) {
       if (document.visibilityState === "visible") {
         loadGuards(true);
       }
-    }, 15000);
+    }, 30000);
 
     return () => clearInterval(pollInterval);
   }, []);

@@ -494,7 +494,9 @@ await this.hydrateRemote().catch(() => undefined);
         const localCount = Number((this.sqlite!.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count?: number } | undefined)?.count ?? 0);
 const liveSync = table === "line_outbound_audit" || table === "employer_inquiries";
 if (localCount > 0 && !liveSync) continue;
-const snapshot = await this.withTimeout(remote.list(table));
+const snapshot = table === "line_webhook_events"
+          ? await this.withTimeout(remote.listRecent(table, "received_at", 3000))
+          : await this.withTimeout(remote.list(table));
 if (!snapshot) continue;
 if (snapshot.length && columns.length) {
           const allowed = new Set(columns);
