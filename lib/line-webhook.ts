@@ -578,7 +578,9 @@ SELECT id FROM line_outbound_audit
 WHERE group_id = ? AND action_type = 'push-alert' AND status = 'sent' AND sent_at >= ?
 LIMIT 1
 `).bind(group.groupId, pushDebounceCutoff).first()) as any;
-if (!recentPush) {
+const lastMemPush = pushMemoryDebounce.get(group.groupId) || 0;
+if (!recentPush && Date.now() - lastMemPush > 5 * 60_000) {
+pushMemoryDebounce.set(group.groupId, Date.now());
 const groupInfo = (await db.prepare("SELECT group_name FROM line_group_registry WHERE id = ?").bind(group.groupId).first()) as { group_name: string } | null;
 const groupDisplayName = groupInfo?.group_name || `กลุ่ม (${group.groupId.slice(-6)})`;
 const senderLabel = senderProfile?.guard_name || (isEmployer ? "นายจ้าง/ลูกค้า" : "สมาชิกในกลุ่ม");
@@ -647,133 +649,36 @@ skipReason: `งดส่งสติกเกอร์: ผู้ส่งค�
 });
 continue;
 }
-// --- DIRECT SYNCHRONOUS STICKER REPLY FOR GUARDS (SERVERLESS-SAFE, COOLDOWN 2 MIN) ---
+// --- DEFERRED 45s STICKER REPLY (wait for true silence, then exactly 1 free reply) ---
 const queuedSticker = await consumeQueuedSticker(group.groupId);
-let stickerPackageId = "";
-let stickerId = "";
-let actionType = "auto-reply";
-let triggerEventId = group.eventId;
-if (queuedSticker) {
-stickerPackageId = queuedSticker.stickerPackageId;
-stickerId = queuedSticker.stickerId;
-actionType = "manual-batch-queued";
-triggerEventId = queuedSticker.queuedId;
+if (queuedSticker && group.replyToken) {
 const queuedToken = accessToken || (await getEffectiveLineToken()) || undefined;
-if (group.replyToken && queuedToken) {
+if (queuedToken) {
 const queuedRes = await fetch("https://api.line.me/v2/bot/message/reply", {
 method: "POST",
 headers: { "Content-Type": "application/json", Authorization: `Bearer ${queuedToken}` },
-body: JSON.stringify({ replyToken: group.replyToken, messages: [{ type: "sticker", packageId: stickerPackageId, stickerId: stickerId }] }),
+body: JSON.stringify({ replyToken: group.replyToken, messages: [{ type: "sticker", packageId: queuedSticker.stickerPackageId, stickerId: queuedSticker.stickerId }] }),
 }).catch(() => null);
 await logOutboundAction({
 id: `queued-${Date.now()}`,
 groupId: group.groupId,
-triggerEventId: triggerEventId,
+triggerEventId: queuedSticker.queuedId,
 actionType: "manual-batch-queued",
-stickerPackageId: stickerPackageId,
-stickerId: stickerId,
+stickerPackageId: queuedSticker.stickerPackageId,
+stickerId: queuedSticker.stickerId,
 status: queuedRes && queuedRes.ok ? "sent" : "failed",
 skipReason: queuedRes && queuedRes.ok ? "✓ ส่งสติกเกอร์จากคิว manual-batch (reply ฟรี)" : "ส่งสติกเกอร์จากคิวไม่สำเร็จ",
 }).catch(() => { });
 }
 } else {
-const isEligibleForSticker = isLastInBatch && !isEmployer && !isInspector;
-if (isEligibleForSticker) {
-try {
-const configData = (await db.prepare(`
-SELECT mode, sticker_package_id, sticker_id, cooldown_minutes, last_reply_at
-FROM line_auto_reply_configs
-WHERE group_id = ?
-`).bind(group.groupId).first()) as any;
-if (configData?.mode !== "disabled") {
-let cooldownMin = Number(configData?.cooldown_minutes ?? 2);
-if (!Number.isFinite(cooldownMin) || cooldownMin < 1) cooldownMin = 1;
-if (cooldownMin > 2) cooldownMin = 2;
-const stickerPkg = configData?.sticker_package_id || "11538";
-const stickerStk = configData?.sticker_id || "51626520";
-const nowIso = bangkokNow().iso;
-const cutoffIso = new Date(Date.now() - cooldownMin * 60_000).toISOString();
-const effectiveToken = accessToken || (await getEffectiveLineToken()) || undefined;
-await db.prepare(`
-INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, last_reply_at, updated_at)
-VALUES (?, 'ack_only', ?, ?, ?, '2000-01-01T00:00:00.000Z', ?)
-ON CONFLICT(group_id) DO NOTHING
-`).bind(group.groupId, stickerPkg, stickerStk, cooldownMin, nowIso).run().catch(() => { });
-const lockResult = (await db.prepare(`
-UPDATE line_auto_reply_configs
-SET last_reply_at = ?, last_inbound_event_id = ?, updated_at = ?
-WHERE group_id = ?
-AND (last_reply_at IS NULL OR last_reply_at <= ?)
-`).bind(nowIso, group.eventId, nowIso, group.groupId, cutoffIso).run()) as any;
-const lockAcquired = !(lockResult && typeof lockResult.changes === "number" && lockResult.changes === 0);
-if (!lockAcquired) {
-await logOutboundAction({
-id: `skip-double-${Date.now()}`,
+scheduleGroupStickerDebounce({
 groupId: group.groupId,
-triggerEventId: group.eventId,
-actionType: "auto-reply-close",
-stickerPackageId: stickerPkg,
-stickerId: stickerStk,
-status: "skipped",
-skipReason: `กันเบิ้ล: มีสติกเกอร์ตอบรับในรอบ ${cooldownMin} นาทีแล้ว (ข้อความ+ภาพรอบเดียวกันได้ 1 ตัว)`,
+eventId: group.eventId,
+replyToken: group.replyToken,
+rawUserId: group.rawUserId,
+senderKey: group.senderKey,
+accessToken: accessToken || undefined,
 });
-} else if (!effectiveToken) {
-await db.prepare(`UPDATE line_auto_reply_configs SET last_reply_at = '2000-01-01T00:00:00.000Z', updated_at = ? WHERE group_id = ?`).bind(nowIso, group.groupId).run().catch(() => { });
-await logOutboundAction({
-id: `fail-token-${Date.now()}`,
-groupId: group.groupId,
-triggerEventId: group.eventId,
-actionType: "auto-reply-close",
-stickerPackageId: stickerPkg,
-stickerId: stickerStk,
-status: "failed",
-skipReason: "ไม่พบ LINE Channel Access Token ในระบบ",
-});
-} else if (group.replyToken) {
-const replyRes = await fetch("https://api.line.me/v2/bot/message/reply", {
-method: "POST",
-headers: { "Content-Type": "application/json", Authorization: `Bearer ${effectiveToken}` },
-body: JSON.stringify({ replyToken: group.replyToken, messages: [{ type: "sticker", packageId: stickerPkg, stickerId: stickerStk }] }),
-}).catch((err) => { console.error("Fetch reply error:", err); return null; });
-if (replyRes && replyRes.ok) {
-await logOutboundAction({
-id: `reply-${Date.now()}`,
-groupId: group.groupId,
-triggerEventId: group.eventId,
-actionType: "auto-reply-close",
-stickerPackageId: stickerPkg,
-stickerId: stickerStk,
-status: "sent",
-skipReason: `✓ ตอบรับสำเร็จ (คูลดาวน์ ${cooldownMin} นาที)`,
-});
-} else {
-await db.prepare(`UPDATE line_auto_reply_configs SET last_reply_at = '2000-01-01T00:00:00.000Z', updated_at = ? WHERE group_id = ?`).bind(nowIso, group.groupId).run().catch(() => { });
-await logOutboundAction({
-id: `fail-${Date.now()}`,
-groupId: group.groupId,
-triggerEventId: group.eventId,
-actionType: "auto-reply-close",
-stickerPackageId: stickerPkg,
-stickerId: stickerStk,
-status: "failed",
-skipReason: `Reply ไม่สำเร็จ (${replyRes ? replyRes.status : "net"}) — คลายล็อกแล้ว ลองใหม่ในข้อความถัดไป`,
-});
-}
-}
-}
-} catch (e: any) {
-await logOutboundAction({
-id: `err-${Date.now()}`,
-groupId: group.groupId,
-triggerEventId: group.eventId,
-actionType: "auto-reply-close",
-stickerPackageId: "11538",
-stickerId: "51626520",
-status: "error",
-skipReason: `Exception: ${e?.message || "unknown"}`,
-}).catch(() => { });
-}
-}
 }
   }
 }));
