@@ -403,14 +403,17 @@ export class FirebaseD1Database {
   }
 
   private async ensureReady() {
-    await this.ensureSqlite();
-    if (!this.hydrated) {
-      this.markReady();
-      await this.hydrateRemote();
-      return;
-    }
-    if (this.remoteHydration) await this.remoteHydration;
-  }
+await this.ensureSqlite();
+if (!this.hydrated) {
+this.markReady();
+await this.hydrateRemote();
+return;
+}
+if (this.remoteHydration) await this.remoteHydration;
+if (Date.now() - this.lastHydratedAt > 10_000) {
+await this.hydrateRemote().catch(() => undefined);
+}
+}
 
   private getRemote() {
     this.remote ??= new FirestoreRest(
@@ -455,11 +458,12 @@ export class FirebaseD1Database {
         const exists = this.sqlite!.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
         if (!exists) continue;
         const columns = (this.sqlite!.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((column) => column.name);
-        const snapshot = await this.withTimeout(remote.list(table));
-        if (!snapshot) continue;
-        if (snapshot.length && columns.length) {
-          const localCount = Number((this.sqlite!.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count?: number } | undefined)?.count ?? 0);
-          if (localCount > 0) continue;
+        const localCount = Number((this.sqlite!.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count?: number } | undefined)?.count ?? 0);
+const liveSync = table === "line_outbound_audit" || table === "employer_inquiries";
+if (localCount > 0 && !liveSync) continue;
+const snapshot = await this.withTimeout(remote.list(table));
+if (!snapshot) continue;
+if (snapshot.length && columns.length) {
           const allowed = new Set(columns);
           const insert = this.sqlite!.prepare(`INSERT OR REPLACE INTO ${table} (${columns.map((column) => `\"${column}\"`).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`);
           const transaction = this.sqlite!.transaction((docs: Row[]) => {
