@@ -123,7 +123,7 @@ export function InquiriesPanel({ data, onRefresh }: InquiriesPanelProps) {
       if (document.visibilityState === "visible") {
         fetchInquiries(true);
       }
-    }, 5000);
+    }, 15000);
     return () => clearInterval(interval);
   }, []);
 

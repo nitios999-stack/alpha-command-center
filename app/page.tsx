@@ -1040,7 +1040,7 @@ export default function Home() {
     queueMicrotask(() => { void loadDashboard(); });
     const refreshTimer = window.setInterval(() => {
       if (document.visibilityState === "visible") void loadDashboard({ silent: true });
-    }, tab === "reports" ? 5_000 : 30_000);
+    }, tab === "reports" ? 15_000 : 60_000);
     const refreshOnVisible = () => {
       if (document.visibilityState === "visible") void loadDashboard({ silent: true });
     };

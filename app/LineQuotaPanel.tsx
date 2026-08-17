@@ -66,7 +66,7 @@ export function LineQuotaPanel() {
     fetchQuota();
     const interval = setInterval(() => {
       fetchQuota();
-    }, 10000); // 10 seconds auto-refresh
+    }, 30000); // 30 seconds auto-refresh
     return () => clearInterval(interval);
   }, [fetchQuota]);
 
