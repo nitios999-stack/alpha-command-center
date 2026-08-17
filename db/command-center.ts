@@ -1793,8 +1793,31 @@ function lineRetryKey(...parts: string[]) {
   return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
 }
 
+let quotaCache: { checkedAt: number; remaining: number } | null = null;
+export async function lineQuotaRemaining(token: string): Promise<number | null> {
+if (!token) return null;
+if (quotaCache && Date.now() - quotaCache.checkedAt < 10 * 60_000) return quotaCache.remaining;
+try {
+const [q, r] = await Promise.all([
+fetch("https://api.line.me/v2/bot/message/quota", { headers: { Authorization: `Bearer ${token}` } }),
+fetch("https://api.line.me/v2/bot/message/quota/consumption", { headers: { Authorization: `Bearer ${token}` } }),
+]);
+if (!q.ok || !r.ok) return null;
+const qj = (await q.json()) as { type?: string; value?: number };
+const rj = (await r.json()) as { totalUsage?: number };
+if (qj.type === "unlimited") { quotaCache = { checkedAt: Date.now(), remaining: Number.MAX_SAFE_INTEGER }; return quotaCache.remaining; }
+const remaining = Math.max(0, (qj.value ?? 0) - (rj.totalUsage ?? 0));
+quotaCache = { checkedAt: Date.now(), remaining };
+return remaining;
+} catch { return null; }
+}
 async function pushLineText(targetGroupId: string, message: string, token: string, retryKey?: string) {
   const cleanId = sanitizeLineId(targetGroupId);
+const remainingQuota = await lineQuotaRemaining(token);
+if (remainingQuota !== null && remainingQuota <= 5) {
+await logOutboundAction({ id: `skip-quota-${Date.now()}`, groupId: cleanId, actionType: "push-quota-guard", status: "skipped", skipReason: `สงวนโควต้า: เหลือ ${remainingQuota} ข้อความ — ข้ามการส่งนี้เพื่อเก็บโควต้าไว้แจ้งเตือนนายจ้าง` }).catch(() => { });
+throw new Error("quota-guard: โควต้า LINE ใกล้หมด");
+}
   const response = await fetch("https://api.line.me/v2/bot/message/push", {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(retryKey ? { "X-Line-Retry-Key": retryKey } : {}) },

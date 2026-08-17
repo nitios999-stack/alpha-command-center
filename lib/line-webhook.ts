@@ -1,4 +1,4 @@
-import { recordLineWebhookCallback, saveLineWebhookEvent, updateLineGroupProfile, consumeAutoReplyQuota, consumeQueuedSticker, logOutboundAction, evaluateShiftCheckIn, buildMissingShiftAlertSummary, buildShiftAttendanceFlexMessage, confirmSlotFromLineCommand, confirmSlotById, batchApproveSlotsWithPhotos, recordEmployerInquiry, isGuardReportMessage, getEffectiveLineToken, database, bangkokNow, linePointSiteIdentifier } from "../db/command-center";
+import { recordLineWebhookCallback, lineQuotaRemaining, saveLineWebhookEvent, updateLineGroupProfile, consumeAutoReplyQuota, consumeQueuedSticker, logOutboundAction, evaluateShiftCheckIn, buildMissingShiftAlertSummary, buildShiftAttendanceFlexMessage, confirmSlotFromLineCommand, confirmSlotById, batchApproveSlotsWithPhotos, recordEmployerInquiry, isGuardReportMessage, getEffectiveLineToken, database, bangkokNow, linePointSiteIdentifier } from "../db/command-center";
 
 type LineEnv = { LINE_CHANNEL_ACCESS_TOKEN?: string; LINE_CHANNEL_SECRET?: string; LINE_REPORT_SENDER_SALT?: string };
 type LineEvent = {
@@ -583,7 +583,11 @@ const groupInfo = (await db.prepare("SELECT group_name FROM line_group_registry 
 const groupDisplayName = groupInfo?.group_name || `กลุ่ม (${group.groupId.slice(-6)})`;
 const senderLabel = senderProfile?.guard_name || (isEmployer ? "นายจ้าง/ลูกค้า" : "สมาชิกในกลุ่ม");
 const alertMsg = `${alertHeader}\n🏢 กลุ่ม: ${groupDisplayName}\n👤 ผู้ส่ง: ${senderLabel}\n💬 ข้อความ:\n"${trimmedText.slice(0, 300)}"\n⏰ เวลา: ${bangkokNow().time} น.`;
-const pushRes = await fetch("https://api.line.me/v2/bot/message/push", {
+const remainingAlertQuota = await lineQuotaRemaining(accessToken).catch(() => null);
+if (remainingAlertQuota !== null && remainingAlertQuota <= 0) {
+await logOutboundAction({ id: `skip-quota-${Date.now()}`, groupId: group.groupId, triggerEventId: group.eventId, actionType: "push-alert", status: "skipped", skipReason: "โควต้า LINE เดือนนี้หมด (429) — แสดงเฉพาะบนเว็บศูนย์สั่งการ" });
+}
+const pushRes = remainingAlertQuota !== null && remainingAlertQuota <= 0 ? null : await fetch("https://api.line.me/v2/bot/message/push", {
 method: "POST",
 headers: { "Content-Type": "application/json", "Authorization": `Bearer ${accessToken}` },
 body: JSON.stringify({ to: commandGroupId, messages: [{ type: "text", text: alertMsg }] }),
