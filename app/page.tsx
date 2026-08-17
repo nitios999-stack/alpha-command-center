@@ -1278,7 +1278,7 @@ export default function Home() {
   useEffect(() => {
     if (tab !== "reports" || !reminderAutoEnabled || !reminderTargetId || !data?.today) return;
     const checkSchedule = () => {
-      const key = `${data.today}-${lineNowTime.slice(0, 5)}`;
+      const key = `${data.today}-${lineNowTime.slice(0, 2)}h${Math.floor(Number(lineNowTime.slice(3, 5)) / 30)}`;
       if (autoReminderKeyRef.current === key) return;
       autoReminderKeyRef.current = key;
       void sendReminder(false, true);

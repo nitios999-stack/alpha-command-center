@@ -81,6 +81,7 @@ async function enrichGroups(groups: GroupEvent[], accessToken: string) {
   }));
 }
 
+const pushMemoryDebounce = new Map<string, number>();
 export function lineEnvironment(): Record<string, string | undefined> {
   return (typeof process !== "undefined" ? process.env : {}) as Record<string, string | undefined>;
 }
@@ -578,7 +579,7 @@ let matchedOaName: string | null = null;
             LIMIT 1
           `).bind(group.groupId, pushDebounceCutoff).first()) as any;
 
-          if (!recentPush) {
+          if (!recentPush && Date.now() - (pushMemoryDebounce.get(group.groupId) || 0) > 5 * 60_000) {
             const groupInfo = (await db.prepare("SELECT group_name FROM line_group_registry WHERE id = ?").bind(group.groupId).first()) as { group_name: string } | null;
             const groupDisplayName = groupInfo?.group_name || `กลุ่ม (${group.groupId.slice(-6)})`;
             const senderLabel = senderProfile?.guard_name || (isEmployer ? "นายจ้าง/ลูกค้า" : "สมาชิกในกลุ่ม");
@@ -596,7 +597,7 @@ let matchedOaName: string | null = null;
               })
             }).catch(() => null);
 
-            if (pushRes && pushRes.ok) {
+            if (pushRes && pushRes.ok) { pushMemoryDebounce.set(group.groupId, Date.now());
               await logOutboundAction({
                 id: `push-${Date.now()}`,
                 groupId: group.groupId,

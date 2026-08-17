@@ -7,7 +7,7 @@ const reminderRunnerUrl = "https://alpha-command-center--alphacommandcenter-d334
 
 export const lineReportReminderScheduler = onSchedule(
   {
-    schedule: "* * * * *",
+    schedule: "*/30 * * * *",
     timeZone: "Asia/Bangkok",
     region: "asia-southeast1",
     timeoutSeconds: 60,
