@@ -670,7 +670,7 @@ status: queuedRes && queuedRes.ok ? "sent" : "failed",
 skipReason: queuedRes && queuedRes.ok ? "✓ ส่งสติกเกอร์จากคิว manual-batch (reply ฟรี)" : "ส่งสติกเกอร์จากคิวไม่สำเร็จ",
 }).catch(() => { });
 }
-} else if (group.replyToken) {
+} else {
 scheduleGroupStickerDebounce({
 groupId: group.groupId,
 eventId: group.eventId,
