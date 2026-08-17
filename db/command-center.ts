@@ -577,7 +577,7 @@ async function initializeDatabase() {
     db.prepare("ALTER TABLE line_webhook_events ADD COLUMN raw_user_id TEXT"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_line_events_report_candidate ON line_webhook_events(group_id, message_type, received_at)"),
   ]);
-  await db.prepare("UPDATE line_auto_reply_configs SET cooldown_minutes = 30 WHERE cooldown_minutes = 3").run().catch(() => { });
+  await db.prepare("UPDATE line_auto_reply_configs SET cooldown_minutes = 2 WHERE cooldown_minutes IN (3, 30)").run().catch(() => { });
   await db.prepare(`
     DELETE FROM employer_inquiries 
     WHERE message_text LIKE '%รปภ%' 
@@ -3068,7 +3068,7 @@ export async function setGroupAutoReply(input: { groupId: string; enabled: boole
 
   await db.prepare(`
     INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, updated_at)
-    VALUES (?, ?, '11538', '51626520', 30, ?)
+    VALUES (?, ?, '11538', '51626520', 2, ?)
     ON CONFLICT(group_id) DO UPDATE SET mode = excluded.mode, updated_at = excluded.updated_at
   `).bind(input.groupId, mode, now).run();
 
@@ -3091,7 +3091,7 @@ export async function setAllGroupsAutoReply(input: { enabled: boolean; actor?: s
     if (g.id === commandGroupId && input.enabled) continue; // Skip command group
     await db.prepare(`
       INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, updated_at)
-      VALUES (?, ?, '11538', '51626520', 30, ?)
+      VALUES (?, ?, '11538', '51626520', 2, ?)
       ON CONFLICT(group_id) DO UPDATE SET mode = excluded.mode, updated_at = excluded.updated_at
     `).bind(g.id, mode, now).run();
   }
