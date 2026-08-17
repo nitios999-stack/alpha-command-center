@@ -649,7 +649,7 @@ skipReason: `งดส่งสติกเกอร์: ผู้ส่งค�
 });
 continue;
 }
-// --- DEFERRED 45s STICKER REPLY (wait for silence, then exactly 1 free reply) ---
+// --- DEFERRED 45s STICKER REPLY (hold webhook so serverless CPU stays alive, then 1 free reply) ---
 const queuedSticker = await consumeQueuedSticker(group.groupId);
 if (queuedSticker && group.replyToken) {
 const queuedToken = accessToken || (await getEffectiveLineToken()) || undefined;
@@ -670,15 +670,102 @@ status: queuedRes && queuedRes.ok ? "sent" : "failed",
 skipReason: queuedRes && queuedRes.ok ? "✓ ส่งสติกเกอร์จากคิว manual-batch (reply ฟรี)" : "ส่งสติกเกอร์จากคิวไม่สำเร็จ",
 }).catch(() => { });
 }
-} else {
-scheduleGroupStickerDebounce({
+} else if (isLastInBatch && group.replyToken) {
+await new Promise((resolve) => setTimeout(resolve, 45_000));
+try {
+const configData = (await db.prepare(`
+SELECT mode, sticker_package_id, sticker_id, cooldown_minutes, last_reply_at
+FROM line_auto_reply_configs
+WHERE group_id = ?
+`).bind(group.groupId).first()) as any;
+if (configData?.mode !== "disabled") {
+let cooldownMin = Number(configData?.cooldown_minutes ?? 2);
+if (!Number.isFinite(cooldownMin) || cooldownMin < 1) cooldownMin = 1;
+if (cooldownMin > 2) cooldownMin = 2;
+const stickerPkg = configData?.sticker_package_id || "11538";
+const stickerStk = configData?.sticker_id || "51626520";
+const nowIso = bangkokNow().iso;
+const cutoffIso = new Date(Date.now() - (cooldownMin * 60_000)).toISOString();
+const effectiveToken = accessToken || (await getEffectiveLineToken()) || undefined;
+await db.prepare(`
+INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, last_reply_at, updated_at)
+VALUES (?, 'ack_only', ?, ?, ?, '2000-01-01T00:00:00.000Z', ?)
+ON CONFLICT(group_id) DO NOTHING
+`).bind(group.groupId, stickerPkg, stickerStk, cooldownMin, nowIso).run().catch(() => { });
+const lockResult = (await db.prepare(`
+UPDATE line_auto_reply_configs
+SET last_reply_at = ?, last_inbound_event_id = ?, updated_at = ?
+WHERE group_id = ?
+AND (last_reply_at IS NULL OR last_reply_at <= ?)
+`).bind(nowIso, group.eventId, nowIso, group.groupId, cutoffIso).run()) as any;
+const lockAcquired = !(lockResult && typeof lockResult.changes === "number" && lockResult.changes === 0);
+if (!lockAcquired) {
+await logOutboundAction({
+id: `skip-double-${Date.now()}`,
 groupId: group.groupId,
-eventId: group.eventId,
-replyToken: group.replyToken,
-rawUserId: group.rawUserId,
-senderKey: group.senderKey,
-accessToken: accessToken || undefined,
+triggerEventId: group.eventId,
+actionType: "auto-reply-close",
+stickerPackageId: stickerPkg,
+stickerId: stickerStk,
+status: "skipped",
+skipReason: `กันเบิ้ล: มีสติกเกอร์ตอบรับในรอบ ${cooldownMin} นาทีแล้ว (รวบยอดข้อความ+ภาพเข้าเวร)`,
 });
+} else if (!effectiveToken) {
+await db.prepare(`UPDATE line_auto_reply_configs SET last_reply_at = '2000-01-01T00:00:00.000Z', updated_at = ? WHERE group_id = ?`).bind(nowIso, group.groupId).run().catch(() => { });
+await logOutboundAction({
+id: `fail-token-${Date.now()}`,
+groupId: group.groupId,
+triggerEventId: group.eventId,
+actionType: "auto-reply-close",
+stickerPackageId: stickerPkg,
+stickerId: stickerStk,
+status: "failed",
+skipReason: "ไม่พบ LINE Channel Access Token ในระบบ",
+});
+} else {
+const replyRes = await fetch("https://api.line.me/v2/bot/message/reply", {
+method: "POST",
+headers: { "Content-Type": "application/json", Authorization: `Bearer ${effectiveToken}` },
+body: JSON.stringify({ replyToken: group.replyToken, messages: [{ type: "sticker", packageId: stickerPkg, stickerId: stickerStk }] }),
+}).catch((err) => { console.error("Fetch reply error:", err); return null; });
+if (replyRes && replyRes.ok) {
+await logOutboundAction({
+id: `reply-${Date.now()}`,
+groupId: group.groupId,
+triggerEventId: group.eventId,
+actionType: "auto-reply-close",
+stickerPackageId: stickerPkg,
+stickerId: stickerStk,
+status: "sent",
+skipReason: `✓ ตอบรับสำเร็จหลังเงียบ 45 วิ (คูลดาวน์ ${cooldownMin} นาที)`,
+});
+} else {
+await db.prepare(`UPDATE line_auto_reply_configs SET last_reply_at = '2000-01-01T00:00:00.000Z', updated_at = ? WHERE group_id = ?`).bind(nowIso, group.groupId).run().catch(() => { });
+await logOutboundAction({
+id: `fail-${Date.now()}`,
+groupId: group.groupId,
+triggerEventId: group.eventId,
+actionType: "auto-reply-close",
+stickerPackageId: stickerPkg,
+stickerId: stickerStk,
+status: "failed",
+skipReason: `Reply ไม่สำเร็จ (${replyRes ? replyRes.status : "net"}) — คลายล็อกแล้ว ลองใหม่ในข้อความถัดไป`,
+});
+}
+}
+}
+} catch (e: any) {
+await logOutboundAction({
+id: `err-${Date.now()}`,
+groupId: group.groupId,
+triggerEventId: group.eventId,
+actionType: "auto-reply-close",
+stickerPackageId: "11538",
+stickerId: "51626520",
+status: "error",
+skipReason: `Exception: ${e?.message || "unknown"}`,
+}).catch(() => { });
+}
 }
   }
 }));
