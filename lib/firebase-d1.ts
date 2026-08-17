@@ -488,6 +488,7 @@ await this.hydrateRemote().catch(() => undefined);
     this.remoteHydration = (async () => {
       await this.ensureSqlite();
       for (const table of TABLES) {
+      if (table === "line_webhook_events" || table === "audit_logs") continue; // skip-hydrate-large-logs
         const exists = this.sqlite!.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
         if (!exists) continue;
         const columns = (this.sqlite!.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((column) => column.name);

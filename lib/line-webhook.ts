@@ -643,7 +643,28 @@ skipReason: `งดส่งสติกเกอร์: ผู้ส่งค�
 });
 continue;
 }
-// --- DEFERRED 45s STICKER REPLY (wait until the guard finishes, then exactly 1 sticker) ---
+// --- DEFERRED 45s STICKER REPLY (free Reply API, exactly 1 after silence) ---
+const queuedSticker = await consumeQueuedSticker(group.groupId);
+if (queuedSticker && group.replyToken) {
+const queuedToken = accessToken || (await getEffectiveLineToken()) || undefined;
+if (queuedToken) {
+const queuedRes = await fetch("https://api.line.me/v2/bot/message/reply", {
+method: "POST",
+headers: { "Content-Type": "application/json", Authorization: `Bearer ${queuedToken}` },
+body: JSON.stringify({ replyToken: group.replyToken, messages: [{ type: "sticker", packageId: queuedSticker.stickerPackageId, stickerId: queuedSticker.stickerId }] }),
+}).catch(() => null);
+await logOutboundAction({
+id: `queued-${Date.now()}`,
+groupId: group.groupId,
+triggerEventId: queuedSticker.queuedId,
+actionType: "manual-batch-queued",
+stickerPackageId: queuedSticker.stickerPackageId,
+stickerId: queuedSticker.stickerId,
+status: queuedRes && queuedRes.ok ? "sent" : "failed",
+skipReason: queuedRes && queuedRes.ok ? "✓ ส่งสติกเกอร์จากคิว manual-batch (reply ฟรี)" : "ส่งสติกเกอร์จากคิวไม่สำเร็จ",
+});
+}
+} else {
 scheduleGroupStickerDebounce({
 groupId: group.groupId,
 eventId: group.eventId,
@@ -653,6 +674,8 @@ senderKey: group.senderKey,
 accessToken: accessToken || undefined,
 });
 }
+  }
 }));
 void schedule;
-return Response.json({ ok: true, accepted: saved.filter((result) => result?.saved).length }
+return Response.json({ ok: true, accepted: saved.filter((result) => result?.saved).length });
+}
