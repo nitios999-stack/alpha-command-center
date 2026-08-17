@@ -3,6 +3,7 @@ runConfig:
   maxInstances: 1
   concurrency: 40
   cpu: 1
+  cpuAlwaysAllocated: true
   memoryMiB: 1024
 env:
   - variable: FIREBASE_PROJECT_ID

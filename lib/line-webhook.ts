@@ -647,7 +647,7 @@ skipReason: `งดส่งสติกเกอร์: ผู้ส่งค�
 });
 continue;
 }
-// --- DEFERRED 45s STICKER REPLY (free Reply API, exactly 1 after silence) ---
+// --- DEFERRED 45s STICKER REPLY (waits for silence, then exactly 1 free reply) ---
 const queuedSticker = await consumeQueuedSticker(group.groupId);
 if (queuedSticker && group.replyToken) {
 const queuedToken = accessToken || (await getEffectiveLineToken()) || undefined;
@@ -666,9 +666,9 @@ stickerPackageId: queuedSticker.stickerPackageId,
 stickerId: queuedSticker.stickerId,
 status: queuedRes && queuedRes.ok ? "sent" : "failed",
 skipReason: queuedRes && queuedRes.ok ? "✓ ส่งสติกเกอร์จากคิว manual-batch (reply ฟรี)" : "ส่งสติกเกอร์จากคิวไม่สำเร็จ",
-});
+}).catch(() => { });
 }
-} else {
+} else if (group.replyToken) {
 scheduleGroupStickerDebounce({
 groupId: group.groupId,
 eventId: group.eventId,
