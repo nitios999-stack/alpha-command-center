@@ -167,6 +167,38 @@ class FirestoreRest {
     return documents;
   }
 
+  async listRecent(table: TableName, field: string, cutoffIso: string): Promise<RemoteDocument[] | null> {
+    if (!this.isConfigured()) return null;
+    const documents: RemoteDocument[] = [];
+    let pageToken = "";
+    do {
+      const suffix = pageToken ? `?pageSize=1000&pageToken=${encodeURIComponent(pageToken)}` : "?pageSize=1000";
+      const response = await this.request(`https://firestore.googleapis.com/v1/projects/${encodeURIComponent(this.projectId!)}/databases/(default)/documents:runQuery${suffix}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          structuredQuery: {
+            from: [{ collectionPath: `command_center/${table}/rows` }],
+            where: { fieldFilter: { field: { fieldPath: field }, op: "GREATER_THAN_OR_EQUAL", value: { stringValue: cutoffIso } } },
+          },
+        }),
+      });
+      if (!response) return null;
+      const payload = (await response.json()) as Array<{ document?: unknown; nextPageToken?: string }>;
+      let next = "";
+      for (const item of payload ?? []) {
+        const document = item?.document;
+        if (document && typeof document === "object" && "name" in document) {
+          const name = String((document as { name?: unknown }).name ?? "");
+          const id = name.split("/").pop() ?? "";
+          if (id) documents.push({ id, data: readFirestoreDocument(document) });
+        }
+        if (item?.nextPageToken) next = item.nextPageToken;
+      }
+      pageToken = next;
+    } while (pageToken);
+    return documents;
+  }
   async set(table: TableName, id: string, row: Row) {
     const response = await this.request(this.documentUrl(table, id), {
       method: "PATCH",
