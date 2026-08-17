@@ -76,22 +76,13 @@ async function createSqliteInstance(): Promise<SqliteDatabaseAdapter> {
 }
 
 const TABLES = [
-  "system_settings",
-  "line_groups",
-  "line_group_registry",
-  "line_webhook_events",
-  "operational_sites",
-  "shift_templates",
-  "coverage_slots",
-  "billing_cases",
-  "audit_logs",
-  "line_auto_reply_configs",
-  "line_sticker_presets",
-  "line_outbound_audit",
-  "line_queued_stickers",
-  "line_manual_batch_jobs",
-  "guard_profiles",
-  "employer_inquiries",
+"system_settings",
+"line_groups",
+"line_group_registry",
+"line_auto_reply_configs",
+"line_outbound_audit",
+"guard_profiles",
+"employer_inquiries",
 ] as const;
 
 type TableName = (typeof TABLES)[number];
