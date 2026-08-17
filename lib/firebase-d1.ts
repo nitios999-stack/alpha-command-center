@@ -531,6 +531,21 @@ if (snapshot.length && columns.length) {
     }
   }
 
+  async pruneOldRows() {
+    await this.ensureSqlite();
+    const cuts: Array<[TableName, string, string]> = [
+      ["line_webhook_events", "received_at", "date('now', '-3 days')"],
+      ["line_outbound_audit", "sent_at", "date('now', '-7 days')"],
+      ["audit_logs", "created_at", "date('now', '-7 days')"],
+    ];
+    for (const [table, col, expr] of cuts) {
+      const before = this.snapshotTables([table]);
+      const res = this.sqlite!.prepare(`DELETE FROM ${table} WHERE ${col} < ${expr} LIMIT 5000`).run();
+      const changed = Number((res as { changes?: number })?.changes ?? 0);
+      if (changed > 0) await this.persist(this.diffSnapshots(before, this.snapshotTables([table])));
+    }
+  }
+
   private snapshotTables(tables: TableName[]) {
     const snapshots = new Map<TableName, Map<string, Row>>();
     for (const table of tables) {

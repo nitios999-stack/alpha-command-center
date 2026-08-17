@@ -655,5 +655,4 @@ accessToken: accessToken || undefined,
 }
 }));
 void schedule;
-return Response.json({ ok: true, accepted: saved.filter((result) => result?.saved).length });
-}
+return Response.json({ ok: true, accepted: saved.filter((result) => result?.saved).length }

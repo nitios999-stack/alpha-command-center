@@ -145,7 +145,7 @@ export function LivePhotoWall({ data, onRefresh, onAction, onOpenDigest }: LiveP
       if (document.visibilityState === "visible") {
         fetchLivePhotos(true);
       }
-    }, 8000);
+    }, 20000);
     return () => clearInterval(interval);
   }, []);
 

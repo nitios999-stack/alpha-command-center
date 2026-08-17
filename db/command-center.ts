@@ -619,6 +619,7 @@ async function initializeDatabase() {
   if (demoSeedEnabled()) await seedDemoLineGroups();
   await syncLineRegistryFromMappings();
   await provisionLinePointRecords();
+await db.pruneOldRows().catch(() => { });
   // Keep cold starts read-light.  Bulk activation scans every LINE group and
   // belongs to the explicit manager action, not the request path for health
   // checks, dashboard reads, or a profile refresh.
