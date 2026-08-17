@@ -530,97 +530,105 @@ let matchedOaName: string | null = null;
       const isAllEmergency = hasAllTag && (!isConfirmedGuard || !isGuardReport || /(ด่วน|ช่วย|เปิด|ติด|หาย|พัง|ร้องเรียน|สอบถาม|รบกวน|นายจ้าง|ผู้จัดการ)/i.test(trimmedText));
 
       // --- ALERT ROUTING RULES ---
-      // 1. Inspector speaking -> DO NOT alert Command Center (avoid duplicate noise)
-      // 2. Employer speaking -> ALWAYS ALERT Command Center (especially if tagging OA, inspector, or asking work)
-      // 3. Guard / Member speaking -> DO NOT alert for "สายตรวจ" keyword (it's part of routine report template footer).
-      //    ONLY alert if guard explicitly mentions an EMPLOYER name (e.g. @THANAKORN) or emergency @all
-      let shouldAlertCommandRoom = false;
-      let alertHeader = "";
-
-      if (isInspector) {
-        shouldAlertCommandRoom = false;
-      } else if (isEmployer) {
-        shouldAlertCommandRoom = true;
-        alertHeader = (typeof matchedOaName !== "undefined" && matchedOaName)
-          ? `🚨 [นายจ้างแท็กเรียก สนง.สายตรวจ / LINE OA: "${matchedOaName}"]`
-          : (matchedInspectorName
-            ? `🚨 [นายจ้างแท็กเรียกสายตรวจ: "${matchedInspectorName}"]`
-            : (matchedEmployerName ? `🚨 [นายจ้างกล่าวถึง: "${matchedEmployerName}"]` : `🚨 [ข้อความจากนายจ้าง/ลูกค้า]`));
-      } else {
-        // Regular guards or unconfirmed members sending messages
-        if (matchedEmployerName) {
-          shouldAlertCommandRoom = true;
-          alertHeader = `🚨 [รปภ. กล่าวถึงนายจ้าง: "${matchedEmployerName}"]`;
-        } else if (isAllEmergency) {
-          shouldAlertCommandRoom = true;
-          alertHeader = `🚨 [รปภ. แท็ก @ALL ฉุกเฉิน]`;
-        }
-      }
-
-      // Send Push Alert to Command Center LINE Group if required (with 5-minute debounce to save quota)
-      if (shouldAlertCommandRoom && trimmedText && !isSummaryCommand && !confirmMatch && accessToken) {
-        recordEmployerInquiry({
-          groupId: group.groupId,
-          senderKey: group.senderKey,
-          senderName: senderProfile?.guard_name,
-          messageText: trimmedText,
-        }).catch(() => { });
-
-        const targetGroupSetting = (await db.prepare(
-          "SELECT value FROM system_settings WHERE key = 'line_reminder_target_group_id'"
-        ).first()) as { value: string } | null;
-
-        if (targetGroupSetting?.value && targetGroupSetting.value !== group.groupId) {
-          // Check if we recently pushed an alert for this group in the last 5 minutes
-          const pushDebounceCutoff = new Date(Date.now() - 5 * 60_000).toISOString();
-          const recentPush = (await db.prepare(`
-            SELECT id FROM line_outbound_audit 
-            WHERE group_id = ? AND action_type = 'push-alert' AND status = 'sent' AND sent_at >= ?
-            LIMIT 1
-          `).bind(group.groupId, pushDebounceCutoff).first()) as any;
-
-          if (!recentPush && Date.now() - (pushMemoryDebounce.get(group.groupId) || 0) > 5 * 60_000) {
-            const groupInfo = (await db.prepare("SELECT group_name FROM line_group_registry WHERE id = ?").bind(group.groupId).first()) as { group_name: string } | null;
-            const groupDisplayName = groupInfo?.group_name || `กลุ่ม (${group.groupId.slice(-6)})`;
-            const senderLabel = senderProfile?.guard_name || (isEmployer ? "นายจ้าง/ลูกค้า" : "สมาชิกในกลุ่ม");
-            const alertMsg = `${alertHeader}\n🏢 กลุ่ม: ${groupDisplayName}\n👤 ผู้ส่ง: ${senderLabel}\n💬 ข้อความ:\n"${trimmedText.slice(0, 300)}"\n⏰ เวลา: ${bangkokNow().time} น.`;
-
-            const pushRes = await fetch("https://api.line.me/v2/bot/message/push", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${accessToken}`
-              },
-              body: JSON.stringify({
-                to: targetGroupSetting.value,
-                messages: [{ type: "text", text: alertMsg }]
-              })
-            }).catch(() => null);
-
-            if (pushRes && pushRes.ok) { pushMemoryDebounce.set(group.groupId, Date.now());
-              await logOutboundAction({
-                id: `push-${Date.now()}`,
-                groupId: group.groupId,
-                triggerEventId: group.eventId,
-                actionType: "push-alert",
-                status: "sent",
-                skipReason: `✓ ส่งแจ้งเตือนศูนย์สั่งการสำเร็จ (${alertHeader})`,
-              });
-            }
-          } else {
-            await logOutboundAction({
-              id: `skip-push-debounce-${Date.now()}`,
-              groupId: group.groupId,
-              triggerEventId: group.eventId,
-              actionType: "push-alert",
-              status: "skipped",
-              skipReason: "งดส่ง Push ซ้ำ: เพิ่งส่งแจ้งเตือนกลุ่มนี้ไปในรอบ 5 นาที (บันทึกเข้าระบบแล้ว ประหยัดโควต้า)",
-            });
-          }
-        }
-      }
-
-      // --- SILENCE RULES FOR BOT ---
+// 1. Inspector speaking -> DO NOT alert Command Center (avoid duplicate noise)
+// 2. Employer speaking -> ALWAYS ALERT Command Center (especially if tagging OA, inspector, or asking work)
+// 3. Guard / Member speaking -> ONLY alert if explicitly mentions an EMPLOYER name or emergency @all
+let shouldAlertCommandRoom = false;
+let alertHeader = "";
+if (isInspector) {
+shouldAlertCommandRoom = false;
+} else if (isEmployer) {
+shouldAlertCommandRoom = true;
+alertHeader = (typeof matchedOaName !== "undefined" && matchedOaName)
+? `🚨 [นายจ้างแท็กเรียก สนง.สายตรวจ / LINE OA: "${matchedOaName}"]`
+: (matchedInspectorName
+? `🚨 [นายจ้างแท็กเรียกสายตรวจ: "${matchedInspectorName}"]`
+: (matchedEmployerName ? `🚨 [นายจ้างกล่าวถึง: "${matchedEmployerName}"]` : `🚨 [ข้อความจากนายจ้าง/ลูกค้า]`));
+} else {
+if (matchedEmployerName) {
+shouldAlertCommandRoom = true;
+alertHeader = `🚨 [รปภ. กล่าวถึงนายจ้าง: "${matchedEmployerName}"]`;
+} else if (isAllEmergency) {
+shouldAlertCommandRoom = true;
+alertHeader = `🚨 [รปภ. แท็ก @ALL ฉุกเฉิน]`;
+}
+}
+// Send Push Alert to Command Center LINE Group (exactly 1 message per 5 minutes per source group)
+if (shouldAlertCommandRoom && trimmedText && !isSummaryCommand && !confirmMatch && accessToken) {
+recordEmployerInquiry({
+groupId: group.groupId,
+senderKey: group.senderKey,
+senderName: senderProfile?.guard_name,
+messageText: trimmedText,
+}).catch(() => { });
+const targetGroupSetting = (await db.prepare(
+"SELECT value FROM system_settings WHERE key = 'line_reminder_target_group_id'"
+).first()) as { value: string } | null;
+let commandGroupId = targetGroupSetting?.value || "";
+if (!commandGroupId) {
+const fallback = (await db.prepare(
+"SELECT id FROM line_group_registry WHERE group_name LIKE '%สายตรวจแอลฟา%' OR group_name LIKE '%สนง.%สายตรวจ%' LIMIT 1"
+).first()) as { id: string } | null;
+commandGroupId = fallback?.id || "";
+}
+if (commandGroupId && commandGroupId !== group.groupId) {
+const pushDebounceCutoff = new Date(Date.now() - 5 * 60_000).toISOString();
+const recentPush = (await db.prepare(`
+SELECT id FROM line_outbound_audit
+WHERE group_id = ? AND action_type = 'push-alert' AND status = 'sent' AND sent_at >= ?
+LIMIT 1
+`).bind(group.groupId, pushDebounceCutoff).first()) as any;
+if (!recentPush) {
+const groupInfo = (await db.prepare("SELECT group_name FROM line_group_registry WHERE id = ?").bind(group.groupId).first()) as { group_name: string } | null;
+const groupDisplayName = groupInfo?.group_name || `กลุ่ม (${group.groupId.slice(-6)})`;
+const senderLabel = senderProfile?.guard_name || (isEmployer ? "นายจ้าง/ลูกค้า" : "สมาชิกในกลุ่ม");
+const alertMsg = `${alertHeader}\n🏢 กลุ่ม: ${groupDisplayName}\n👤 ผู้ส่ง: ${senderLabel}\n💬 ข้อความ:\n"${trimmedText.slice(0, 300)}"\n⏰ เวลา: ${bangkokNow().time} น.`;
+const pushRes = await fetch("https://api.line.me/v2/bot/message/push", {
+method: "POST",
+headers: { "Content-Type": "application/json", "Authorization": `Bearer ${accessToken}` },
+body: JSON.stringify({ to: commandGroupId, messages: [{ type: "text", text: alertMsg }] }),
+}).catch(() => null);
+if (pushRes && pushRes.ok) {
+await logOutboundAction({
+id: `push-${Date.now()}`,
+groupId: group.groupId,
+triggerEventId: group.eventId,
+actionType: "push-alert",
+status: "sent",
+skipReason: `✓ ส่งแจ้งเตือนศูนย์สั่งการสำเร็จ (${alertHeader})`,
+});
+} else {
+await logOutboundAction({
+id: `push-fail-${Date.now()}`,
+groupId: group.groupId,
+triggerEventId: group.eventId,
+actionType: "push-alert",
+status: "failed",
+skipReason: `ส่งแจ้งเตือนไม่สำเร็จ (${pushRes ? pushRes.status : "network"})`,
+});
+}
+} else {
+await logOutboundAction({
+id: `skip-push-debounce-${Date.now()}`,
+groupId: group.groupId,
+triggerEventId: group.eventId,
+actionType: "push-alert",
+status: "skipped",
+skipReason: "งดส่ง Push ซ้ำ: เพิ่งส่งแจ้งเตือนกลุ่มนี้ไปในรอบ 5 นาที (ประหยัดโควต้า)",
+});
+}
+} else {
+await logOutboundAction({
+id: `skip-push-notarget-${Date.now()}`,
+groupId: group.groupId,
+triggerEventId: group.eventId,
+actionType: "push-alert",
+status: "skipped",
+skipReason: "ไม่ได้ส่งแจ้งเตือน: ยังไม่ได้ตั้งกลุ่มสั่งการ หรือกลุ่มต้นทางคือกลุ่มสั่งการ",
+});
+}
+}
+// --- SILENCE RULES FOR BOT ---
 // If sender is Employer or Inspector -> Bot is 100% SILENT! (No sticker)
 if (isEmployer || isInspector) {
 await logOutboundAction({
@@ -635,138 +643,16 @@ skipReason: `งดส่งสติกเกอร์: ผู้ส่งค�
 });
 continue;
 }
-// --- DIRECT SYNCHRONOUS STICKER REPLY (atomic lock + cooldown + failure release, serverless-safe) ---
-const queuedSticker = await consumeQueuedSticker(group.groupId);
-let stickerPackageId = "";
-let stickerId = "";
-let actionType = "auto-reply";
-let triggerEventId = group.eventId;
-if (queuedSticker) {
-stickerPackageId = queuedSticker.stickerPackageId;
-stickerId = queuedSticker.stickerId;
-actionType = "manual-batch-queued";
-triggerEventId = queuedSticker.queuedId;
-const queuedToken = accessToken || (await getEffectiveLineToken()) || undefined;
-if (group.replyToken && queuedToken) {
-const queuedRes = await fetch("https://api.line.me/v2/bot/message/reply", {
-method: "POST",
-headers: { "Content-Type": "application/json", Authorization: `Bearer ${queuedToken}` },
-body: JSON.stringify({ replyToken: group.replyToken, messages: [{ type: "sticker", packageId: stickerPackageId, stickerId: stickerId }] }),
-}).catch(() => null);
-await logOutboundAction({
-id: `queued-${Date.now()}`,
+// --- DEFERRED 45s STICKER REPLY (wait until the guard finishes, then exactly 1 sticker) ---
+scheduleGroupStickerDebounce({
 groupId: group.groupId,
-triggerEventId: triggerEventId,
-actionType: "manual-batch-queued",
-stickerPackageId: stickerPackageId,
-stickerId: stickerId,
-status: queuedRes && queuedRes.ok ? "sent" : "failed",
-skipReason: queuedRes && queuedRes.ok ? "✓ ส่งสติกเกอร์จากคิว manual-batch (reply ฟรี)" : "ส่งสติกเกอร์จากคิวไม่สำเร็จ",
-}).catch(() => { });
-}
-} else {
-const isEligibleForSticker = isLastInBatch && !isEmployer && !isInspector;
-if (isEligibleForSticker) {
-try {
-const configData = (await db.prepare(`
-SELECT mode, sticker_package_id, sticker_id, cooldown_minutes, last_reply_at
-FROM line_auto_reply_configs
-WHERE group_id = ?
-`).bind(group.groupId).first()) as any;
-if (configData?.mode !== "disabled") {
-let cooldownMin = Number(configData?.cooldown_minutes ?? 2);
-if (!Number.isFinite(cooldownMin) || cooldownMin < 1) cooldownMin = 1;
-if (cooldownMin > 2) {
-cooldownMin = 2;
-await db.prepare(`UPDATE line_auto_reply_configs SET cooldown_minutes = 2, updated_at = ? WHERE group_id = ?`).bind(bangkokNow().iso, group.groupId).run().catch(() => { });
-}
-const stickerPkg = configData?.sticker_package_id || "11538";
-const stickerStk = configData?.sticker_id || "51626520";
-const nowIso = bangkokNow().iso;
-const cutoffIso = new Date(Date.now() - cooldownMin * 60_000).toISOString();
-const effectiveToken = accessToken || (await getEffectiveLineToken()) || undefined;
-await db.prepare(`
-INSERT INTO line_auto_reply_configs (group_id, mode, sticker_package_id, sticker_id, cooldown_minutes, last_reply_at, updated_at)
-VALUES (?, 'ack_only', ?, ?, ?, '2000-01-01T00:00:00.000Z', ?)
-ON CONFLICT(group_id) DO NOTHING
-`).bind(group.groupId, stickerPkg, stickerStk, cooldownMin, nowIso).run().catch(() => { });
-const lockResult = (await db.prepare(`
-UPDATE line_auto_reply_configs
-SET last_reply_at = ?, last_inbound_event_id = ?, updated_at = ?
-WHERE group_id = ?
-AND (last_reply_at IS NULL OR last_reply_at <= ?)
-`).bind(nowIso, group.eventId, nowIso, group.groupId, cutoffIso).run()) as any;
-const lockAcquired = !(lockResult && typeof lockResult.changes === "number" && lockResult.changes === 0);
-if (!lockAcquired) {
-await logOutboundAction({
-id: `skip-double-${Date.now()}`,
-groupId: group.groupId,
-triggerEventId: group.eventId,
-actionType: "auto-reply-close",
-stickerPackageId: stickerPkg,
-stickerId: stickerStk,
-status: "skipped",
-skipReason: `กันเบิ้ล: มีสติกเกอร์ตอบรับในรอบ ${cooldownMin} นาทีแล้ว (ข้อความ+ภาพรอบเดียวกันได้ 1 ตัว)`,
-});
-} else if (!effectiveToken) {
-await db.prepare(`UPDATE line_auto_reply_configs SET last_reply_at = '2000-01-01T00:00:00.000Z', updated_at = ? WHERE group_id = ?`).bind(nowIso, group.groupId).run().catch(() => { });
-await logOutboundAction({
-id: `fail-token-${Date.now()}`,
-groupId: group.groupId,
-triggerEventId: group.eventId,
-actionType: "auto-reply-close",
-stickerPackageId: stickerPkg,
-stickerId: stickerStk,
-status: "failed",
-skipReason: "ไม่พบ LINE Channel Access Token ในระบบ",
-});
-} else if (group.replyToken) {
-const replyRes = await fetch("https://api.line.me/v2/bot/message/reply", {
-method: "POST",
-headers: { "Content-Type": "application/json", Authorization: `Bearer ${effectiveToken}` },
-body: JSON.stringify({ replyToken: group.replyToken, messages: [{ type: "sticker", packageId: stickerPkg, stickerId: stickerStk }] }),
-}).catch((err) => { console.error("Fetch reply error:", err); return null; });
-if (replyRes && replyRes.ok) {
-await logOutboundAction({
-id: `reply-${Date.now()}`,
-groupId: group.groupId,
-triggerEventId: group.eventId,
-actionType: "auto-reply-close",
-stickerPackageId: stickerPkg,
-stickerId: stickerStk,
-status: "sent",
-skipReason: `✓ ตอบรับสำเร็จ (คูลดาวน์ฉลาด ${cooldownMin} นาที)`,
-});
-} else {
-await db.prepare(`UPDATE line_auto_reply_configs SET last_reply_at = '2000-01-01T00:00:00.000Z', updated_at = ? WHERE group_id = ?`).bind(nowIso, group.groupId).run().catch(() => { });
-await logOutboundAction({
-id: `fail-${Date.now()}`,
-groupId: group.groupId,
-triggerEventId: group.eventId,
-actionType: "auto-reply-close",
-stickerPackageId: stickerPkg,
-stickerId: stickerStk,
-status: "failed",
-skipReason: `Reply ไม่สำเร็จ (${replyRes ? replyRes.status : "net"}) — คลายล็อกแล้ว ลองใหม่ในข้อความถัดไป`,
+eventId: group.eventId,
+replyToken: group.replyToken,
+rawUserId: group.rawUserId,
+senderKey: group.senderKey,
+accessToken: accessToken || undefined,
 });
 }
-}
-}
-} catch (e: any) {
-await logOutboundAction({
-id: `err-${Date.now()}`,
-groupId: group.groupId,
-triggerEventId: group.eventId,
-actionType: "auto-reply-close",
-stickerPackageId: "11538",
-stickerId: "51626520",
-status: "error",
-skipReason: `Exception: ${e?.message || "unknown"}`,
-}).catch(() => { });
-}
-}
-}
-  }
 }));
 void schedule;
 return Response.json({ ok: true, accepted: saved.filter((result) => result?.saved).length });
