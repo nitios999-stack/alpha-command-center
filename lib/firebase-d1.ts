@@ -355,6 +355,7 @@ export class FirebaseD1Database {
     if (isSchemaBatch) {
       this.markReady();
       await this.hydrateRemote();
+      await this.pruneOversizedTables();
     } else if (affected.size) {
       await this.persist(this.diffSnapshots(before, this.snapshotTables([...affected])));
     }
@@ -481,6 +482,20 @@ if (snapshot.length && columns.length) {
       await this.remoteHydration;
     } finally {
       this.remoteHydration = null;
+    }
+  }
+
+  private async pruneOversizedTables() {
+    if (!this.sqlite) return;
+    const cutoff = new Date(Date.now() - 7 * 86_400_000).toISOString();
+    const jobs: Array<{ sql: string; values: SqlValue[] }> = [
+      { sql: "DELETE FROM line_webhook_events WHERE received_at < ?", values: [cutoff] },
+      { sql: "DELETE FROM line_webhook_events WHERE id NOT IN (SELECT id FROM line_webhook_events ORDER BY received_at DESC LIMIT 3000)", values: [] },
+      { sql: "DELETE FROM line_outbound_audit WHERE sent_at < ?", values: [cutoff] },
+      { sql: "DELETE FROM audit_logs WHERE created_at < ?", values: [cutoff] },
+    ];
+    for (const job of jobs) {
+      try { await this.run(job.sql, job.values); } catch { /* never block startup */ }
     }
   }
 
